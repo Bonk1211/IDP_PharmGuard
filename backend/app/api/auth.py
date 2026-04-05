@@ -2,6 +2,8 @@
 
 from fastapi import APIRouter, UploadFile, File, HTTPException
 
+from app.db.base import get_supabase
+
 router = APIRouter()
 
 
@@ -9,7 +11,6 @@ router = APIRouter()
 async def verify_face(file: UploadFile = File(...)):
     """
     Accept a face crop from the Raspberry Pi and verify the patient.
-
     Returns patient info if recognized, 401 otherwise.
     """
     contents = await file.read()
@@ -17,12 +18,18 @@ async def verify_face(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="Empty image")
 
     # TODO: Implement face recognition against enrolled patients
-    # For now, return a stub patient
-    return {
-        "patient_id": 1,
-        "name": "Test Patient",
-        "verified": True,
-    }
+    # For now, return the first patient as a stub
+    sb = get_supabase()
+    result = sb.table("patients").select("*").limit(1).execute()
+    if result.data:
+        patient = result.data[0]
+        return {
+            "patient_id": patient["id"],
+            "name": patient["name"],
+            "verified": True,
+        }
+
+    raise HTTPException(status_code=401, detail="No patients enrolled")
 
 
 @router.post("/login")

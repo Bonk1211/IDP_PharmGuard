@@ -1,8 +1,10 @@
-const API_BASE = "/api";
+import { supabase } from "./supabase";
 
 export interface SlotInfo {
+  id: number;
   slot: number;
-  medication_name: string | null;
+  name: string | null;
+  description: string | null;
   quantity: number;
   patient_id: number | null;
 }
@@ -16,31 +18,62 @@ export interface IntakeRecord {
 }
 
 export async function fetchSlots(): Promise<SlotInfo[]> {
-  const res = await fetch(`${API_BASE}/inventory/`);
-  if (!res.ok) throw new Error("Failed to fetch slots");
-  return res.json();
+  const { data, error } = await supabase
+    .from("medications")
+    .select("*")
+    .order("slot");
+  if (error) throw error;
+  return data ?? [];
 }
 
-export async function fetchLogs(
-  patientId?: number
-): Promise<IntakeRecord[]> {
-  const url = patientId
-    ? `${API_BASE}/logs/?patient_id=${patientId}`
-    : `${API_BASE}/logs/`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Failed to fetch logs");
-  return res.json();
+export async function fetchLogs(patientId?: number): Promise<IntakeRecord[]> {
+  let query = supabase
+    .from("adherence_logs")
+    .select("*")
+    .order("timestamp", { ascending: false });
+
+  if (patientId !== undefined) {
+    query = query.eq("patient_id", patientId);
+  }
+
+  const { data, error } = await query;
+  if (error) throw error;
+  return data ?? [];
 }
 
 export async function updateSlot(
   slot: number,
   data: { medication_name: string; quantity: number; patient_id: number }
 ): Promise<SlotInfo> {
-  const res = await fetch(`${API_BASE}/inventory/${slot}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error("Failed to update slot");
-  return res.json();
+  const { data: existing } = await supabase
+    .from("medications")
+    .select("id")
+    .eq("slot", slot)
+    .single();
+
+  const payload = {
+    name: data.medication_name,
+    slot,
+    quantity: data.quantity,
+    patient_id: data.patient_id,
+  };
+
+  if (existing) {
+    const { data: updated, error } = await supabase
+      .from("medications")
+      .update(payload)
+      .eq("slot", slot)
+      .select()
+      .single();
+    if (error) throw error;
+    return updated;
+  } else {
+    const { data: inserted, error } = await supabase
+      .from("medications")
+      .insert(payload)
+      .select()
+      .single();
+    if (error) throw error;
+    return inserted;
+  }
 }

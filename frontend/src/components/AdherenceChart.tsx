@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
 import { fetchLogs, type IntakeRecord } from "@/lib/api";
 
 export default function AdherenceChart() {
@@ -9,13 +10,21 @@ export default function AdherenceChart() {
   useEffect(() => {
     fetchLogs().then(setLogs);
 
-    // Real-time updates via WebSocket
-    const ws = new WebSocket(`ws://localhost:8000/api/logs/ws`);
-    ws.onmessage = (event) => {
-      const record: IntakeRecord = JSON.parse(event.data);
-      setLogs((prev) => [record, ...prev]);
+    // Real-time updates via Supabase Realtime
+    const channel = supabase
+      .channel("adherence_logs_changes")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "adherence_logs" },
+        (payload) => {
+          setLogs((prev) => [payload.new as IntakeRecord, ...prev]);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
     };
-    return () => ws.close();
   }, []);
 
   if (logs.length === 0) {

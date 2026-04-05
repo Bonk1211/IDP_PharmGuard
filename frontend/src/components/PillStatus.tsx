@@ -22,7 +22,7 @@ export default function PillStatus({ slots }: Props) {
             Slot {slot.slot}
           </div>
           <div className="mt-1 text-lg font-bold">
-            {slot.medication_name ?? "Empty"}
+            {slot.name ?? "Empty"}
           </div>
           <div className="text-sm text-gray-400">Qty: {slot.quantity}</div>
         </div>

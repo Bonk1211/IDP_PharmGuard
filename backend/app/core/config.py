@@ -4,7 +4,8 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    database_url: str = "sqlite:///./pharmguard.db"
+    supabase_url: str = ""
+    supabase_key: str = ""  # service_role key for backend
     secret_key: str = "dev-secret-change-in-production"
     gemini_api_key: str = ""
 

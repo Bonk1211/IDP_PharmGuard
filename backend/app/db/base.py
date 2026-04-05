@@ -1,21 +1,14 @@
-"""SQLAlchemy engine and session factory."""
+"""Supabase client singleton."""
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from supabase import create_client, Client
 
 from app.core.config import settings
 
-engine = create_engine(settings.database_url, echo=False)
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+_client: Client | None = None
 
 
-class Base(DeclarativeBase):
-    pass
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+def get_supabase() -> Client:
+    global _client
+    if _client is None:
+        _client = create_client(settings.supabase_url, settings.supabase_key)
+    return _client
