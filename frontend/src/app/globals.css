@@ -1,1 +1,104 @@
 @import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=DM+Serif+Display&display=swap');
+
+@theme {
+  --color-olive-50: #f4f6f0;
+  --color-olive-100: #e6ead9;
+  --color-olive-200: #ced6b5;
+  --color-olive-300: #adb888;
+  --color-olive-400: #8f9e63;
+  --color-olive-500: #6b7f42;
+  --color-olive-600: #4a6741;
+  --color-olive-700: #3d5536;
+  --color-olive-800: #33442e;
+  --color-olive-900: #2b3928;
+
+  --color-sand-50: #faf9f7;
+  --color-sand-100: #f3f1ec;
+  --color-sand-200: #e8e4db;
+  --color-sand-300: #d5cfc2;
+
+  --color-status-success: #2d7a3a;
+  --color-status-success-bg: #e8f5ea;
+  --color-status-danger: #c4372a;
+  --color-status-danger-bg: #fce8e6;
+  --color-status-warning: #b86e00;
+  --color-status-warning-bg: #fef3e0;
+  --color-status-info: #1a6fb5;
+  --color-status-info-bg: #e3f2fd;
+
+  --font-sans: 'DM Sans', system-ui, sans-serif;
+  --font-display: 'DM Serif Display', Georgia, serif;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-sand-50);
+  color: #1a1a1a;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-sand-300);
+  border-radius: 3px;
+}
+
+/* Staggered entrance animations */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.animate-fade-up {
+  animation: fadeUp 0.5s ease-out both;
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out both;
+}
+
+.animate-slide-in-right {
+  animation: slideInRight 0.5s ease-out both;
+}
+
+.stagger-1 { animation-delay: 0.05s; }
+.stagger-2 { animation-delay: 0.1s; }
+.stagger-3 { animation-delay: 0.15s; }
+.stagger-4 { animation-delay: 0.2s; }
+.stagger-5 { animation-delay: 0.25s; }
+.stagger-6 { animation-delay: 0.3s; }
