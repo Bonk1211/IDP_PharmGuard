@@ -2,19 +2,24 @@
 
 import { useEffect, useState } from "react";
 import StatCard from "@/components/StatCard";
-import MagazineStatus from "@/components/MagazineStatus";
+import DispenserOverview from "@/components/DispenserOverview";
 import IntakeLog from "@/components/IntakeLog";
 import NeedsAttention from "@/components/NeedsAttention";
 import ActivePatients from "@/components/ActivePatients";
-import { fetchSlots, fetchLogs, type SlotInfo, type IntakeRecord } from "@/lib/api";
+import {
+  fetchAllSlots, fetchLogs, fetchPatients,
+  type SlotInfo, type IntakeRecord, type Patient,
+} from "@/lib/api";
 
 export default function Home() {
   const [slots, setSlots] = useState<SlotInfo[]>([]);
   const [logs, setLogs] = useState<IntakeRecord[]>([]);
+  const [patients, setPatients] = useState<Patient[]>([]);
 
   useEffect(() => {
-    fetchSlots().then(setSlots).catch(() => {});
+    fetchAllSlots().then(setSlots).catch(() => {});
     fetchLogs().then(setLogs).catch(() => {});
+    fetchPatients().then(setPatients).catch(() => {});
   }, []);
 
   const dispensedToday = logs.filter((l) => {
@@ -49,9 +54,9 @@ export default function Home() {
           <StatCard
             icon={<IconPatients />}
             label="Active Patients"
-            value="12"
-            trend={{ value: "+3", direction: "up" }}
-            subtitle="from last week"
+            value={String(patients.length)}
+            trend={{ value: `${patients.length}`, direction: "up" }}
+            subtitle="enrolled in system"
           />
         </div>
         <div className="animate-fade-up stagger-2">
@@ -93,10 +98,10 @@ export default function Home() {
 
       {/* Main content grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* Left column: Magazine + Intake Log */}
+        {/* Left column: Dispensers + Intake Log */}
         <div className="space-y-6 lg:col-span-2">
           <div className="animate-fade-up stagger-3">
-            <MagazineStatus slots={slots} />
+            <DispenserOverview patients={patients} slots={slots} />
           </div>
           <div className="animate-fade-up stagger-4">
             <IntakeLog logs={logs} />

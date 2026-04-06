@@ -1,12 +1,25 @@
 import { supabase } from "./supabase";
 
+export interface Patient {
+  id: number;
+  name: string;
+  gender: string | null;
+  age: number | null;
+  condition: string | null;
+  status: string | null;
+  allergies: string[];
+  contraindications: string[];
+  created_at: string;
+}
+
 export interface SlotInfo {
   id: number;
   slot: number;
   name: string | null;
   description: string | null;
   quantity: number;
-  patient_id: number | null;
+  patient_id: number;
+  patient?: Patient | null;
 }
 
 export interface IntakeRecord {
@@ -15,21 +28,81 @@ export interface IntakeRecord {
   slot: number;
   pill_taken: boolean;
   timestamp: string;
+  patient?: Patient | null;
 }
 
-export async function fetchSlots(): Promise<SlotInfo[]> {
+// ── Patients ──
+
+export async function fetchPatients(): Promise<Patient[]> {
+  const { data, error } = await supabase
+    .from("patients")
+    .select("*")
+    .order("name");
+  if (error) throw error;
+  return data ?? [];
+}
+
+export async function fetchPatient(id: number): Promise<Patient | null> {
+  const { data, error } = await supabase
+    .from("patients")
+    .select("*")
+    .eq("id", id)
+    .single();
+  if (error) return null;
+  return data;
+}
+
+export interface CreatePatientInput {
+  name: string;
+  gender: string;
+  age: number;
+  condition: string;
+  status: string;
+  allergies: string[];
+  contraindications: string[];
+}
+
+export async function createPatient(input: CreatePatientInput): Promise<Patient> {
+  const { data, error } = await supabase
+    .from("patients")
+    .insert(input)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+// ── Medications / Slots (per-patient, 10 slots each) ──
+
+export async function fetchAllSlots(): Promise<SlotInfo[]> {
+  const { data, error } = await supabase
+    .from("medications")
+    .select("*, patient:patients(id, name)")
+    .order("patient_id")
+    .order("slot");
+  if (error) throw error;
+  return (data ?? []).map((row: Record<string, unknown>) => ({
+    ...row,
+    patient: row.patient ?? null,
+  })) as SlotInfo[];
+}
+
+export async function fetchSlotsByPatient(patientId: number): Promise<SlotInfo[]> {
   const { data, error } = await supabase
     .from("medications")
     .select("*")
+    .eq("patient_id", patientId)
     .order("slot");
   if (error) throw error;
   return data ?? [];
 }
 
+// ── Adherence Logs ──
+
 export async function fetchLogs(patientId?: number): Promise<IntakeRecord[]> {
   let query = supabase
     .from("adherence_logs")
-    .select("*")
+    .select("*, patient:patients(id, name)")
     .order("timestamp", { ascending: false });
 
   if (patientId !== undefined) {
@@ -38,16 +111,23 @@ export async function fetchLogs(patientId?: number): Promise<IntakeRecord[]> {
 
   const { data, error } = await query;
   if (error) throw error;
-  return data ?? [];
+  return (data ?? []).map((row: Record<string, unknown>) => ({
+    ...row,
+    patient: row.patient ?? null,
+  })) as IntakeRecord[];
 }
 
+// ── Slot Management (per-patient) ──
+
 export async function updateSlot(
+  patientId: number,
   slot: number,
-  data: { medication_name: string; quantity: number; patient_id: number }
+  data: { medication_name: string; quantity: number }
 ): Promise<SlotInfo> {
   const { data: existing } = await supabase
     .from("medications")
     .select("id")
+    .eq("patient_id", patientId)
     .eq("slot", slot)
     .single();
 
@@ -55,13 +135,14 @@ export async function updateSlot(
     name: data.medication_name,
     slot,
     quantity: data.quantity,
-    patient_id: data.patient_id,
+    patient_id: patientId,
   };
 
   if (existing) {
     const { data: updated, error } = await supabase
       .from("medications")
       .update(payload)
+      .eq("patient_id", patientId)
       .eq("slot", slot)
       .select()
       .single();
@@ -76,4 +157,13 @@ export async function updateSlot(
     if (error) throw error;
     return inserted;
   }
+}
+
+export async function deleteSlot(patientId: number, slot: number): Promise<void> {
+  const { error } = await supabase
+    .from("medications")
+    .delete()
+    .eq("patient_id", patientId)
+    .eq("slot", slot);
+  if (error) throw error;
 }

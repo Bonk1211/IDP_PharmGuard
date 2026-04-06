@@ -23,24 +23,26 @@ export default function NeedsAttention({ logs, slots }: Props) {
     .filter((l) => !l.pill_taken)
     .slice(0, 3)
     .forEach((l) => {
+      const name = l.patient?.name ?? `Patient ${l.patient_id}`;
       alerts.push({
         id: `missed-${l.id}`,
         type: "missed",
         title: "Missed Dose",
-        detail: `Patient ${l.patient_id} · Slot ${l.slot}`,
+        detail: `${name} · Slot ${l.slot}`,
         time: formatRelative(l.timestamp),
       });
     });
 
   // Low stock slots
   slots
-    .filter((s) => s.name && s.quantity > 0 && s.quantity <= 2)
+    .filter((s) => s.name && s.quantity > 0 && s.quantity <= 3)
     .forEach((s) => {
+      const pName = s.patient?.name ?? `Patient ${s.patient_id}`;
       alerts.push({
-        id: `low-${s.slot}`,
+        id: `low-${s.patient_id}-${s.slot}`,
         type: "low_stock",
         title: "Low Stock",
-        detail: `${s.name} · Slot ${s.slot} (${s.quantity} left)`,
+        detail: `${s.name} · ${pName} · Slot ${s.slot} (${s.quantity} left)`,
       });
     });
 
@@ -48,11 +50,12 @@ export default function NeedsAttention({ logs, slots }: Props) {
   slots
     .filter((s) => s.name && s.quantity === 0)
     .forEach((s) => {
+      const pName = s.patient?.name ?? `Patient ${s.patient_id}`;
       alerts.push({
-        id: `empty-${s.slot}`,
+        id: `empty-${s.patient_id}-${s.slot}`,
         type: "empty",
         title: "Out of Stock",
-        detail: `${s.name} · Slot ${s.slot}`,
+        detail: `${s.name} · ${pName} · Slot ${s.slot}`,
       });
     });
 

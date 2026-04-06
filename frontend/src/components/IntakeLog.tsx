@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { supabase } from "@/lib/supabase";
 import type { IntakeRecord } from "@/lib/api";
 
@@ -66,60 +67,72 @@ export default function IntakeLog({ logs: initialLogs }: Props) {
         </div>
       ) : (
         <div className="space-y-2">
-          {logs.slice(0, 8).map((log, idx) => (
-            <div
-              key={log.id}
-              className={`flex items-center justify-between rounded-xl border px-4 py-3 transition-all duration-200 hover:shadow-sm ${
-                log.pill_taken
-                  ? "border-status-success/15 bg-status-success-bg/50"
-                  : "border-status-danger/15 bg-status-danger-bg/50"
-              }`}
-              style={{ animationDelay: `${idx * 0.04}s` }}
-            >
-              <div className="flex items-center gap-3">
-                <div
-                  className={`flex h-8 w-8 items-center justify-center rounded-full ${
-                    log.pill_taken
-                      ? "bg-status-success/10 text-status-success"
-                      : "bg-status-danger/10 text-status-danger"
-                  }`}
-                >
-                  {log.pill_taken ? (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="20 6 9 17 4 12" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  )}
-                </div>
-                <div>
-                  <span className="text-sm font-medium text-gray-800">
-                    Patient {log.patient_id}
-                  </span>
-                  <span className="mx-2 text-gray-300">·</span>
-                  <span className="text-sm text-gray-500">Slot {log.slot}</span>
-                </div>
-              </div>
+          {logs.slice(0, 8).map((log) => {
+            const patientName = log.patient?.name;
 
-              <div className="flex items-center gap-4">
-                <span className="text-xs text-gray-400">
-                  {formatTime(log.timestamp)}
-                </span>
-                <span
-                  className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                    log.pill_taken
-                      ? "bg-status-success/10 text-status-success"
-                      : "bg-status-danger/10 text-status-danger"
-                  }`}
-                >
-                  {log.pill_taken ? "✓ Taken" : "✗ Missed"}
-                </span>
+            return (
+              <div
+                key={log.id}
+                className={`flex items-center justify-between rounded-xl border px-4 py-3 transition-all duration-200 hover:shadow-sm ${
+                  log.pill_taken
+                    ? "border-status-success/15 bg-status-success-bg/50"
+                    : "border-status-danger/15 bg-status-danger-bg/50"
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <div
+                    className={`flex h-8 w-8 items-center justify-center rounded-full ${
+                      log.pill_taken
+                        ? "bg-status-success/10 text-status-success"
+                        : "bg-status-danger/10 text-status-danger"
+                    }`}
+                  >
+                    {log.pill_taken ? (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <line x1="18" y1="6" x2="6" y2="18" />
+                        <line x1="6" y1="6" x2="18" y2="18" />
+                      </svg>
+                    )}
+                  </div>
+                  <div>
+                    {patientName ? (
+                      <Link
+                        href={`/patients/${log.patient_id}`}
+                        className="text-sm font-medium text-gray-800 transition-colors hover:text-olive-700"
+                      >
+                        {patientName}
+                      </Link>
+                    ) : (
+                      <span className="text-sm font-medium text-gray-800">
+                        Patient {log.patient_id}
+                      </span>
+                    )}
+                    <span className="mx-2 text-gray-300">·</span>
+                    <span className="text-sm text-gray-500">Slot {log.slot}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-4">
+                  <span className="text-xs text-gray-400">
+                    {formatTime(log.timestamp)}
+                  </span>
+                  <span
+                    className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
+                      log.pill_taken
+                        ? "bg-status-success/10 text-status-success"
+                        : "bg-status-danger/10 text-status-danger"
+                    }`}
+                  >
+                    {log.pill_taken ? "✓ Taken" : "✗ Missed"}
+                  </span>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>

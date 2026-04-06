@@ -1,21 +1,11 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
-
-// Stub data — will be replaced with Supabase queries
-const PATIENTS = [
-  { id: 1, name: "James Green", condition: "Hypertension", adherence: 94 },
-  { id: 2, name: "Lisa Holloway", condition: "Diabetes", adherence: 87 },
-  { id: 3, name: "Michael Chen", condition: "Asthma", adherence: 72 },
-  { id: 4, name: "Sarah Williams", condition: "Heart Disease", adherence: 98 },
-];
+import { fetchPatients, fetchLogs, type Patient } from "@/lib/api";
 
 function getInitials(name: string) {
-  return name
-    .split(" ")
-    .map((w) => w[0])
-    .join("")
-    .toUpperCase();
+  return name.split(" ").map((w) => w[0]).join("").toUpperCase();
 }
 
 function adherenceColor(pct: number) {
@@ -30,7 +20,35 @@ function adherenceBarColor(pct: number) {
   return "bg-status-danger";
 }
 
+interface PatientWithAdherence extends Patient {
+  adherence: number;
+}
+
 export default function ActivePatients() {
+  const [patients, setPatients] = useState<PatientWithAdherence[]>([]);
+
+  useEffect(() => {
+    async function load() {
+      const [allPatients, allLogs] = await Promise.all([
+        fetchPatients(),
+        fetchLogs(),
+      ]);
+
+      const withAdherence = allPatients.map((p) => {
+        const patientLogs = allLogs.filter((l) => l.patient_id === p.id);
+        const taken = patientLogs.filter((l) => l.pill_taken).length;
+        const total = patientLogs.length;
+        return {
+          ...p,
+          adherence: total > 0 ? Math.round((taken / total) * 100) : 100,
+        };
+      });
+
+      setPatients(withAdherence);
+    }
+    load().catch(() => {});
+  }, []);
+
   return (
     <div className="rounded-2xl border border-sand-200 bg-white p-6">
       <div className="mb-4 flex items-center justify-between">
@@ -50,34 +68,38 @@ export default function ActivePatients() {
         </Link>
       </div>
 
-      <div className="space-y-3">
-        {PATIENTS.map((patient) => (
-          <Link
-            key={patient.id}
-            href={`/patients/${patient.id}`}
-            className="flex items-center gap-3 rounded-xl p-2 transition-colors hover:bg-sand-50"
-          >
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-olive-100 text-xs font-bold text-olive-700">
-              {getInitials(patient.name)}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-gray-800">{patient.name}</p>
-              <p className="text-xs text-gray-400">{patient.condition}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="h-1.5 w-16 overflow-hidden rounded-full bg-gray-100">
-                <div
-                  className={`h-full rounded-full ${adherenceBarColor(patient.adherence)}`}
-                  style={{ width: `${patient.adherence}%` }}
-                />
+      {patients.length === 0 ? (
+        <p className="py-6 text-center text-sm text-gray-400">Loading...</p>
+      ) : (
+        <div className="space-y-3">
+          {patients.slice(0, 5).map((patient) => (
+            <Link
+              key={patient.id}
+              href={`/patients/${patient.id}`}
+              className="flex items-center gap-3 rounded-xl p-2 transition-colors hover:bg-sand-50"
+            >
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-olive-100 text-xs font-bold text-olive-700">
+                {getInitials(patient.name)}
               </div>
-              <span className={`text-xs font-semibold ${adherenceColor(patient.adherence)}`}>
-                {patient.adherence}%
-              </span>
-            </div>
-          </Link>
-        ))}
-      </div>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-gray-800">{patient.name}</p>
+                <p className="text-xs text-gray-400">{patient.condition ?? "—"}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <div className="h-1.5 w-16 overflow-hidden rounded-full bg-gray-100">
+                  <div
+                    className={`h-full rounded-full ${adherenceBarColor(patient.adherence)}`}
+                    style={{ width: `${patient.adherence}%` }}
+                  />
+                </div>
+                <span className={`text-xs font-semibold ${adherenceColor(patient.adherence)}`}>
+                  {patient.adherence}%
+                </span>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
