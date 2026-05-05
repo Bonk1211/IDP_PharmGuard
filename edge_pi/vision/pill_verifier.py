@@ -1,64 +1,119 @@
-"""
-Pill verification using a two-stage YOLO pipeline.
+"""Pill spotter: confirms the dispensing tray is empty after ejection."""
 
-Stage 1 (Spotter) — YOLOv11: Detects whether a pill is present in the tray.
-Stage 2 (Expert)  — YOLOv8:  Classifies the pill type for medication matching.
-"""
+from __future__ import annotations
 
 import logging
+import time
+from typing import Any
+
+import numpy as np
+
+try:
+    from picamera2 import Picamera2  # type: ignore[import-not-found]
+
+    _HAS_PICAMERA2 = True
+except ImportError:
+    _HAS_PICAMERA2 = False
+
+import cv2
+from ultralytics import YOLO
 
 log = logging.getLogger(__name__)
 
-# Model paths — place .pt files in edge_pi/models/
-SPOTTER_MODEL = "models/spotter_yolov11.pt"
-EXPERT_MODEL = "models/expert_yolov8.pt"
+EMPTY_FRAME_STREAK = 3
 
 
 class PillVerifier:
-    def __init__(self) -> None:
-        self.spotter = None
-        self.expert = None
-        self._load_models()
+    def __init__(
+        self,
+        model_path: str = "models/spotter.pt",
+        camera_index: int = 0,
+        conf_thresh: float = 0.5,
+    ) -> None:
+        self.model_path = model_path
+        self.camera_index = camera_index
+        self.conf_thresh = conf_thresh
+        self._model: YOLO | None = None
+        self._cap: Any | None = None
+        self._using_picamera = False
 
-    def _load_models(self) -> None:
-        try:
-            from ultralytics import YOLO
+    def _ensure_model(self) -> None:
+        if self._model is None:
+            log.info("Loading YOLO spotter from %s", self.model_path)
+            self._model = YOLO(self.model_path)
 
-            self.spotter = YOLO(SPOTTER_MODEL)
-            self.expert = YOLO(EXPERT_MODEL)
-            log.info("Vision models loaded")
-        except Exception:
-            log.warning("Could not load YOLO models — running in stub mode")
+    def _ensure_camera(self) -> None:
+        if self._cap is not None:
+            return
+        if _HAS_PICAMERA2:
+            cam = Picamera2(self.camera_index)
+            cam.configure(cam.create_preview_configuration(main={"format": "RGB888"}))
+            cam.start()
+            self._cap = cam
+            self._using_picamera = True
+            log.info("Tray camera initialized via picamera2 (index=%d)", self.camera_index)
+        else:
+            cap = cv2.VideoCapture(self.camera_index)
+            if not cap.isOpened():
+                raise RuntimeError(f"Cannot open camera index {self.camera_index}")
+            self._cap = cap
+            log.info("Tray camera initialized via cv2.VideoCapture (index=%d)", self.camera_index)
 
-    def detect_pill(self, frame) -> list[dict]:
-        """Run the spotter model on a camera frame. Returns list of detections."""
-        if self.spotter is None:
-            return []
-        results = self.spotter(frame, verbose=False)
-        detections = []
-        for r in results:
-            for box in r.boxes:
-                detections.append(
-                    {
-                        "class": int(box.cls[0]),
-                        "confidence": float(box.conf[0]),
-                        "bbox": box.xyxy[0].tolist(),
-                    }
-                )
-        return detections
-
-    def classify_pill(self, frame) -> str | None:
-        """Run the expert classifier on a cropped pill image."""
-        if self.expert is None:
+    def _read_frame(self) -> np.ndarray | None:
+        if self._cap is None:
             return None
-        results = self.expert(frame, verbose=False)
-        if results and results[0].probs is not None:
-            top_class = int(results[0].probs.top1)
-            return results[0].names[top_class]
-        return None
+        if self._using_picamera:
+            frame = self._cap.capture_array()
+            # picamera2 RGB888 -> BGR for ultralytics/cv2 consistency
+            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        ok, frame = self._cap.read()
+        return frame if ok else None
 
-    def confirm_tray_empty(self) -> bool:
-        """Capture a frame and check that no pill remains in the tray."""
-        # TODO: Capture frame from tray camera
-        log.info("Checking tray — stub: assuming empty")
-        return True
+    def _has_pill(self, frame: np.ndarray) -> bool:
+        assert self._model is not None
+        results = self._model(frame, verbose=False)
+        for r in results:
+            if r.boxes is None:
+                continue
+            for box in r.boxes:
+                if float(box.conf[0]) >= self.conf_thresh:
+                    return True
+        return False
+
+    def confirm_tray_empty(self, timeout_s: float = 5.0) -> bool:
+        """Return True once `EMPTY_FRAME_STREAK` consecutive empty frames are seen."""
+        self._ensure_model()
+        try:
+            self._ensure_camera()
+        except Exception:
+            log.exception("Tray camera initialization failed")
+            return False
+
+        deadline = time.time() + timeout_s
+        empty_streak = 0
+        while time.time() < deadline:
+            frame = self._read_frame()
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            if self._has_pill(frame):
+                empty_streak = 0
+            else:
+                empty_streak += 1
+                if empty_streak >= EMPTY_FRAME_STREAK:
+                    log.info("Tray confirmed empty (%d consecutive frames)", empty_streak)
+                    return True
+        log.warning("Tray-empty confirmation timed out after %.1fs", timeout_s)
+        return False
+
+    def close(self) -> None:
+        if self._cap is None:
+            return
+        try:
+            if self._using_picamera:
+                self._cap.stop()
+                self._cap.close()
+            else:
+                self._cap.release()
+        finally:
+            self._cap = None

@@ -13,7 +13,7 @@ venv/
 .env.*.local
 
 # Models (large binary files)
-*.pt
+ml/**/*.pt
 *.onnx
 *.engine
 
@@ -34,3 +34,13 @@ Thumbs.db
 
 # Docker
 *.log
+
+# ML training assets (large, dev-only)
+ml/datasets/
+ml/**/Medicine_Images/
+ml/**/train/
+*.zip
+
+# Pi runtime venv
+edge_pi/.venv/
+edge_pi/.env
