@@ -1,0 +1,4 @@
+# Cross-platform dev/test deps. Use 'pip install -r requirements.txt -r requirements-dev.txt' on Pi;
+# on Mac/Linux dev box use ONLY this file (skip requirements.txt — picamera2 + rpi-lgpio are Pi-only).
+pytest>=7.4,<9.0
+pytest-mock>=3.12,<4.0

@@ -1,8 +1,12 @@
 """Adherence log endpoints — record and query intake events."""
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+import hmac
+
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from app.core.config import settings
+from app.core.security import verify_device_token
 from app.db.base import get_supabase
 
 router = APIRouter()
@@ -17,7 +21,7 @@ class IntakeLog(BaseModel):
 _ws_clients: list[WebSocket] = []
 
 
-@router.post("/")
+@router.post("/", dependencies=[Depends(verify_device_token)])
 async def create_log(log: IntakeLog):
     """Record a new intake event from the Raspberry Pi."""
     sb = get_supabase()
@@ -45,7 +49,7 @@ async def create_log(log: IntakeLog):
     return record
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(verify_device_token)])
 async def list_logs(patient_id: int | None = None):
     """Query intake logs, optionally filtered by patient."""
     sb = get_supabase()
@@ -57,8 +61,22 @@ async def list_logs(patient_id: int | None = None):
 
 
 @router.websocket("/ws")
-async def logs_websocket(ws: WebSocket):
-    """WebSocket for real-time intake notifications to the dashboard."""
+async def logs_websocket(ws: WebSocket, token: str = Query(...)):
+    """WebSocket for real-time intake notifications to the dashboard.
+
+    Requires ?token=<device_token> query parameter — HTTPBearer does not
+    apply to WebSocket connections natively.
+    """
+    valid_tokens = settings.device_tokens_set
+    if not valid_tokens:
+        await ws.close(code=1008)
+        return
+
+    authenticated = any(hmac.compare_digest(token, t) for t in valid_tokens)
+    if not authenticated:
+        await ws.close(code=1008)
+        return
+
     await ws.accept()
     _ws_clients.append(ws)
     try:

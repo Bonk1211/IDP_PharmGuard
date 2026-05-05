@@ -1,8 +1,9 @@
 """Inventory endpoints — manage the 10-slot magazine per dispenser."""
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.core.security import verify_device_token
 from app.db.base import get_supabase
 
 router = APIRouter()
@@ -14,7 +15,7 @@ class SlotUpdate(BaseModel):
     patient_id: int
 
 
-@router.get("/")
+@router.get("/", dependencies=[Depends(verify_device_token)])
 async def list_slots():
     """Return the current state of all 10 magazine slots."""
     sb = get_supabase()
@@ -22,7 +23,7 @@ async def list_slots():
     return result.data
 
 
-@router.get("/next-dispense")
+@router.get("/next-dispense", dependencies=[Depends(verify_device_token)])
 async def next_dispense():
     """
     Determine the next slot that needs dispensing.
@@ -48,7 +49,7 @@ async def next_dispense():
     }
 
 
-@router.get("/{slot}")
+@router.get("/{slot}", dependencies=[Depends(verify_device_token)])
 async def get_slot(slot: int):
     sb = get_supabase()
     result = sb.table("medications").select("*").eq("slot", slot).execute()
@@ -57,7 +58,7 @@ async def get_slot(slot: int):
     return result.data[0]
 
 
-@router.put("/{slot}")
+@router.put("/{slot}", dependencies=[Depends(verify_device_token)])
 async def update_slot(slot: int, data: SlotUpdate):
     """Assign a medication + patient to a magazine slot (refill operation)."""
     if slot < 0 or slot > 9:
