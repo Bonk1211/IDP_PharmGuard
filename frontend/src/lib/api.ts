@@ -195,3 +195,66 @@ export async function enrollFace(
   }
   return resp.json();
 }
+
+// ── Alerts (Phase 5 may not have shipped the table yet — degrade gracefully) ──
+
+export type AlertSeverity = "info" | "warning" | "critical";
+
+// Open-ended union: forward-compat with whatever taxonomy Phase 5 settles on.
+export type AlertKind =
+  | "low_stock"
+  | "out_of_stock"
+  | "expiring_soon"
+  | "expired"
+  | "missed_dose"
+  | "temperature"
+  | "device_offline"
+  | (string & {}); // accept unknown strings, preserve literal autocomplete
+
+export interface Alert {
+  id: number | string;
+  kind: AlertKind;
+  severity: AlertSeverity;
+  message: string;
+  patient_id: number | null;
+  slot: number | null;
+  dispenser_id: string | null;
+  created_at: string;
+  acknowledged_at: string | null;
+}
+
+/**
+ * Fetch the most recent alerts from `public.alerts`.
+ *
+ * The table is created in Phase 5 (sensors + alerts). Until that lands on
+ * `main`, the request will fail with a "relation does not exist" error
+ * (PostgREST code 42P01) or a schema-cache miss (PGRST205). We treat any
+ * of those as "empty list" so the dashboard doesn't error out before
+ * Phase 5 merges.
+ */
+export async function fetchAlerts(): Promise<Alert[]> {
+  try {
+    const { data, error } = await supabase
+      .from("alerts")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (error) {
+      const msg = (error.message ?? "").toLowerCase();
+      if (
+        error.code === "42P01" ||
+        error.code === "PGRST205" ||
+        msg.includes("does not exist") ||
+        msg.includes("not found") ||
+        msg.includes("schema cache")
+      ) {
+        return [];
+      }
+      throw error;
+    }
+    return (data ?? []) as Alert[];
+  } catch {
+    // Network failure / unknown — never break the dashboard for an optional feed.
+    return [];
+  }
+}
