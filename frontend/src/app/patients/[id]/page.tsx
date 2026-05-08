@@ -108,9 +108,17 @@ export default function PatientDetailPage() {
                   {patient.name}
                 </h1>
               </div>
-              <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusStyle(patient.status ?? "Active")}`}>
-                {patient.status ?? "Active"}
-              </span>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusStyle(patient.status ?? "Active")}`}>
+                  {patient.status ?? "Active"}
+                </span>
+                <Link
+                  href={`/patients/${patient.id}/enroll`}
+                  className="inline-flex items-center gap-1 rounded-full border border-olive-300 bg-olive-50 px-3 py-1 text-xs font-medium text-olive-700 hover:bg-olive-100"
+                >
+                  {patient.face_embedding ? "Re-enrol Face" : "Enrol Face"}
+                </Link>
+              </div>
             </div>
 
             <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 sm:grid-cols-4">

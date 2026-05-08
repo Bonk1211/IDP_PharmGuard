@@ -18,7 +18,7 @@ import requests
 from config import settings
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
-from vision import CameraSource, IntakeMonitor, PillVerifier, open_camera
+from vision import CameraSource, IntakeMonitor, LivenessDetector, PillVerifier, open_camera
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,18 +39,21 @@ def _build_session() -> requests.Session:
     return s
 
 
-def authenticate_patient(face_crop_path: str) -> dict | None:
-    """Send a face crop to the backend and return patient info or None."""
+def authenticate_patient(detector: LivenessDetector) -> dict | None:
+    """Capture a live (post-blink) face crop, send to backend, return patient or None."""
     assert session is not None, "session not initialized; call run() first"
-    with open(face_crop_path, "rb") as f:
-        resp = session.post(
-            f"{settings.BACKEND_URL}/api/auth/verify-face",
-            files={"file": ("face.jpg", f, "image/jpeg")},
-            timeout=10,
-        )
+    crop_bytes = detector.capture_live_face(timeout_s=15.0)
+    if crop_bytes is None:
+        log.warning("No live face captured")
+        return None
+    resp = session.post(
+        f"{settings.BACKEND_URL}/api/auth/verify-face",
+        files={"file": ("face.jpg", crop_bytes, "image/jpeg")},
+        timeout=10,
+    )
     if resp.status_code == 200:
         return resp.json()
-    log.warning("Authentication failed: %s", resp.text)
+    log.warning("Authentication failed (%d): %s", resp.status_code, resp.text)
     return None
 
 
@@ -135,6 +138,7 @@ def run() -> None:
 
     verifier = PillVerifier(camera=cam_a)
     monitor = IntakeMonitor(camera=cam_b)
+    liveness = LivenessDetector(camera=cam_b)
 
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
@@ -154,6 +158,26 @@ def run() -> None:
             slot = task["slot"]
 
             log.info("Dispensing slot %d for patient %d", slot, patient_id)
+
+            # Right-patient gate: capture a live face on cam_b, verify against
+            # backend, and only proceed if the matched patient_id equals the
+            # scheduled one. Stub-mode skips this entirely (no falsified
+            # telemetry: pill_taken=False forced below).
+            auth = None if hardware_stubbed else authenticate_patient(liveness)
+            if not hardware_stubbed and auth is None:
+                log.warning(
+                    "Skipping cycle: authentication failed for slot %d", slot
+                )
+                time.sleep(settings.POLL_INTERVAL_S)
+                continue
+            if auth is not None and auth.get("patient_id") != patient_id:
+                log.warning(
+                    "Authenticated patient_id=%s does not match scheduled %d; skipping cycle",
+                    auth.get("patient_id"),
+                    patient_id,
+                )
+                time.sleep(settings.POLL_INTERVAL_S)
+                continue
 
             magazine.rotate_to(slot)
             ejector.push()

@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     device_tokens: str = ""
     default_dispenser_id: str = "dispenser-001"
+    face_match_tolerance: float = 0.6
 
     model_config = {"env_file": ".env"}
 

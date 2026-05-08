@@ -10,6 +10,7 @@ export interface Patient {
   allergies: string[];
   contraindications: string[];
   created_at: string;
+  face_embedding: number[] | null;       // 128-D when enrolled, NULL otherwise
 }
 
 export interface SlotInfo {
@@ -171,4 +172,26 @@ export async function deleteSlot(patientId: number, slot: number): Promise<void>
     .eq("patient_id", patientId)
     .eq("slot", slot);
   if (error) throw error;
+}
+
+// ── Face enrolment (FastAPI) ──
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+
+export async function enrollFace(
+  patientId: number,
+  file: File,
+): Promise<{ ok: boolean; embedding_dim: number }> {
+  const fd = new FormData();
+  fd.append("patient_id", String(patientId));
+  fd.append("file", file);
+  const resp = await fetch(`${API_BASE_URL}/api/auth/enroll-face`, {
+    method: "POST",
+    body: fd,
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Enrol failed (${resp.status}): ${text}`);
+  }
+  return resp.json();
 }
