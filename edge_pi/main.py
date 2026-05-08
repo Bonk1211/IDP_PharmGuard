@@ -62,8 +62,20 @@ def authenticate_patient(detector: LivenessDetector) -> dict | None:
     return None
 
 
-def report_intake(patient_id: int, slot: int, verified: bool) -> None:
-    """POST an adherence log to the backend."""
+def report_intake(
+    patient_id: int,
+    slot: int,
+    verified: bool,
+    confidence: float | None = None,
+) -> None:
+    """POST an adherence log to the backend.
+
+    Phase 9: ``confidence`` (when not None) is the maximum YOLO observation
+    seen during ``PillVerifier.confirm_tray_empty`` and is sent as
+    ``confidence_score`` so the backend can populate the column added in
+    Phase 1. Stub-mode and pre-Phase-9 callers omit the kwarg → no field in
+    the body → backend stores NULL (the [0,1] CHECK allows NULL).
+    """
     assert session is not None, "session not initialized; call run() first"
     payload: dict = {
         "patient_id": patient_id,
@@ -72,6 +84,10 @@ def report_intake(patient_id: int, slot: int, verified: bool) -> None:
     }
     if settings.DISPENSER_ID:
         payload["dispenser_id"] = settings.DISPENSER_ID
+    # ── Phase 9: confidence telemetry ──
+    if confidence is not None:
+        payload["confidence_score"] = float(confidence)
+    # ── /Phase 9 ──
     session.post(
         f"{settings.BACKEND_URL}/api/logs/",
         json=payload,
@@ -295,12 +311,19 @@ def run() -> None:
             # pill_taken=True, so the unlock branch is unreachable in stub mode.
             if hardware_stubbed:
                 pill_taken_actual = False
+                # ── Phase 9: stub confidence ──
+                # Stub branch reports confidence=None → backend stores NULL
+                # (CHECK allows NULL). HI-012 invariant preserved.
+                pill_conf: float | None = None
+                # ── /Phase 9 ──
                 t_pillid = t_diverter = t_drawer = t_eject
                 log.info(
                     "Stub mode: skipping vision verify, diverter, drawer_lock, swallow watch"
                 )
             else:
-                pill_id_pass = verifier.confirm_tray_empty()
+                # ── Phase 9: capture YOLO confidence on tray verify ──
+                pill_id_pass, pill_conf = verifier.confirm_tray_empty(return_confidence=True)
+                # ── /Phase 9 ──
                 t_pillid = time.perf_counter()
                 if pill_id_pass:
                     diverter.deliver()
@@ -321,7 +344,14 @@ def run() -> None:
                     pill_taken_actual = False
             # --- /Phase 4 ------------------------------------------------------
 
-            report_intake(patient_id, slot, verified=pill_taken_actual)
+            # ── Phase 9: include confidence in adherence log when available ──
+            report_intake(
+                patient_id,
+                slot,
+                verified=pill_taken_actual,
+                confidence=pill_conf,
+            )
+            # ── /Phase 9 ──
             t_log = time.perf_counter()
             log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
 

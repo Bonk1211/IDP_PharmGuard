@@ -39,6 +39,8 @@ Thumbs.db
 ml/datasets/
 ml/**/Medicine_Images/
 ml/**/train/
+# Phase 9: operator-supplied labelled accuracy benches live here, gitignored
+ml/**/test_data/
 *.zip
 
 # Pi runtime venv
