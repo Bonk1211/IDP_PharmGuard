@@ -192,8 +192,8 @@ That is the smallest end-to-end loop that proves "zero-touch correct dispensing 
 | # | Phase | Description | Status | Parallel | Depends | PRP Plan |
 |---|---|---|---|---|---|---|
 | 1 | Schema + telemetry hardening | Add `dispenser_id`, `expiry_date`, `pills_per_dose` columns; harden `/api/logs` + `/api/inventory` for new fields | complete | with 2 | - | [completed/schema-telemetry-hardening.plan.md](../plans/completed/schema-telemetry-hardening.plan.md) · [report](../reports/schema-telemetry-hardening-report.md) |
-| 2 | Dual-camera refactor | Refactor `pill_verifier` + `intake_monitor` to accept injected camera handles; verify two CSI cams on Pi 5 simultaneously | pending | with 1 | - | - |
-| 3 | Face ID end-to-end | Replace 501 stub at `/api/auth/verify-face`; add enrolment endpoint + liveness check on Pi | pending | - | 1 | - |
+| 2 | Dual-camera refactor | Refactor `pill_verifier` + `intake_monitor` to accept injected camera handles; verify two CSI cams on Pi 5 simultaneously | in-progress (code complete; Pi hardware bench pending operator — see report) | with 1 | - | [completed/dual-camera-refactor.plan.md](../plans/completed/dual-camera-refactor.plan.md) · [report](../reports/dual-camera-refactor-report.md) |
+| 3 | Face ID end-to-end | Replace 501 stub at `/api/auth/verify-face`; add enrolment endpoint + liveness check on Pi | in-progress | - | 1 | [face-id-end-to-end.plan.md](../plans/face-id-end-to-end.plan.md) |
 | 4 | Diverter + drawer-lock hardware | New `hardware/diverter.py` + `hardware/drawer_lock.py`; wire into `main.py` cycle | pending | with 5 | 2 | - |
 | 5 | Sensor + alerts | Temperature sensor module + expiry/low-stock alert endpoints + WS broadcast | pending | with 4 | 1 | - |
 | 6 | End-to-end bench loop | Stitch all modules in `edge_pi/main.py`; run scripted 200-cycle bench; record metrics | pending | - | 3, 4 | - |

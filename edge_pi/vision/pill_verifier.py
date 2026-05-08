@@ -4,19 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
 
 import numpy as np
-
-try:
-    from picamera2 import Picamera2  # type: ignore[import-not-found]
-
-    _HAS_PICAMERA2 = True
-except ImportError:
-    _HAS_PICAMERA2 = False
-
-import cv2
 from ultralytics import YOLO
+
+from vision.camera import CameraSource, open_camera
 
 log = logging.getLogger(__name__)
 
@@ -29,13 +21,14 @@ class PillVerifier:
         model_path: str = "models/spotter.pt",
         camera_index: int = 0,
         conf_thresh: float = 0.5,
+        camera: CameraSource | None = None,
     ) -> None:
         self.model_path = model_path
         self.camera_index = camera_index
         self.conf_thresh = conf_thresh
         self._model: YOLO | None = None
-        self._cap: Any | None = None
-        self._using_picamera = False
+        self._source: CameraSource | None = camera
+        self._owns_source = camera is None
 
     def _ensure_model(self) -> None:
         if self._model is None:
@@ -43,31 +36,12 @@ class PillVerifier:
             self._model = YOLO(self.model_path)
 
     def _ensure_camera(self) -> None:
-        if self._cap is not None:
+        if self._source is not None:
             return
-        if _HAS_PICAMERA2:
-            cam = Picamera2(self.camera_index)
-            cam.configure(cam.create_preview_configuration(main={"format": "RGB888"}))
-            cam.start()
-            self._cap = cam
-            self._using_picamera = True
-            log.info("Tray camera initialized via picamera2 (index=%d)", self.camera_index)
-        else:
-            cap = cv2.VideoCapture(self.camera_index)
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera index {self.camera_index}")
-            self._cap = cap
-            log.info("Tray camera initialized via cv2.VideoCapture (index=%d)", self.camera_index)
+        self._source = open_camera(self.camera_index)
 
     def _read_frame(self) -> np.ndarray | None:
-        if self._cap is None:
-            return None
-        if self._using_picamera:
-            frame = self._cap.capture_array()
-            # picamera2 RGB888 -> BGR for ultralytics/cv2 consistency
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        ok, frame = self._cap.read()
-        return frame if ok else None
+        return self._source.read_frame() if self._source is not None else None
 
     def _has_pill(self, frame: np.ndarray) -> bool:
         assert self._model is not None
@@ -107,13 +81,6 @@ class PillVerifier:
         return False
 
     def close(self) -> None:
-        if self._cap is None:
-            return
-        try:
-            if self._using_picamera:
-                self._cap.stop()
-                self._cap.close()
-            else:
-                self._cap.release()
-        finally:
-            self._cap = None
+        if self._source is not None and self._owns_source:
+            self._source.close()
+        self._source = None

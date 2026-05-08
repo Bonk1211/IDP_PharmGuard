@@ -16,12 +16,7 @@ import cv2
 import mediapipe as mp
 import numpy as np
 
-try:
-    from picamera2 import Picamera2  # type: ignore[import-not-found]
-
-    _HAS_PICAMERA2 = True
-except ImportError:
-    _HAS_PICAMERA2 = False
+from vision.camera import CameraSource, open_camera
 
 log = logging.getLogger(__name__)
 
@@ -70,11 +65,10 @@ def _dist(p1: Any, p2: Any, w: int, h: int) -> float:
 
 
 class IntakeMonitor:
-    def __init__(self, camera_index: int = 1, camera: Any | None = None) -> None:
+    def __init__(self, camera_index: int = 1, camera: CameraSource | None = None) -> None:
         self.camera_index = camera_index
-        self._cap: Any | None = camera
-        self._using_picamera = False
-        self._owns_camera = camera is None
+        self._source: CameraSource | None = camera
+        self._owns_source = camera is None
 
         self._face_mesh = mp.solutions.face_mesh.FaceMesh(
             max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5
@@ -85,30 +79,12 @@ class IntakeMonitor:
 
     # ---- camera ----
     def _ensure_camera(self) -> None:
-        if self._cap is not None:
+        if self._source is not None:
             return
-        if _HAS_PICAMERA2:
-            cam = Picamera2(self.camera_index)
-            cam.configure(cam.create_preview_configuration(main={"format": "RGB888"}))
-            cam.start()
-            self._cap = cam
-            self._using_picamera = True
-            log.info("Intake camera initialized via picamera2 (index=%d)", self.camera_index)
-        else:
-            cap = cv2.VideoCapture(self.camera_index)
-            if not cap.isOpened():
-                raise RuntimeError(f"Cannot open camera index {self.camera_index}")
-            self._cap = cap
-            log.info("Intake camera initialized via cv2.VideoCapture (index=%d)", self.camera_index)
+        self._source = open_camera(self.camera_index)
 
     def _read_frame(self) -> np.ndarray | None:
-        if self._cap is None:
-            return None
-        if self._using_picamera:
-            frame = self._cap.capture_array()
-            return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-        ok, frame = self._cap.read()
-        return frame if ok else None
+        return self._source.read_frame() if self._source is not None else None
 
     # ---- pose & confidence calculators (ported from main5.py) ----
     def _head_pitch(self, lms: list[Any], w: int, h: int) -> float:
@@ -290,14 +266,8 @@ class IntakeMonitor:
         return False
 
     def close(self) -> None:
-        if self._cap is not None and self._owns_camera:
-            try:
-                if self._using_picamera:
-                    self._cap.stop()
-                    self._cap.close()
-                else:
-                    self._cap.release()
-            finally:
-                self._cap = None
+        if self._source is not None and self._owns_source:
+            self._source.close()
+        self._source = None
         self._face_mesh.close()
         self._hands.close()

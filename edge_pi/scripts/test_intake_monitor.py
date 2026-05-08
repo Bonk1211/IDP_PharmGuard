@@ -18,6 +18,7 @@ import cv2
 
 # Make `vision` importable when running from any cwd.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from vision.camera import Cv2Source  # noqa: E402
 from vision.intake_monitor import (  # noqa: E402
     _STEP_ORDER,
     INSPECTION_HOLD_TIME,
@@ -76,7 +77,7 @@ def main() -> int:
     monitor = None
     try:
         cap = open_capture(args.port)
-        monitor = IntakeMonitor(camera=cap)
+        monitor = IntakeMonitor(camera=Cv2Source(cap))
 
         deadline = time.time() + args.timeout
         step_idx = 0

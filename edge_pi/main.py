@@ -16,10 +16,9 @@ import logging
 import requests
 
 from config import settings
-from vision.pill_verifier import PillVerifier
-from vision.intake_monitor import IntakeMonitor
-from hardware.magazine import Magazine
 from hardware.ejector import Ejector
+from hardware.magazine import Magazine
+from vision import CameraSource, IntakeMonitor, PillVerifier, open_camera
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,8 +98,6 @@ def run() -> None:
 
     magazine = Magazine()
     ejector = Ejector()
-    verifier = PillVerifier()
-    monitor = IntakeMonitor()
 
     # HI-012: Refuse to run as if hardware were real when it isn't.
     hardware_stubbed = magazine.is_stub or ejector.is_stub
@@ -118,6 +115,26 @@ def run() -> None:
             "STUB MODE: hardware not real — pill_taken will always be reported "
             "False. DO NOT use this build in production."
         )
+
+    # Open dual cameras (only when hardware is real). Same fail-loud rule as
+    # HI-012: if a camera fails to open and we are NOT in stub mode, refuse to
+    # run rather than silently degrade the vision pipeline.
+    cam_a: CameraSource | None = None
+    cam_b: CameraSource | None = None
+    if not hardware_stubbed:
+        try:
+            cam_a = open_camera(0)  # tray top-down (pill ID)
+            cam_b = open_camera(1)  # patient-facing (swallow FSM)
+        except Exception:
+            log.exception("Camera initialization failed")
+            if not settings.STUB_MODE:
+                sys.exit(3)
+            log.warning(
+                "STUB MODE: camera unavailable — vision verifies will be skipped"
+            )
+
+    verifier = PillVerifier(camera=cam_a)
+    monitor = IntakeMonitor(camera=cam_b)
 
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
