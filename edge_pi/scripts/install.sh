@@ -71,11 +71,14 @@ echo "Installing system dependencies..."
 # Trixie note: libatlas-base-dev was removed (ATLAS deprecated upstream;
 # numpy uses OpenBLAS via wheels). libtiff / libopenjp2 are no longer
 # required either — piwheels ships Pillow with vendored image libs.
-# If a wheel build later complains about missing libs on a non-piwheels
-# Pi, install on demand with `sudo apt-get install -y libopenblas0`.
+# libcap-dev is needed by python-prctl (transitive dep of picamera2)
+# when pip builds it from source against an alt-Python venv (cp312 on
+# Trixie via PHARMGUARD_PYTHON). On Bookworm cp311 the wheel exists.
 sudo apt-get install -y \
     python3-venv \
     python3-pip \
+    python3-dev \
+    libcap-dev \
     ffmpeg \
     python3-libcamera \
     python3-picamera2
