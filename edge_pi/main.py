@@ -18,6 +18,7 @@ import requests
 from config import settings
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
+from hardware.temp_sensor import TempSensor
 from vision import CameraSource, IntakeMonitor, LivenessDetector, PillVerifier, open_camera
 
 logging.basicConfig(
@@ -74,6 +75,22 @@ def report_intake(patient_id: int, slot: int, verified: bool) -> None:
     )
 
 
+def report_temperature(value_c: float) -> None:
+    """POST a temperature sample to the backend; backend decides if it alerts."""
+    assert session is not None, "session not initialized; call run() first"
+    payload: dict = {"value_c": value_c}
+    if settings.DISPENSER_ID:
+        payload["dispenser_id"] = settings.DISPENSER_ID
+    try:
+        session.post(
+            f"{settings.BACKEND_URL}/api/alerts/temperature",
+            json=payload,
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        log.warning("temperature post failed: %s", exc)
+
+
 def run() -> None:
     global session
 
@@ -101,6 +118,7 @@ def run() -> None:
 
     magazine = Magazine()
     ejector = Ejector()
+    temp_sensor = TempSensor()
 
     # HI-012: Refuse to run as if hardware were real when it isn't.
     hardware_stubbed = magazine.is_stub or ejector.is_stub
@@ -143,6 +161,18 @@ def run() -> None:
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
     while True:
+        # ── Phase 5: tray temperature sample ──────────────────────────────
+        # One sample per loop tick; backend decides if it crosses threshold
+        # and inserts an `over_temperature` alert. Stub mode returns a safe
+        # 22 C constant so HI-012 invariant holds.
+        try:
+            value_c = temp_sensor.read_celsius()
+            if value_c is not None:
+                report_temperature(value_c)
+        except Exception:
+            log.exception("temperature sample failed")
+        # ── /Phase 5 ──────────────────────────────────────────────────────
+
         # TODO: Replace with real schedule lookup from backend
         # For now, a simple polling loop placeholder
         try:

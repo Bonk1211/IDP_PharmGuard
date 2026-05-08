@@ -195,3 +195,34 @@ export async function enrollFace(
   }
   return resp.json();
 }
+
+// ── Alerts (Phase 5) ──
+
+export type AlertKind = "expiry" | "low_stock" | "over_temperature";
+export type AlertSeverity = "info" | "warning" | "critical";
+
+export interface Alert {
+  id: number;
+  dispenser_id: string | null;
+  kind: AlertKind;
+  severity: AlertSeverity;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export async function fetchAlerts(opts?: {
+  limit?: number;
+  kind?: AlertKind;
+}): Promise<Alert[]> {
+  let query = supabase
+    .from("alerts")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(opts?.limit ?? 100);
+  if (opts?.kind) {
+    query = query.eq("kind", opts.kind);
+  }
+  const { data, error } = await query;
+  if (error) throw error;
+  return (data ?? []) as Alert[];
+}

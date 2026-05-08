@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     device_tokens: str = ""
     default_dispenser_id: str = "dispenser-001"
     face_match_tolerance: float = 0.6
+    # Phase 5 — alerts thresholds
+    expiry_warn_days: int = 14
+    low_stock_threshold: int = 3
+    over_temp_celsius: float = 30.0
 
     model_config = {"env_file": ".env"}
 
