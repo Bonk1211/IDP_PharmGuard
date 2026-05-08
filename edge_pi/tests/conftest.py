@@ -23,7 +23,12 @@ if str(EDGE_PI_ROOT) not in sys.path:
 def _reload_hardware_modules() -> None:
     # Module-level STUB_ALLOWED is captured at import; drop cached modules
     # so the next import re-reads PHARMGUARD_STUB from the patched env.
-    for mod in ("hardware.magazine", "hardware.ejector"):
+    for mod in (
+        "hardware.magazine",
+        "hardware.ejector",
+        "hardware.diverter",
+        "hardware.drawer_lock",
+    ):
         sys.modules.pop(mod, None)
 
 
