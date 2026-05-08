@@ -1,4 +1,4 @@
-.PHONY: backend frontend dev setup pi-sync pi-models clean-ml
+.PHONY: backend frontend dev setup pi-sync pi-bootstrap pi-models clean-ml
 
 # Run backend (FastAPI)
 backend:
@@ -24,6 +24,23 @@ setup:
 # Sync edge_pi/ to a Raspberry Pi host (usage: make pi-sync HOST=pi@raspberrypi.local)
 pi-sync:
 	bash edge_pi/scripts/sync_from_dev.sh $(HOST)
+
+# Fresh-Pi bootstrap: rsync → ssh → install.sh → enable service.
+# Idempotent (re-running on a configured Pi is safe).
+# Usage: make pi-bootstrap HOST=pi@raspberrypi.local
+pi-bootstrap:
+	@if [ -z "$(HOST)" ]; then echo "ERROR: HOST=pi@<host> required"; exit 1; fi
+	bash edge_pi/scripts/sync_from_dev.sh $(HOST)
+	@echo ""
+	@echo "=== Running install.sh on $(HOST) ==="
+	ssh $(HOST) "cd ~/IDP_PharmGuard/edge_pi && bash scripts/install.sh"
+	@echo ""
+	@echo "=== Enabling pharmguard.service on $(HOST) ==="
+	ssh $(HOST) "sudo systemctl enable pharmguard.service"
+	@echo ""
+	@echo "=== Done. ==="
+	@echo "Edit ~/IDP_PharmGuard/edge_pi/.env on the Pi, then:"
+	@echo "  ssh $(HOST) 'sudo systemctl restart pharmguard'"
 
 # Show sizes of deployed model weights on the Pi runtime side
 pi-models:

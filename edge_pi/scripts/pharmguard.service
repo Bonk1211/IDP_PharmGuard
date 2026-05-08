@@ -9,8 +9,38 @@ User=root
 WorkingDirectory=__INSTALL_DIR__
 ExecStart=__INSTALL_DIR__/.venv/bin/python -u __INSTALL_DIR__/main.py
 EnvironmentFile=-__INSTALL_DIR__/.env
+
+# Restart policy: bound the restart storm so a wedged service doesn't burn
+# the SD card or hide a real misconfig. After 5 failed starts in 60 s the
+# unit stays in failed state until operator runs `systemctl reset-failed`.
 Restart=on-failure
 RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+# Log rate-limit (per-service). Pairs with the journald drop-in shipped in
+# journald.conf.d-pharmguard.conf which sets SystemMaxUse=100M.
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=2000
+
+# Security hardening — safe under User=root because Pi 5 + rpi-lgpio +
+# picamera2 already require root for GPIO + render-group access.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=__INSTALL_DIR__ /home /tmp /var/log /run
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+
+# Resource ceilings. Pi 5 has 4–8 GB RAM; YOLO + MediaPipe + dlib peak
+# ~1.5 GB. MemoryHigh warns, MemoryMax kills.
+MemoryHigh=2G
+MemoryMax=3G
+CPUQuota=380%
+TasksMax=128
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=pharmguard

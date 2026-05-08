@@ -24,12 +24,18 @@ echo "Destination: $PI_HOST:~/IDP_PharmGuard/edge_pi/"
 echo ""
 
 ##
-## rsync: exclude venv, cache, logs
+## rsync: exclude venv, cache, logs, operator config (.env), bench artefacts
 ##
-rsync -avz \
+## --delete-after removes Pi-side files no longer in source AFTER a successful
+## transfer. Excludes: .env (operator's tokens — must NEVER be overwritten),
+## *.csv (Phase 6 bench artefacts on Pi), .venv (Pi-side venv), __pycache__.
+##
+rsync -avz --delete-after \
     --exclude '.venv' \
     --exclude '__pycache__' \
     --exclude '*.log' \
+    --exclude '*.csv' \
+    --exclude '.env' \
     --exclude '.pytest_cache' \
     --exclude '.eggs' \
     "$EDGE_PI_DIR/" \
@@ -37,6 +43,8 @@ rsync -avz \
 
 echo ""
 echo "=== Sync Complete ==="
+echo ""
+echo "(For a fresh Pi, prefer: make pi-bootstrap HOST=$PI_HOST)"
 echo ""
 echo "Next steps on the Pi:"
 echo "  ssh $PI_HOST"

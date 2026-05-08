@@ -31,7 +31,21 @@ Runs `npm run dev` from `frontend/`. Copy `frontend/.env.local.example` to `fron
 
 ### Edge Pi
 
-See `edge_pi/README.md` for Pi-side setup, including syncing from a dev machine via `make pi-sync HOST=pi@<host>` and verifying weights with `make pi-models`.
+**Fresh Pi** (one-shot bootstrap):
+
+```
+make pi-bootstrap HOST=pi@<host>
+```
+
+Rsyncs `edge_pi/` to the Pi, runs `scripts/install.sh` (idempotent), and enables `pharmguard.service`. Operator then edits `~/IDP_PharmGuard/edge_pi/.env` on the Pi and runs `sudo systemctl restart pharmguard`. See `edge_pi/README.md` for the per-step breakdown and `BOM.md` for hardware procurement.
+
+**Incremental sync** (after a code edit):
+
+```
+make pi-sync HOST=pi@<host>
+```
+
+Rsync only — service is already enabled. `make pi-models` lists deployed YOLO weights.
 
 ## Deployment targets
 

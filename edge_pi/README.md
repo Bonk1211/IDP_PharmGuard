@@ -32,51 +32,73 @@ libcamera-hello --list-cameras
 
 ## First-time Setup
 
-Clone the repository or rsync the `edge_pi/` directory from your dev machine:
+### One-shot bootstrap (recommended)
+
+From your dev machine:
 
 ```bash
-# Option A: Git clone
-git clone https://github.com/your-org/IDP_PharmGuard.git
-cd IDP_PharmGuard/edge_pi
-
-# Option B: rsync from dev machine (see scripts/sync_from_dev.sh)
-./scripts/sync_from_dev.sh pi@pharmguard-01.local
+make pi-bootstrap HOST=pi@pharmguard-01.local
 ```
 
-Then run the install script:
+This rsyncs `edge_pi/`, runs `scripts/install.sh` over ssh (idempotent), and enables the `pharmguard.service` systemd unit. Operator must have ssh-key-based auth to the Pi.
+
+### Manual three-step path
+
+If you'd rather see each step:
 
 ```bash
+# 1. Sync from dev machine
+make pi-sync HOST=pi@pharmguard-01.local
+
+# 2. SSH in and install
+ssh pi@pharmguard-01.local
+cd ~/IDP_PharmGuard/edge_pi
 bash scripts/install.sh
+
+# 3. Enable + start the service (only after editing .env, see below)
+sudo systemctl enable --now pharmguard
 ```
 
-This script will:
-1. Check that you are on Raspberry Pi OS (64-bit)
-2. Install system dependencies: Python venv, pip, libcamera bindings, FFmpeg, image libraries
-3. Create a Python virtual environment at `edge_pi/.venv`
-4. Install Python dependencies from `requirements.txt` (including piwheels for ARM wheels)
-5. Install the systemd service unit at `/etc/systemd/system/pharmguard.service`
-6. Print instructions to enable and start the service
-
-You may need to `chmod +x scripts/*.sh` if the scripts are not executable.
+`install.sh` is idempotent. It:
+1. Checks the OS + arch
+2. Installs system dependencies (Python venv, libcamera bindings, FFmpeg, image libraries)
+3. Creates a Python venv at `edge_pi/.venv`
+4. Installs Python dependencies from `requirements.txt` via piwheels
+5. `chmod +x` the bench / chaos / accuracy scripts (Phases 6, 8, 9)
+6. Seeds `.env` from `.env.example` **only if missing** — operator config is preserved on re-runs
+7. Creates `~/.pharmguard/` for the offline queue (Phase 8)
+8. Refreshes the systemd unit only when its rendered template hash changes (no spurious `daemon-reload`)
+9. Installs the `journald` rotation drop-in (system journal capped at 100 MB)
 
 ## Configuration
 
-Create a `.env` file in the `edge_pi/` directory to override defaults:
+After install, edit `edge_pi/.env`:
 
 ```bash
-cat > .env << EOF
-BACKEND_URL=https://cloud.pharmguard.example.com
-DEVICE_ID=pi-01
-POLL_INTERVAL_S=30
-EOF
+nano ~/IDP_PharmGuard/edge_pi/.env
 ```
 
-Currently, `main.py` hardcodes `BACKEND_URL=http://localhost:8000`. Update the `.env` entries or edit `main.py` to point to your cloud backend.
+Required (the Pi `_require()` helper raises if either is empty):
+- `BACKEND_URL` — backend base URL (must be `https://...` outside stub mode)
+- `DEVICE_TOKEN` — 16+ char shared secret. Generate: `python3 -c 'import secrets; print(secrets.token_urlsafe(32))'`. Add the same token to the backend's `DEVICE_TOKENS` env on its side too.
 
-Environment variables:
-- `BACKEND_URL`: Base URL of the backend API (default: `http://localhost:8000`)
-- `DEVICE_ID`: Unique identifier for this Pi (optional; can be used for telemetry)
-- `POLL_INTERVAL_S`: Seconds between dispensing schedule polls (default: 30)
+Optional:
+- `DISPENSER_ID` — per-Pi identifier (e.g. `dispenser-bedside-04`); reported on every adherence + alert event
+- `POLL_INTERVAL_S` — schedule-poll cadence (default `30`)
+- `PHARMGUARD_STUB` — set `1` for dev-without-hardware. Stub mode forces `pill_taken=False` always (HI-012). Refuse to deploy with `1` in production.
+- `OFFLINE_QUEUE_PATH` — SQLite buffer path (default `~/.pharmguard/queue.db`)
+- `OFFLINE_MAX_AGE_SECONDS` — refuse to dispense if oldest unposted row is older (default `3600` = 1 h)
+- `OFFLINE_REPLAY_INTERVAL_S` — replay drain cadence (default `30`)
+- `BENCH_MODE` — set `1` ONLY for `scripts/bench_e2e.py` runs. Mocks Face ID + swallow.
+- `BENCH_LOG_PATH` — per-cycle CSV when bench mode active (default `/tmp/bench_e2e.csv`)
+
+After editing `.env`, restart the service:
+
+```bash
+sudo systemctl restart pharmguard
+```
+
+The full env reference is in `.env.example`.
 
 ## Run
 
@@ -115,6 +137,18 @@ Restart after code updates:
 ```bash
 sudo systemctl restart pharmguard
 ```
+
+## Pilot operator scripts
+
+Bench + chaos + accuracy harnesses ship under `scripts/` (all `chmod +x` by `install.sh`):
+
+- `scripts/bench_dual_cam.py` — Phase 2 dual-cam frame-interval bench (`p95 < 100 ms` per cam)
+- `scripts/bench_e2e.py` — Phase 6 200-cycle end-to-end latency bench (`<200 ms` YOLO, `<500 ms` DB write, `<8 s` e2e)
+- `scripts/chaos_offline.py` — Phase 8 network-outage chaos test (no falsified `pill_taken=true`; queue replays cleanly on recovery)
+- `scripts/bench_accuracy.py` — Phase 9 confusion-matrix bench against an operator-supplied labelled dataset (`>99%` accuracy, `<0.1%` FPR)
+- `scripts/tune_threshold.py` — Phase 9 threshold sweep for `PillVerifier.conf_thresh`
+
+Each script's docstring documents its prerequisites + exit code semantics.
 
 ## What's NOT on the Pi
 

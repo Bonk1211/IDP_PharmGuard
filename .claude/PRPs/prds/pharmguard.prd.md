@@ -200,7 +200,7 @@ That is the smallest end-to-end loop that proves "zero-touch correct dispensing 
 | 7 | Frontend dashboard surfaces | Add adherence-log live feed, alert panel, slot-status grid in `frontend/src/app/` | in-progress (code complete; visual smoke pending operator) | with 6 | 1 | [completed/dashboard-surfaces.plan.md](../plans/completed/dashboard-surfaces.plan.md) · [report](../reports/dashboard-surfaces-report.md) |
 | 8 | Offline queue + reliability | SQLite buffer for adherence logs; reconnect/replay logic; chaos test | in-progress (code complete; Pi chaos test pending operator) | - | 6 | [completed/offline-queue-reliability.plan.md](../plans/completed/offline-queue-reliability.plan.md) · [report](../reports/offline-queue-reliability-report.md) |
 | 9 | Accuracy validation | Run 1,000-pill labelled bench; record confusion matrix; document residual gap to 99% target | in-progress (harness complete; labelled dataset + Pi run pending operator) | - | 6 | [completed/accuracy-validation.plan.md](../plans/completed/accuracy-validation.plan.md) · [report](../reports/accuracy-validation-report.md) |
-| 10 | Pilot-ready packaging | `make pi-sync` polish, systemd hardening, install.sh idempotency, BOM lockdown | pending | - | 8, 9 | - |
+| 10 | Pilot-ready packaging | `make pi-sync` polish, systemd hardening, install.sh idempotency, BOM lockdown | in-progress (code complete; fresh-Pi <30 min stopwatch pending operator) | - | 8, 9 | [completed/pilot-ready-packaging.plan.md](../plans/completed/pilot-ready-packaging.plan.md) · [report](../reports/pilot-ready-packaging-report.md) |
 
 ### Phase Details
 
