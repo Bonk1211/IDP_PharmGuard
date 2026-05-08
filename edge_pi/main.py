@@ -9,9 +9,11 @@ Cycle:
   5. Report telemetry to backend
 """
 
+import csv
+import logging
 import sys
 import time
-import logging
+from pathlib import Path
 
 import requests
 
@@ -93,6 +95,32 @@ def report_temperature(value_c: float) -> None:
         log.warning("temperature post failed: %s", exc)
 
 
+# ── Phase 6: end-to-end bench instrumentation ─────────────────────────────
+_BENCH_FIELDS = (
+    "cycle", "patient_id", "slot",
+    "t_schedule_ms", "t_auth_ms", "t_rotate_ms", "t_eject_ms",
+    "t_pillid_ms", "t_diverter_ms", "t_drawer_ms",
+    "t_log_ms", "t_total_ms",
+    "pill_taken",
+)
+
+
+def _open_bench_writer():
+    """Open the BENCH_LOG_PATH CSV for append. Returns None when bench off."""
+    if not settings.BENCH_MODE:
+        return None
+    path = Path(settings.BENCH_LOG_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
+    f = path.open("a", newline="")
+    w = csv.DictWriter(f, fieldnames=_BENCH_FIELDS)
+    if new:
+        w.writeheader()
+    w._fh = f  # stash for flush() per cycle
+    return w
+# ── /Phase 6 ──────────────────────────────────────────────────────────────
+
+
 def run() -> None:
     global session
 
@@ -172,6 +200,25 @@ def run() -> None:
     monitor = IntakeMonitor(camera=cam_b)
     liveness = LivenessDetector(camera=cam_b)
 
+    # ── Phase 6: bench-mode safety + writer ────────────────────────────────
+    # BENCH_MODE refuses to run on stubbed hardware — falsified telemetry
+    # would invalidate the bench numbers (HI-012 extension).
+    if settings.BENCH_MODE and hardware_stubbed:
+        log.error(
+            "BENCH_MODE=1 but hardware is stubbed — bench numbers would be invalid."
+        )
+        sys.exit(4)
+
+    bench_writer = _open_bench_writer()
+    cycle_n = 0
+    if bench_writer is not None:
+        log.warning(
+            "BENCH_MODE=1 — writing per-cycle metrics to %s. "
+            "Face ID + swallow are MOCKED. Restart with BENCH_MODE=0 for production.",
+            settings.BENCH_LOG_PATH,
+        )
+    # ── /Phase 6 ──────────────────────────────────────────────────────────
+
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
     while True:
@@ -190,9 +237,14 @@ def run() -> None:
         # TODO: Replace with real schedule lookup from backend
         # For now, a simple polling loop placeholder
         try:
+            t0 = time.perf_counter()
+            params = {"dispenser_id": settings.DISPENSER_ID} if settings.DISPENSER_ID else None
             resp = session.get(
-                f"{settings.BACKEND_URL}/api/inventory/next-dispense", timeout=5
+                f"{settings.BACKEND_URL}/api/inventory/next-dispense",
+                params=params,
+                timeout=5,
             )
+            t_schedule = time.perf_counter()
             if resp.status_code != 200:
                 time.sleep(settings.POLL_INTERVAL_S)
                 continue
@@ -207,7 +259,14 @@ def run() -> None:
             # backend, and only proceed if the matched patient_id equals the
             # scheduled one. Stub-mode skips this entirely (no falsified
             # telemetry: pill_taken=False forced below).
-            auth = None if hardware_stubbed else authenticate_patient(liveness)
+            # ── Phase 6: BENCH_MODE mocks Face ID — synthetic match so the
+            # right-patient gate passes without 200 real blink+capture cycles.
+            if settings.BENCH_MODE:
+                auth = {"patient_id": patient_id, "name": "bench", "distance": 0.0}
+            else:
+                auth = None if hardware_stubbed else authenticate_patient(liveness)
+            t_auth = time.perf_counter()
+            # ── /Phase 6 ──
             if not hardware_stubbed and auth is None:
                 log.warning(
                     "Skipping cycle: authentication failed for slot %d", slot
@@ -224,7 +283,9 @@ def run() -> None:
                 continue
 
             magazine.rotate_to(slot)
+            t_rotate = time.perf_counter()
             ejector.push()
+            t_eject = time.perf_counter()
 
             # --- Phase 4: diverter + drawer-lock -------------------------------
             # Drawer unlocks ONLY when right-patient gate (Phase 3, above) AND
@@ -234,26 +295,56 @@ def run() -> None:
             # pill_taken=True, so the unlock branch is unreachable in stub mode.
             if hardware_stubbed:
                 pill_taken_actual = False
+                t_pillid = t_diverter = t_drawer = t_eject
                 log.info(
                     "Stub mode: skipping vision verify, diverter, drawer_lock, swallow watch"
                 )
             else:
                 pill_id_pass = verifier.confirm_tray_empty()
+                t_pillid = time.perf_counter()
                 if pill_id_pass:
                     diverter.deliver()
+                    t_diverter = time.perf_counter()
                     drawer_lock.hold_unlocked()
+                    t_drawer = time.perf_counter()
                     pill_taken_actual = True
-                    monitor.watch_for_swallow(timeout_s=60)
+                    # Phase 6: bench mocks the swallow watch (60 s × 200 = 200 min)
+                    if not settings.BENCH_MODE:
+                        monitor.watch_for_swallow(timeout_s=60)
                 else:
                     log.warning(
                         "Pill-ID verification failed; routing to reject bin"
                     )
                     diverter.reject()
+                    t_diverter = time.perf_counter()
+                    t_drawer = t_diverter
                     pill_taken_actual = False
             # --- /Phase 4 ------------------------------------------------------
 
             report_intake(patient_id, slot, verified=pill_taken_actual)
+            t_log = time.perf_counter()
             log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
+
+            # ── Phase 6: per-cycle metrics row ──
+            if bench_writer is not None:
+                cycle_n += 1
+                bench_writer.writerow({
+                    "cycle": cycle_n,
+                    "patient_id": patient_id,
+                    "slot": slot,
+                    "t_schedule_ms": (t_schedule - t0) * 1000.0,
+                    "t_auth_ms":     (t_auth - t_schedule) * 1000.0,
+                    "t_rotate_ms":   (t_rotate - t_auth) * 1000.0,
+                    "t_eject_ms":    (t_eject - t_rotate) * 1000.0,
+                    "t_pillid_ms":   (t_pillid - t_eject) * 1000.0,
+                    "t_diverter_ms": (t_diverter - t_pillid) * 1000.0,
+                    "t_drawer_ms":   (t_drawer - t_diverter) * 1000.0,
+                    "t_log_ms":      (t_log - t_drawer) * 1000.0,
+                    "t_total_ms":    (t_log - t0) * 1000.0,
+                    "pill_taken":    pill_taken_actual,
+                })
+                bench_writer._fh.flush()
+            # ── /Phase 6 ──
 
         except Exception:
             log.exception("Error in main loop")

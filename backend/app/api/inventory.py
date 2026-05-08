@@ -27,20 +27,25 @@ async def list_slots():
 
 
 @router.get("/next-dispense", dependencies=[Depends(verify_device_token)])
-async def next_dispense():
+async def next_dispense(dispenser_id: str | None = None):
     """
     Determine the next slot that needs dispensing.
     Called by the Raspberry Pi in its polling loop.
+
+    If `dispenser_id` is provided, restricts the search to rows tagged with
+    that dispenser. Bench runs (BENCH_MODE=1 on the Pi) rely on this to
+    isolate from production rows. Backwards-compat when omitted.
     """
     sb = get_supabase()
-    result = (
+    query = (
         sb.table("medications")
         .select("*")
         .gt("quantity", 0)
         .not_.is_("patient_id", "null")
-        .limit(1)
-        .execute()
     )
+    if dispenser_id is not None:
+        query = query.eq("dispenser_id", dispenser_id)
+    result = query.limit(1).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="No pending dispenses")
 

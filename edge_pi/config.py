@@ -51,6 +51,8 @@ class _Settings:
     POLL_INTERVAL_S: float
     STUB_MODE: bool
     DISPENSER_ID: str
+    BENCH_MODE: bool
+    BENCH_LOG_PATH: str
 
     def validate(self) -> None:
         """Enforce production-safety invariants. Idempotent.
@@ -84,12 +86,16 @@ def _load() -> _Settings:
     poll_interval = float(os.environ.get("POLL_INTERVAL_S", "30"))
     stub_mode = os.environ.get("PHARMGUARD_STUB", "0") == "1"
     dispenser_id = os.environ.get("DISPENSER_ID", "")
+    bench_mode = os.environ.get("BENCH_MODE", "0") == "1"
+    bench_log_path = os.environ.get("BENCH_LOG_PATH", "/tmp/bench_e2e.csv")
     return _Settings(
         BACKEND_URL=backend_url,
         DEVICE_TOKEN=device_token,
         POLL_INTERVAL_S=poll_interval,
         STUB_MODE=stub_mode,
         DISPENSER_ID=dispenser_id,
+        BENCH_MODE=bench_mode,
+        BENCH_LOG_PATH=bench_log_path,
     )
 
 
