@@ -37,6 +37,15 @@ log = logging.getLogger(__name__)
 # after `settings.validate()` so import-time has no side effects.
 session: requests.Session | None = None
 
+# ── Phase 8: offline queue + reliability ─────────────────────────────────
+# Single durable buffer for both intake + temperature events. Initialised
+# in run() once settings have been validated, just like `session`. The
+# replay loop is in-cycle (top of `while True`), not a thread — keeps the
+# sqlite3 connection single-threaded and avoids a second connection +
+# lock for no measurable benefit at our event rate.
+offline_queue: OfflineQueue | None = None
+# ── /Phase 8 ─────────────────────────────────────────────────────────────
+
 
 def _build_session() -> requests.Session:
     s = requests.Session()
@@ -62,9 +71,18 @@ def authenticate_patient(detector: LivenessDetector) -> dict | None:
     return None
 
 
-def report_intake(patient_id: int, slot: int, verified: bool) -> None:
-    """POST an adherence log to the backend."""
+def report_intake(
+    patient_id: int, slot: int, verified: bool, *, is_stub: bool = False
+) -> None:
+    """POST an adherence log to the backend, durably queueing first.
+
+    Phase 8: enqueue first → POST → mark posted on 2xx. On any failure,
+    the row stays in the queue and the next-cycle drain retries it.
+    HI-012: ``is_stub`` flag round-trips into the queue row so the
+    replay loop can refuse to post falsified telemetry.
+    """
     assert session is not None, "session not initialized; call run() first"
+    assert offline_queue is not None, "offline_queue not initialized"
     payload: dict = {
         "patient_id": patient_id,
         "slot": slot,
@@ -72,27 +90,124 @@ def report_intake(patient_id: int, slot: int, verified: bool) -> None:
     }
     if settings.DISPENSER_ID:
         payload["dispenser_id"] = settings.DISPENSER_ID
-    session.post(
-        f"{settings.BACKEND_URL}/api/logs/",
-        json=payload,
-        timeout=10,
-    )
+    row_id = offline_queue.enqueue("intake", payload, is_stub=is_stub)
+    try:
+        resp = session.post(
+            f"{settings.BACKEND_URL}/api/logs/",
+            json=payload,
+            timeout=10,
+        )
+        if 200 <= resp.status_code < 300:
+            offline_queue.mark_sent([row_id])
+        else:
+            log.warning(
+                "intake post non-2xx (%d); row %d retained for replay",
+                resp.status_code,
+                row_id,
+            )
+    except requests.RequestException as exc:
+        log.warning(
+            "intake post failed: %s; row %d retained for replay", exc, row_id
+        )
 
 
-def report_temperature(value_c: float) -> None:
-    """POST a temperature sample to the backend; backend decides if it alerts."""
+def report_temperature(value_c: float, *, is_stub: bool = False) -> None:
+    """POST a temperature sample to the backend, durably queueing first.
+
+    Phase 8: same 2-phase commit as ``report_intake``. ``is_stub``
+    propagates through the queue row for forensic auditing; the backend
+    treats stub temperatures as below-threshold so no alerts are forged.
+    """
     assert session is not None, "session not initialized; call run() first"
+    assert offline_queue is not None, "offline_queue not initialized"
     payload: dict = {"value_c": value_c}
     if settings.DISPENSER_ID:
         payload["dispenser_id"] = settings.DISPENSER_ID
+    row_id = offline_queue.enqueue("temperature", payload, is_stub=is_stub)
     try:
-        session.post(
+        resp = session.post(
             f"{settings.BACKEND_URL}/api/alerts/temperature",
             json=payload,
             timeout=5,
         )
+        if 200 <= resp.status_code < 300:
+            offline_queue.mark_sent([row_id])
+        else:
+            log.warning(
+                "temperature post non-2xx (%d); row %d retained for replay",
+                resp.status_code,
+                row_id,
+            )
     except requests.RequestException as exc:
-        log.warning("temperature post failed: %s", exc)
+        log.warning(
+            "temperature post failed: %s; row %d retained for replay",
+            exc,
+            row_id,
+        )
+
+
+# ── Phase 8: replay drain ────────────────────────────────────────────────
+_REPLAY_BATCH_LIMIT = 20
+
+
+def _replay_drain() -> None:
+    """Replay up to ``_REPLAY_BATCH_LIMIT`` unposted rows.
+
+    Called at the top of each cycle. Stops on the first non-2xx /
+    RequestException to avoid hammering a degraded backend — the next
+    cycle picks up where this one left off.
+
+    HI-012 in the queue: rows tagged ``is_stub=True`` for kind=='intake'
+    with ``pill_taken=true`` are NEVER posted. main.py forces False in
+    stub mode but this guard is defensive against future regressions.
+    """
+    assert session is not None and offline_queue is not None
+    batch = offline_queue.peek_batch(limit=_REPLAY_BATCH_LIMIT)
+    if not batch:
+        return
+    sent_ids: list[int] = []
+    for row_id, kind, payload, is_stub in batch:
+        # HI-012 defensive guard.
+        if (
+            is_stub
+            and kind == "intake"
+            and payload.get("pill_taken") is True
+        ):
+            log.error(
+                "queue row %d: stub-mode intake with pill_taken=true — "
+                "refusing to post (HI-012)",
+                row_id,
+            )
+            continue
+        if kind == "intake":
+            url = f"{settings.BACKEND_URL}/api/logs/"
+        elif kind == "temperature":
+            url = f"{settings.BACKEND_URL}/api/alerts/temperature"
+        else:
+            log.error(
+                "queue row %d: unknown kind %r — leaving in queue",
+                row_id,
+                kind,
+            )
+            continue
+        try:
+            resp = session.post(url, json=payload, timeout=10)
+            if 200 <= resp.status_code < 300:
+                sent_ids.append(row_id)
+            else:
+                log.warning(
+                    "replay row %d non-2xx (%d); will retry",
+                    row_id,
+                    resp.status_code,
+                )
+                break  # backend looks unhealthy; stop draining this cycle
+        except requests.RequestException as exc:
+            log.warning("replay row %d failed: %s; will retry", row_id, exc)
+            break
+    if sent_ids:
+        offline_queue.mark_sent(sent_ids)
+        log.info("replay drained %d/%d rows", len(sent_ids), len(batch))
+# ── /Phase 8 ─────────────────────────────────────────────────────────────
 
 
 # ── Phase 6: end-to-end bench instrumentation ─────────────────────────────
@@ -122,7 +237,7 @@ def _open_bench_writer():
 
 
 def run() -> None:
-    global session
+    global session, offline_queue
 
     # Fail fast on misconfig before touching hardware.
     try:
@@ -132,6 +247,16 @@ def run() -> None:
         sys.exit(2)
 
     session = _build_session()
+
+    # ── Phase 8: open the offline queue ──
+    # Durable buffer for intake + temperature events. Created lazily so
+    # `python3 -m py_compile main.py` and stub-mode imports stay clean.
+    offline_queue = OfflineQueue(settings.OFFLINE_QUEUE_PATH)
+    log.info(
+        "Offline queue: %d pending events at startup",
+        offline_queue.pending_count(),
+    )
+    # ── /Phase 8 ──
 
     # Reachability probe — warn but don't abort (Pi must boot offline-tolerant).
     # Backend WebSocket future-auth: append `?token=<DEVICE_TOKEN>` query param.
@@ -222,6 +347,30 @@ def run() -> None:
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
     while True:
+        # ── Phase 8: replay drain + refuse-to-dispense gate ──────────────
+        # Replay before doing anything else so a brief outage doesn't
+        # accumulate beyond one cycle. The refuse gate reads the oldest
+        # UNPOSTED row's age — once drain succeeds, the next cycle
+        # proceeds. BENCH_MODE bypasses so Phase 6 numbers stay
+        # reproducible even if a queue blip happens during a chaos
+        # rehearsal.
+        _replay_drain()
+        age = offline_queue.oldest_age_seconds()
+        if (
+            age is not None
+            and age > settings.OFFLINE_MAX_AGE_SECONDS
+            and not settings.BENCH_MODE
+        ):
+            log.warning(
+                "Refusing dispense — oldest unposted event %.0fs old "
+                "(> %.0fs); backend unreachable?",
+                age,
+                settings.OFFLINE_MAX_AGE_SECONDS,
+            )
+            time.sleep(settings.OFFLINE_REPLAY_INTERVAL_S)
+            continue
+        # ── /Phase 8 ──────────────────────────────────────────────────────
+
         # ── Phase 5: tray temperature sample ──────────────────────────────
         # One sample per loop tick; backend decides if it crosses threshold
         # and inserts an `over_temperature` alert. Stub mode returns a safe
@@ -229,7 +378,8 @@ def run() -> None:
         try:
             value_c = temp_sensor.read_celsius()
             if value_c is not None:
-                report_temperature(value_c)
+                # Phase 8: tag stub origin so replay can audit/skip.
+                report_temperature(value_c, is_stub=hardware_stubbed)
         except Exception:
             log.exception("temperature sample failed")
         # ── /Phase 5 ──────────────────────────────────────────────────────
@@ -321,7 +471,14 @@ def run() -> None:
                     pill_taken_actual = False
             # --- /Phase 4 ------------------------------------------------------
 
-            report_intake(patient_id, slot, verified=pill_taken_actual)
+            # Phase 8: tag stub origin so replay can audit/skip falsified
+            # pill_taken=true rows (HI-012 defensive carry-over).
+            report_intake(
+                patient_id,
+                slot,
+                verified=pill_taken_actual,
+                is_stub=hardware_stubbed,
+            )
             t_log = time.perf_counter()
             log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
 
