@@ -23,6 +23,7 @@ from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
 from hardware.temp_sensor import TempSensor
+from storage.queue import OfflineQueue
 from vision import CameraSource, IntakeMonitor, LivenessDetector, PillVerifier, open_camera
 
 logging.basicConfig(
