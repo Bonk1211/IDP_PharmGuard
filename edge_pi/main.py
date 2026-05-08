@@ -58,13 +58,16 @@ def authenticate_patient(face_crop_path: str) -> dict | None:
 def report_intake(patient_id: int, slot: int, verified: bool) -> None:
     """POST an adherence log to the backend."""
     assert session is not None, "session not initialized; call run() first"
+    payload: dict = {
+        "patient_id": patient_id,
+        "slot": slot,
+        "pill_taken": verified,
+    }
+    if settings.DISPENSER_ID:
+        payload["dispenser_id"] = settings.DISPENSER_ID
     session.post(
         f"{settings.BACKEND_URL}/api/logs/",
-        json={
-            "patient_id": patient_id,
-            "slot": slot,
-            "pill_taken": verified,
-        },
+        json=payload,
         timeout=10,
     )
 

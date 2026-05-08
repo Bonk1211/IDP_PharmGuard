@@ -13,6 +13,9 @@ class SlotUpdate(BaseModel):
     medication_name: str
     quantity: int
     patient_id: int
+    expiry_date: str | None = None       # ISO-8601 YYYY-MM-DD; Postgres casts text → date
+    pills_per_dose: int = 1
+    dispenser_id: str | None = None
 
 
 @router.get("/", dependencies=[Depends(verify_device_token)])
@@ -46,6 +49,9 @@ async def next_dispense():
         "patient_id": med["patient_id"],
         "slot": med["slot"],
         "medication": med["name"],
+        "expiry_date": med.get("expiry_date"),
+        "pills_per_dose": med.get("pills_per_dose", 1),
+        "dispenser_id": med.get("dispenser_id"),
     }
 
 
@@ -73,6 +79,9 @@ async def update_slot(slot: int, data: SlotUpdate):
         "slot": slot,
         "quantity": data.quantity,
         "patient_id": data.patient_id,
+        "expiry_date": data.expiry_date,
+        "pills_per_dose": data.pills_per_dose,
+        "dispenser_id": data.dispenser_id,
     }
 
     if result.data:

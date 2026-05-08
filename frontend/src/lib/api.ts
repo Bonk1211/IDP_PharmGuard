@@ -19,6 +19,9 @@ export interface SlotInfo {
   description: string | null;
   quantity: number;
   patient_id: number;
+  expiry_date: string | null;       // YYYY-MM-DD
+  pills_per_dose: number;            // defaults to 1 from DB
+  dispenser_id: string | null;
   patient?: Patient | null;
 }
 
@@ -28,6 +31,8 @@ export interface IntakeRecord {
   slot: number;
   pill_taken: boolean;
   timestamp: string;
+  dispenser_id: string | null;
+  confidence_score: number | null;
   patient?: Patient | null;
 }
 

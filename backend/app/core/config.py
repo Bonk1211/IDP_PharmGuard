@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret-change-in-production"
     gemini_api_key: str = ""
     device_tokens: str = ""
+    default_dispenser_id: str = "dispenser-001"
 
     model_config = {"env_file": ".env"}
 

@@ -16,6 +16,8 @@ class IntakeLog(BaseModel):
     patient_id: int
     slot: int
     pill_taken: bool
+    dispenser_id: str | None = None
+    confidence_score: float | None = None
 
 
 _ws_clients: list[WebSocket] = []
