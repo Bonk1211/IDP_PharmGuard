@@ -20,11 +20,30 @@ INSTALL_DIR="$REPO_ROOT/edge_pi"
 VENV_PATH="$INSTALL_DIR/.venv"
 CURRENT_USER="${SUDO_USER:-$(whoami)}"
 
+# Allow overriding the Python used for the venv. Default: system `python3`.
+# Trixie ships Python 3.13 by default but mediapipe has no cp313 wheel
+# (supported up to cp312). On Trixie, install Python 3.12 via apt or
+# pyenv and run with PHARMGUARD_PYTHON=python3.12 (or pyenv-shimmed path).
+PHARMGUARD_PYTHON="${PHARMGUARD_PYTHON:-python3}"
+
 echo "=== PharmGuard Edge Setup ==="
 echo "Install directory: $INSTALL_DIR"
 echo "Virtual environment: $VENV_PATH"
+echo "Python: $PHARMGUARD_PYTHON ($($PHARMGUARD_PYTHON --version 2>&1 || echo not-found))"
 echo "User: $CURRENT_USER"
 echo ""
+
+# Refuse to build a venv with cp313 because mediapipe (Phase 2 + 3) has
+# no cp313 wheel as of 2026-05. The error from `pip install` is opaque;
+# fail loud here with a fix hint.
+PY_VER="$($PHARMGUARD_PYTHON -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null || echo unknown)"
+if [[ "$PY_VER" == "3.13" || "$PY_VER" == "3.14" ]]; then
+    echo "ERROR: Python $PY_VER detected — mediapipe has no wheel for this version."
+    echo "       Install Python 3.11 or 3.12 alongside, then re-run with:"
+    echo "         PHARMGUARD_PYTHON=python3.12 bash scripts/install.sh"
+    echo "       See edge_pi/README.md for the apt + pyenv recipes."
+    exit 5
+fi
 
 ##
 ## Check OS and architecture
@@ -69,8 +88,8 @@ echo ""
 ##
 echo "Setting up Python virtual environment..."
 if [[ ! -d "$VENV_PATH" ]]; then
-    python3 -m venv "$VENV_PATH"
-    echo "Created venv at $VENV_PATH"
+    "$PHARMGUARD_PYTHON" -m venv "$VENV_PATH"
+    echo "Created venv at $VENV_PATH (using $PHARMGUARD_PYTHON)"
 else
     echo "Venv already exists at $VENV_PATH"
 fi
