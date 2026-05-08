@@ -196,11 +196,16 @@ export async function enrollFace(
   return resp.json();
 }
 
-// ── Alerts (Phase 5) ──
+// ── Alerts (Phase 5 schema; Phase 7 dashboard reads from public.alerts) ──
 
 export type AlertKind = "expiry" | "low_stock" | "over_temperature";
 export type AlertSeverity = "info" | "warning" | "critical";
 
+/**
+ * Mirrors public.alerts (backend/migrations/0003_alerts.sql).
+ * Per-alert detail (medication name, quantity, temperature reading, etc.)
+ * lives in the open-ended `payload` jsonb column.
+ */
 export interface Alert {
   id: number;
   dispenser_id: string | null;
@@ -210,19 +215,41 @@ export interface Alert {
   created_at: string;
 }
 
+/**
+ * Fetch the most recent alerts from `public.alerts`. Tolerates a missing
+ * table (Phase 5 not yet merged) by returning [] so the dashboard renders
+ * an empty state instead of erroring.
+ */
 export async function fetchAlerts(opts?: {
   limit?: number;
   kind?: AlertKind;
 }): Promise<Alert[]> {
-  let query = supabase
-    .from("alerts")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(opts?.limit ?? 100);
-  if (opts?.kind) {
-    query = query.eq("kind", opts.kind);
+  try {
+    let query = supabase
+      .from("alerts")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(opts?.limit ?? 100);
+    if (opts?.kind) {
+      query = query.eq("kind", opts.kind);
+    }
+    const { data, error } = await query;
+    if (error) {
+      const msg = (error.message ?? "").toLowerCase();
+      if (
+        error.code === "42P01" ||
+        error.code === "PGRST205" ||
+        msg.includes("does not exist") ||
+        msg.includes("not found") ||
+        msg.includes("schema cache")
+      ) {
+        return [];
+      }
+      throw error;
+    }
+    return (data ?? []) as Alert[];
+  } catch {
+    // Network failure / unknown — never break the dashboard for an optional feed.
+    return [];
   }
-  const { data, error } = await query;
-  if (error) throw error;
-  return (data ?? []) as Alert[];
 }
