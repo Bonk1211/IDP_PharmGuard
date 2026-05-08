@@ -16,6 +16,8 @@ import logging
 import requests
 
 from config import settings
+from hardware.diverter import Diverter
+from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
 from vision import CameraSource, IntakeMonitor, LivenessDetector, PillVerifier, open_camera
@@ -101,17 +103,27 @@ def run() -> None:
 
     magazine = Magazine()
     ejector = Ejector()
+    diverter = Diverter()
+    drawer_lock = DrawerLock()
 
     # HI-012: Refuse to run as if hardware were real when it isn't.
-    hardware_stubbed = magazine.is_stub or ejector.is_stub
+    hardware_stubbed = (
+        magazine.is_stub
+        or ejector.is_stub
+        or diverter.is_stub
+        or drawer_lock.is_stub
+    )
     if hardware_stubbed:
         if not settings.STUB_MODE:
             log.error(
                 "Hardware initialization degraded (magazine.is_stub=%s, "
-                "ejector.is_stub=%s) but PHARMGUARD_STUB is not set. Refusing "
-                "to run — telemetry would be falsified.",
+                "ejector.is_stub=%s, diverter.is_stub=%s, drawer_lock.is_stub=%s) "
+                "but PHARMGUARD_STUB is not set. Refusing to run — telemetry "
+                "would be falsified.",
                 magazine.is_stub,
                 ejector.is_stub,
+                diverter.is_stub,
+                drawer_lock.is_stub,
             )
             sys.exit(1)
         log.warning(
@@ -182,14 +194,31 @@ def run() -> None:
             magazine.rotate_to(slot)
             ejector.push()
 
-            # HI-012: never let a stubbed run claim a pill was actually taken.
+            # --- Phase 4: diverter + drawer-lock -------------------------------
+            # Drawer unlocks ONLY when right-patient gate (Phase 3, above) AND
+            # pill-ID verification (confirm_tray_empty) both pass. Any failure
+            # routes the pill through the diverter to the reject bin and leaves
+            # the drawer locked. HI-012: stubbed hardware never reports
+            # pill_taken=True, so the unlock branch is unreachable in stub mode.
             if hardware_stubbed:
                 pill_taken_actual = False
-                log.info("Stub mode: skipping vision verify + swallow watch")
+                log.info(
+                    "Stub mode: skipping vision verify, diverter, drawer_lock, swallow watch"
+                )
             else:
-                pill_taken_actual = verifier.confirm_tray_empty()
-                if pill_taken_actual:
+                pill_id_pass = verifier.confirm_tray_empty()
+                if pill_id_pass:
+                    diverter.deliver()
+                    drawer_lock.hold_unlocked()
+                    pill_taken_actual = True
                     monitor.watch_for_swallow(timeout_s=60)
+                else:
+                    log.warning(
+                        "Pill-ID verification failed; routing to reject bin"
+                    )
+                    diverter.reject()
+                    pill_taken_actual = False
+            # --- /Phase 4 ------------------------------------------------------
 
             report_intake(patient_id, slot, verified=pill_taken_actual)
             log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
