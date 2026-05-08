@@ -20,6 +20,7 @@ from hardware.diverter import Diverter
 from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
+from hardware.temp_sensor import TempSensor
 from vision import CameraSource, IntakeMonitor, LivenessDetector, PillVerifier, open_camera
 
 logging.basicConfig(
@@ -76,6 +77,22 @@ def report_intake(patient_id: int, slot: int, verified: bool) -> None:
     )
 
 
+def report_temperature(value_c: float) -> None:
+    """POST a temperature sample to the backend; backend decides if it alerts."""
+    assert session is not None, "session not initialized; call run() first"
+    payload: dict = {"value_c": value_c}
+    if settings.DISPENSER_ID:
+        payload["dispenser_id"] = settings.DISPENSER_ID
+    try:
+        session.post(
+            f"{settings.BACKEND_URL}/api/alerts/temperature",
+            json=payload,
+            timeout=5,
+        )
+    except requests.RequestException as exc:
+        log.warning("temperature post failed: %s", exc)
+
+
 def run() -> None:
     global session
 
@@ -105,6 +122,7 @@ def run() -> None:
     ejector = Ejector()
     diverter = Diverter()
     drawer_lock = DrawerLock()
+    temp_sensor = TempSensor()
 
     # HI-012: Refuse to run as if hardware were real when it isn't.
     hardware_stubbed = (
@@ -112,18 +130,20 @@ def run() -> None:
         or ejector.is_stub
         or diverter.is_stub
         or drawer_lock.is_stub
+        or temp_sensor.is_stub
     )
     if hardware_stubbed:
         if not settings.STUB_MODE:
             log.error(
                 "Hardware initialization degraded (magazine.is_stub=%s, "
-                "ejector.is_stub=%s, diverter.is_stub=%s, drawer_lock.is_stub=%s) "
-                "but PHARMGUARD_STUB is not set. Refusing to run — telemetry "
-                "would be falsified.",
+                "ejector.is_stub=%s, diverter.is_stub=%s, drawer_lock.is_stub=%s, "
+                "temp_sensor.is_stub=%s) but PHARMGUARD_STUB is not set. "
+                "Refusing to run — telemetry would be falsified.",
                 magazine.is_stub,
                 ejector.is_stub,
                 diverter.is_stub,
                 drawer_lock.is_stub,
+                temp_sensor.is_stub,
             )
             sys.exit(1)
         log.warning(
@@ -155,6 +175,18 @@ def run() -> None:
     log.info("PharmGuard Edge started — waiting for schedule triggers")
 
     while True:
+        # ── Phase 5: tray temperature sample ──────────────────────────────
+        # One sample per loop tick; backend decides if it crosses threshold
+        # and inserts an `over_temperature` alert. Stub mode returns a safe
+        # 22 C constant so HI-012 invariant holds.
+        try:
+            value_c = temp_sensor.read_celsius()
+            if value_c is not None:
+                report_temperature(value_c)
+        except Exception:
+            log.exception("temperature sample failed")
+        # ── /Phase 5 ──────────────────────────────────────────────────────
+
         # TODO: Replace with real schedule lookup from backend
         # For now, a simple polling loop placeholder
         try:

@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, inventory, logs
+from app.api import alerts, auth, inventory, logs
 
 app = FastAPI(
     title="PharmGuard",
@@ -19,6 +19,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(inventory.router, prefix="/api/inventory", tags=["inventory"])
 app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
