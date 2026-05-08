@@ -49,12 +49,14 @@ echo "Updating package lists..."
 sudo apt-get update
 
 echo "Installing system dependencies..."
+# Trixie note: libatlas-base-dev was removed (ATLAS deprecated upstream;
+# numpy uses OpenBLAS via wheels). libtiff / libopenjp2 are no longer
+# required either — piwheels ships Pillow with vendored image libs.
+# If a wheel build later complains about missing libs on a non-piwheels
+# Pi, install on demand with `sudo apt-get install -y libopenblas0`.
 sudo apt-get install -y \
     python3-venv \
     python3-pip \
-    libatlas-base-dev \
-    libopenjp2-7 \
-    libtiff6 \
     ffmpeg \
     python3-libcamera \
     python3-picamera2
