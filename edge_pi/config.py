@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 _MISSING_ENV_HINT = "see edge_pi/.env.example"
@@ -53,6 +54,10 @@ class _Settings:
     DISPENSER_ID: str
     BENCH_MODE: bool
     BENCH_LOG_PATH: str
+    # Phase 8: offline queue + reliability
+    OFFLINE_QUEUE_PATH: str
+    OFFLINE_MAX_AGE_SECONDS: float
+    OFFLINE_REPLAY_INTERVAL_S: float
 
     def validate(self) -> None:
         """Enforce production-safety invariants. Idempotent.
@@ -88,6 +93,18 @@ def _load() -> _Settings:
     dispenser_id = os.environ.get("DISPENSER_ID", "")
     bench_mode = os.environ.get("BENCH_MODE", "0") == "1"
     bench_log_path = os.environ.get("BENCH_LOG_PATH", "/tmp/bench_e2e.csv")
+    # Phase 8: offline queue + reliability. Defaults are safe-for-prod:
+    # 1 h max-age before refuse-to-dispense, 30 s replay cadence, queue
+    # under ~/.pharmguard/ so a fresh Pi clone bootstraps without a
+    # mkdir step.
+    offline_queue_path = os.environ.get(
+        "OFFLINE_QUEUE_PATH",
+        str(Path.home() / ".pharmguard" / "queue.db"),
+    )
+    offline_max_age = float(os.environ.get("OFFLINE_MAX_AGE_SECONDS", "3600"))
+    offline_replay_interval = float(
+        os.environ.get("OFFLINE_REPLAY_INTERVAL_S", "30")
+    )
     return _Settings(
         BACKEND_URL=backend_url,
         DEVICE_TOKEN=device_token,
@@ -96,6 +113,9 @@ def _load() -> _Settings:
         DISPENSER_ID=dispenser_id,
         BENCH_MODE=bench_mode,
         BENCH_LOG_PATH=bench_log_path,
+        OFFLINE_QUEUE_PATH=offline_queue_path,
+        OFFLINE_MAX_AGE_SECONDS=offline_max_age,
+        OFFLINE_REPLAY_INTERVAL_S=offline_replay_interval,
     )
 
 
