@@ -5,7 +5,7 @@ import hmac
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from core.config import settings
+from config import settings
 from core.security import verify_device_token
 from db.base import get_supabase
 

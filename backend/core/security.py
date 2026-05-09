@@ -3,11 +3,11 @@
 import hmac
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, Header, HTTPException
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt
 
-from core.config import settings
+from config import settings
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 480  # 8-hour shift
@@ -48,3 +48,19 @@ async def verify_device_token(
             return token
 
     raise HTTPException(status_code=401, detail="Invalid device token")
+
+
+async def verify_device_api_key(
+    x_device_api_key: str | None = Header(default=None),
+) -> None:
+    """FastAPI dependency for /api/device/* — frontend -> ngrok -> Pi.
+
+    Distinct from verify_device_token: uses an X-Device-API-Key header
+    (not Bearer) and matches one shared secret (not a comma-sep set).
+    Same fail-closed posture: 503 when unconfigured, 401 on mismatch.
+    """
+    key = settings.device_api_key
+    if not key:
+        raise HTTPException(status_code=503, detail="Device API key not configured")
+    if not x_device_api_key or not hmac.compare_digest(x_device_api_key, key):
+        raise HTTPException(status_code=401, detail="Invalid device API key")

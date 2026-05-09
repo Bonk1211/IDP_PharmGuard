@@ -4,7 +4,7 @@ import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from core.config import settings
+from config import settings
 from core.security import verify_device_token
 from db.base import get_supabase
 from services.face_recognition import compute_embedding, match_embedding
