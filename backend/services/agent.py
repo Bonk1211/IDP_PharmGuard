@@ -54,8 +54,10 @@ Hard rules:
   anomalies (missed doses, low confidence, expiring soon).
 - Keep replies under ~250 words unless asked to expand.
 
-Available tools (use them aggressively — start with `today_summary` for
-broad questions, then drill down):
+Available tools (use them aggressively — start with `query_flags` for
+"what needs my attention", or `today_summary` for broad questions, then
+drill down):
+  - query_flags          ← proactive anomalies (use FIRST for "what's wrong")
   - today_summary
   - query_adherence
   - query_alerts
@@ -70,9 +72,13 @@ pharmacist at the PharmGuard ward.
 
 Constraints:
 - Markdown only. Top-level heading like "## Shift handover — {when}".
-- Cover, in this order: 1) at-a-glance numbers, 2) missed/low-confidence
-  doses with patient names, 3) alerts (expiry / low_stock), 4) anything
-  that needs attention next shift.
+- Cover, in this order:
+  1. at-a-glance numbers,
+  2. "## Open flags" — list each `open_flags[].title` as a bullet (omit IDs;
+     write "(none)" if `open_flags_count` is 0),
+  3. missed / low-confidence doses with patient names,
+  4. alerts (expiry / low_stock),
+  5. anything else that needs attention next shift.
 - Use ONLY the data provided in the prefetched payload. Do NOT invent.
 - Keep it under 200 words; bullets, not prose paragraphs.
 - If a section has no data, write "(none)" rather than skipping it.
@@ -316,6 +322,21 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
     low_stock = await asyncio.to_thread(
         agent_tools.query_medications, low_stock_only=True,
     )
+    open_flags = await asyncio.to_thread(
+        agent_tools.query_flags, status="open", limit=10,
+    )
+    # Strip the heavyweight `payload` jsonb from each flag — the brief only
+    # needs the human-readable surface (kind/severity/title/detail).
+    open_flags_brief = [
+        {
+            "kind": f.get("kind"),
+            "severity": f.get("severity"),
+            "title": f.get("title"),
+            "detail": f.get("detail"),
+            "patient_id": f.get("patient_id"),
+        }
+        for f in open_flags
+    ]
 
     payload = {
         "now_local": datetime.now().astimezone().isoformat(),
@@ -324,6 +345,8 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
         "missed_doses": missed,
         "alerts": alerts,
         "low_stock_medications": low_stock,
+        "open_flags": open_flags_brief,
+        "open_flags_count": len(open_flags),
     }
 
     user_prompt = (
@@ -353,5 +376,6 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
             "n_missed": len(missed),
             "n_alerts": len(alerts),
             "n_low_stock": len(low_stock),
+            "n_open_flags": len(open_flags),
         },
     }

@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from config import settings
 from db.base import get_supabase
 from services.agent import generate_brief
+from services.flag_detector import detect_and_persist_flags
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,15 @@ async def brief_scheduler_loop() -> None:
                 _next_hour_label(target_hours) if target_hours else -1,
             )
             await asyncio.sleep(wait_s)
+
+            log.info("brief scheduler: running flag detection")
+            detect_summary = await detect_and_persist_flags()
+            log.info(
+                "brief scheduler: detection done — new=%d by_kind=%s gemini=%s",
+                detect_summary["new_flags"],
+                detect_summary["by_kind"],
+                detect_summary["gemini_used"],
+            )
 
             log.info("brief scheduler: generating shift_handover brief")
             brief = await generate_brief(kind="shift_handover")

@@ -47,7 +47,7 @@ export type AgentBrief = {
   created_at?: string;
 };
 
-function isAgentConfigured(): boolean {
+export function isAgentConfigured(): boolean {
   return Boolean(baseUrl && apiKey);
 }
 
@@ -119,4 +119,94 @@ async function safeError(r: Response): Promise<string> {
   } catch {
     return r.statusText || "unknown";
   }
+}
+
+// ──────────────────────────── flags ──────────────────────────────────────
+
+export type AgentFlagStatus = "open" | "acked" | "resolved" | "dismissed";
+export type AgentFlagKind =
+  | "missed_streak"
+  | "low_confidence"
+  | "trending_empty"
+  | "notable_pattern";
+export type AgentFlagSeverity = "info" | "warning" | "critical";
+
+export type AgentFlag = {
+  id: number;
+  kind: AgentFlagKind;
+  severity: AgentFlagSeverity;
+  status: AgentFlagStatus;
+  title: string;
+  detail: string | null;
+  patient_id: number | null;
+  dispenser_id: string | null;
+  slot: number | null;
+  fingerprint: string | null;
+  payload: Record<string, unknown>;
+  detected_by: "heuristic" | "gemini";
+  created_at: string;
+  acked_at: string | null;
+  resolved_at: string | null;
+  resolved_by_user: string | null;
+  resolution_note: string | null;
+};
+
+export async function fetchOpenFlags(limit = 25): Promise<AgentFlag[]> {
+  if (!isAgentConfigured()) return [];
+  try {
+    const r = await fetch(
+      `${baseUrl}/api/agent/flags/?status=open&limit=${limit}`,
+      { headers: authHeaders(), cache: "no-store" },
+    );
+    if (!r.ok) return [];
+    return (await r.json()) as AgentFlag[];
+  } catch {
+    return [];
+  }
+}
+
+async function flagTransition(
+  id: number,
+  action: "ack" | "resolve" | "dismiss",
+  body?: { note?: string | null; resolved_by?: string | null },
+): Promise<AgentFlag> {
+  if (!isAgentConfigured()) {
+    throw new Error("Agent not configured.");
+  }
+  const r = await fetch(`${baseUrl}/api/agent/flags/${id}/${action}`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: action === "ack" ? undefined : JSON.stringify(body ?? {}),
+  });
+  if (!r.ok) {
+    const detail = await safeError(r);
+    throw new Error(`flag ${action} failed (${r.status}): ${detail}`);
+  }
+  return (await r.json()) as AgentFlag;
+}
+
+export function ackFlag(id: number): Promise<AgentFlag> {
+  return flagTransition(id, "ack");
+}
+
+export function resolveFlag(
+  id: number,
+  note?: string,
+  resolvedBy?: string,
+): Promise<AgentFlag> {
+  return flagTransition(id, "resolve", {
+    note: note?.trim() ? note.trim() : null,
+    resolved_by: resolvedBy?.trim() ? resolvedBy.trim() : null,
+  });
+}
+
+export function dismissFlag(
+  id: number,
+  note?: string,
+  resolvedBy?: string,
+): Promise<AgentFlag> {
+  return flagTransition(id, "dismiss", {
+    note: note?.trim() ? note.trim() : null,
+    resolved_by: resolvedBy?.trim() ? resolvedBy.trim() : null,
+  });
 }

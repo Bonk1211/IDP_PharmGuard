@@ -31,7 +31,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import agent, alerts, auth, device, inventory, logs
+from api import agent, alerts, auth, device, flags, inventory, logs
 from config import settings
 from scheduler.background import HardwareLoop
 from scheduler.brief_scheduler import brief_scheduler_loop
@@ -108,6 +108,7 @@ app.add_middleware(
 )
 
 app.include_router(agent.router, prefix="/api/agent", tags=["agent"])
+app.include_router(flags.router, prefix="/api/agent/flags", tags=["agent-flags"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(device.router, prefix="/api/device", tags=["device"])

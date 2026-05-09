@@ -62,6 +62,13 @@ class Settings(BaseSettings):
     # Empty string -> scheduler still runs but never fires (manual-only briefs).
     agent_brief_local_hours: str = "7,19"
 
+    # ── Flag detection thresholds ────────────────────────────────────────
+    agent_flag_missed_streak_threshold: int = 3
+    agent_flag_low_confidence_threshold: float = 0.55
+    # Flip off the Gemini soft-pattern pass without unsetting GEMINI_API_KEY
+    # (which would also disable chat + brief).
+    agent_flag_gemini_enabled: bool = True
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

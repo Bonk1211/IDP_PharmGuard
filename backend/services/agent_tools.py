@@ -215,6 +215,40 @@ def list_patients(**kwargs: Any) -> list[dict]:
     return q.execute().data or []
 
 
+# ──────────────────────────── tool: query_flags ────────────────────────────
+
+class QueryFlagsArgs(BaseModel):
+    model_config = {"extra": "forbid"}
+    status: str | None = Field(
+        default="open",
+        description="Filter by status: open | acked | resolved | dismissed.",
+    )
+    kind: str | None = Field(
+        default=None,
+        description="Filter by kind: missed_streak | low_confidence | trending_empty | notable_pattern.",
+    )
+    patient_id: int | None = Field(default=None)
+    limit: int = Field(default=20, ge=1, le=200)
+
+
+def query_flags(**kwargs: Any) -> list[dict]:
+    args = QueryFlagsArgs(**kwargs)
+    sb = get_supabase()
+    q = (
+        sb.table("agent_flags")
+        .select("*")
+        .order("created_at", desc=True)
+        .limit(args.limit)
+    )
+    if args.status is not None:
+        q = q.eq("status", args.status)
+    if args.kind is not None:
+        q = q.eq("kind", args.kind)
+    if args.patient_id is not None:
+        q = q.eq("patient_id", args.patient_id)
+    return q.execute().data or []
+
+
 # ──────────────────────────── registry ──────────────────────────────────────
 
 ToolFn = Callable[..., Any]
@@ -229,6 +263,17 @@ class ToolDef(BaseModel):
 
 
 TOOLS: list[ToolDef] = [
+    ToolDef(
+        name="query_flags",
+        description=(
+            "List agent-detected flags (proactive anomalies). Default returns "
+            "OPEN flags. Use this FIRST when the clinician asks 'what needs my "
+            "attention' / 'anything wrong' — start here BEFORE today_summary. "
+            "Each row has kind, severity, title, detail, fingerprint."
+        ),
+        args_schema=QueryFlagsArgs,
+        fn=query_flags,
+    ),
     ToolDef(
         name="today_summary",
         description=(
