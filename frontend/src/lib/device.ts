@@ -83,3 +83,20 @@ export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
     return { ok: false, status: 0 };
   }
 }
+
+/**
+ * Build the URL for the MJPEG live stream of a camera. For use in
+ * <img src="..." />. Auth flows via `?key=...` query param because
+ * browser <img> can't set custom headers.
+ *
+ * SECURITY NOTE: the API key is in the URL; it'll appear in browser
+ * history + ngrok logs. Acceptable for a dev/demo dashboard;
+ * route through a Supabase Edge Function proxy for production.
+ *
+ * Returns null when device env isn't configured (UI should hide the
+ * <img> in that case).
+ */
+export function streamUrl(camNum: 0 | 1): string | null {
+  if (!isDeviceConfigured()) return null;
+  return `${baseUrl}/api/device/stream/${camNum}?key=${encodeURIComponent(apiKey)}`;
+}

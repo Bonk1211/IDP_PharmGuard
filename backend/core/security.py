@@ -3,7 +3,7 @@
 import hmac
 from datetime import datetime, timedelta, timezone
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import jwt
 
@@ -52,15 +52,23 @@ async def verify_device_token(
 
 async def verify_device_api_key(
     x_device_api_key: str | None = Header(default=None),
+    key: str | None = Query(default=None),
 ) -> None:
     """FastAPI dependency for /api/device/* — frontend -> ngrok -> Pi.
 
-    Distinct from verify_device_token: uses an X-Device-API-Key header
-    (not Bearer) and matches one shared secret (not a comma-sep set).
+    Accepts EITHER:
+      * X-Device-API-Key header  (preferred — used by fetch())
+      * ?key=...  query param    (used by browser <img> tags for the
+                                   MJPEG streaming endpoint, where headers
+                                   can't be set)
+
     Same fail-closed posture: 503 when unconfigured, 401 on mismatch.
+    The query-param path is a soft secret (URL leaks to browser history,
+    server logs); pair with HTTPS-only ngrok and short-lived URLs in prod.
     """
-    key = settings.device_api_key
-    if not key:
+    expected = settings.device_api_key
+    if not expected:
         raise HTTPException(status_code=503, detail="Device API key not configured")
-    if not x_device_api_key or not hmac.compare_digest(x_device_api_key, key):
+    candidate = x_device_api_key or key
+    if not candidate or not hmac.compare_digest(candidate, expected):
         raise HTTPException(status_code=401, detail="Invalid device API key")
