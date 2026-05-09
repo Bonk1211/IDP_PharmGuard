@@ -10,6 +10,7 @@ export interface Patient {
   allergies: string[];
   contraindications: string[];
   created_at: string;
+  dispenser_id: string | null;        // nullable; null = unassigned
 }
 
 export interface SlotInfo {
@@ -75,6 +76,48 @@ export async function createPatient(input: CreatePatientInput): Promise<Patient>
     .single();
   if (error) throw error;
   return data;
+}
+
+export type PatientPatch = Partial<{
+  name: string;
+  gender: string | null;
+  age: number | null;
+  condition: string | null;
+  status: string | null;
+  allergies: string[];
+  contraindications: string[];
+  dispenser_id: string | null;
+}>;
+
+export async function updatePatient(id: number, patch: PatientPatch): Promise<Patient> {
+  const { data, error } = await supabase
+    .from("patients")
+    .update(patch)
+    .eq("id", id)
+    .select()
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+/**
+ * Distinct dispenser IDs already in use, sourced from the medications
+ * table (which has dispenser_id from migration 0001). Used to populate
+ * the autocomplete suggestions on the patient assignment input. Returns
+ * an empty array if Supabase is misconfigured — the input still works
+ * as plain free text.
+ */
+export async function fetchKnownDispensers(): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("medications")
+    .select("dispenser_id")
+    .not("dispenser_id", "is", null);
+  if (error) return [];
+  const set = new Set<string>();
+  for (const row of (data ?? []) as { dispenser_id: string | null }[]) {
+    if (row.dispenser_id) set.add(row.dispenser_id);
+  }
+  return [...set].sort();
 }
 
 // ── Medications / Slots (per-patient, 10 slots each) ──

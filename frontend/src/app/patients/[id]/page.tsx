@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   fetchPatient, fetchLogs, fetchSlotsByPatient, updateSlot, deleteSlot,
+  fetchKnownDispensers, updatePatient,
   type Patient, type IntakeRecord, type SlotInfo,
 } from "@/lib/api";
 import { isDeviceConfigured, triggerDispense } from "@/lib/device";
@@ -39,6 +40,29 @@ export default function PatientDetailPage() {
   const [dispenseMsg, setDispenseMsg] = useState<string | null>(null);
   const deviceConfigured = isDeviceConfigured();
 
+  // Dispenser assignment (admin)
+  const [dispenserDraft, setDispenserDraft] = useState<string>("");
+  const [knownDispensers, setKnownDispensers] = useState<string[]>([]);
+  const [savingDispenser, setSavingDispenser] = useState(false);
+  const [dispenserMsg, setDispenserMsg] = useState<string | null>(null);
+
+  async function handleSaveDispenser() {
+    setSavingDispenser(true);
+    setDispenserMsg(null);
+    try {
+      const trimmed = dispenserDraft.trim();
+      const updated = await updatePatient(pid, {
+        dispenser_id: trimmed === "" ? null : trimmed,
+      });
+      setPatient(updated);
+      setDispenserMsg(trimmed ? `Assigned to ${trimmed}` : "Unassigned");
+    } catch (e) {
+      setDispenserMsg(`Save failed: ${(e as Error).message}`);
+    } finally {
+      setSavingDispenser(false);
+    }
+  }
+
   async function handleDispenseNow() {
     setDispensing(true);
     setDispenseMsg(null);
@@ -67,7 +91,13 @@ export default function PatientDetailPage() {
 
   useEffect(() => {
     loadData().catch(() => setLoading(false));
+    fetchKnownDispensers().then(setKnownDispensers).catch(() => {});
   }, [id]);
+
+  // Sync the editable draft when the patient record loads / changes.
+  useEffect(() => {
+    setDispenserDraft(patient?.dispenser_id ?? "");
+  }, [patient?.dispenser_id]);
 
   async function handleSaveSlot(slotNum: number) {
     if (!slotForm.medication_name.trim()) return;
@@ -149,6 +179,46 @@ export default function PatientDetailPage() {
             {dispenseMsg && (
               <p className="mt-2 text-xs text-gray-600">{dispenseMsg}</p>
             )}
+
+            {/* Dispenser assignment (admin) */}
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-sand-200 bg-sand-50 p-3 text-xs">
+              <span className="text-gray-500">Assigned dispenser:</span>
+              <input
+                list="known-dispensers"
+                value={dispenserDraft}
+                onChange={(e) => setDispenserDraft(e.target.value)}
+                placeholder="(unassigned)"
+                className="w-44 rounded-md border border-sand-200 bg-white px-2 py-1 font-mono text-xs text-gray-800 focus:border-olive-400 focus:outline-none"
+              />
+              <datalist id="known-dispensers">
+                {knownDispensers.map((d) => (
+                  <option key={d} value={d} />
+                ))}
+              </datalist>
+              <button
+                onClick={handleSaveDispenser}
+                disabled={
+                  savingDispenser ||
+                  (dispenserDraft.trim() === (patient.dispenser_id ?? "").trim())
+                }
+                className="rounded-md border border-olive-300 bg-olive-100 px-3 py-1 font-medium text-olive-800 hover:bg-olive-200 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {savingDispenser ? "Saving..." : "Save"}
+              </button>
+              {patient.dispenser_id ? (
+                <Link
+                  href={`/dispensers/${encodeURIComponent(patient.dispenser_id)}`}
+                  className="inline-flex items-center gap-1 rounded-md border border-olive-300 bg-olive-700 px-3 py-1 font-medium text-white hover:bg-olive-800"
+                >
+                  Open dispenser →
+                </Link>
+              ) : (
+                <span className="text-gray-400">Save an ID, then click to open the live view</span>
+              )}
+              {dispenserMsg && (
+                <span className="ml-auto text-gray-500">{dispenserMsg}</span>
+              )}
+            </div>
 
             <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 sm:grid-cols-4">
               <div>
