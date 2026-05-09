@@ -7,7 +7,7 @@ Pin map derived from current source. Authoritative sources:
 | Magazine stepper (NEMA17 + A4988) | `backend/hardware/magazine.py:15-18` | `PIN_STEP=17`, `PIN_DIR=27`, `PIN_ENABLE=22` |
 | Ejector stepper (28BYJ-48 + ULN2003) | `backend/hardware/ejector.py:34-38` | `PIN_IN1=5`, `PIN_IN2=6`, `PIN_IN3=16`, `PIN_IN4=26` |
 | Drawer-lock servo (SG90) | `backend/hardware/drawer_lock.py:42` | `PIN_SERVO=18` (hardware PWM0) |
-| Tray temp DHT11 | `backend/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=4` |
+| Tray temp DHT11 | `backend/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=23` |
 | Pill / intake cams | `backend/vision/camera.py` | CSI ports CAM0 + CAM1 |
 
 If a pin constant changes in code, update this file in the same commit.
@@ -34,17 +34,17 @@ BCM <-> physical pin mapping for every pin we drive:
 | 3V3 | 1 | 3V3 power | DHT11 VDD + 10 kohm pull-up | - | Do NOT power servo / 28BYJ-48 from this rail |
 | 5V  | 2  | 5V power  | (unused — SG90 + ULN2003 use ext 5V) | - | Pi 5V is for the Pi itself |
 | GND | 6,9,14,20,25,30,34,39 | Ground | Common ground for ALL subsystems | - | Tie every PSU GND back here |
-| 4   | 7  | GPIO        | DHT11 DATA | IN/OUT | bit-banged via `adafruit-circuitpython-dht`; 10 kohm pull-up to 3V3 |
 | 5   | 29 | GPIO        | ULN2003 IN1 (28BYJ-48 ejector) | OUT | 1 of 4 stepper coils |
 | 6   | 31 | GPIO        | ULN2003 IN2 (28BYJ-48 ejector) | OUT | 2 of 4 stepper coils |
 | 16  | 36 | GPIO        | ULN2003 IN3 (28BYJ-48 ejector) | OUT | 3 of 4 stepper coils |
 | 17  | 11 | GPIO        | A4988 STEP (NEMA17 magazine) | OUT | 5 us pulses |
 | 18  | 12 | PWM0 (HW)   | SG90 drawer-lock servo signal | PWM 50 Hz | hardware PWM channel 0 |
 | 22  | 15 | GPIO        | A4988 ENABLE (NEMA17 magazine) | OUT | active-low -> driven LOW = enabled |
+| 23  | 16 | GPIO        | DHT11 DATA | IN/OUT | bit-banged via `adafruit-circuitpython-dht`; 10 kohm pull-up to 3V3 |
 | 26  | 37 | GPIO        | ULN2003 IN4 (28BYJ-48 ejector) | OUT | 4 of 4 stepper coils |
 | 27  | 13 | GPIO        | A4988 DIR (NEMA17 magazine) | OUT | HIGH = forward (slot index +) |
 
-Free / unused: BCM 13 (was diverter PWM1), BCM 23 (was drawer solenoid). Reserve hardware PWM0 (BCM 18) for the servo — software PWM jitters and the SG90 will twitch.
+Free / unused: BCM 4 (kernel can claim for w1-gpio / camera-i2c), BCM 13 (was diverter PWM1). Reserve hardware PWM0 (BCM 18) for the servo — software PWM jitters and the SG90 will twitch.
 
 CSI camera ports (separate ribbon connectors, NOT the 40-pin header):
 
@@ -147,11 +147,13 @@ The 3-pin DHT11 module variant has the 10 kohm pull-up already on board (look fo
 ```
    3V3 (pin 1) --+-- DHT11 VCC (+)
                  |
-                 +-- [10 kohm] -- DHT11 DATA -- Pi physical 7 (BCM 4)
+                 +-- [10 kohm] -- DHT11 DATA -- Pi physical 16 (BCM 23)
                  |   (skip if 3-pin module — pull-up is on the PCB)
                  +
                 GND ----------- DHT11 GND (-) -- Pi GND (pin 9)
 ```
+
+Pin choice rationale: BCM 4 (the obvious "default" for w1-gpio) is risky on Pi 5 because kernel overlays (w1-gpio, camera-i2c) can claim it system-wide and lgpio sees `'GPIO busy'`. BCM 23 has no peripheral aliasing.
 
 **No `dtoverlay`** required — DHT11 is bit-banged via libgpiod. The python lib is already pinned in `backend/requirements.txt` (`adafruit-circuitpython-dht`).
 
@@ -173,7 +175,7 @@ CSI ribbons go straight into CAM0 / CAM1 on the Pi 5 board. No GPIO wiring. `vis
 
 Follow this sequence on the bench. Each step is a kill-switch — stop if it fails.
 
-1. **Pi alone** boots. `pinctrl get 17,27,22,18,5,6,16,26,4` returns `ip` / `op` cleanly.
+1. **Pi alone** boots. `pinctrl get 17,27,22,18,23,5,6,16,26` returns `ip` / `op` cleanly.
 2. **DHT11** wired. `python hardware/test_dht11.py` returns a number, not `None`.
 3. **Drawer servo** wired (latch arm detached so it can swing freely). `sudo -E .venv/bin/python hardware/test_drawer.py` shows visible rotation LOCK -> UNLOCK -> LOCK.
 4. **A4988 Vref** set with motor disconnected. Then plug 17HS8401.
@@ -204,11 +206,11 @@ Stub mode (`PHARMGUARD_STUB=1`) skips every wiring failure with warnings — onl
    3V3 (1)  (2)  5V
     SDA (3)  (4)  5V
     SCL (5)  (6)  GND
-   DHT (7)  (8)  TXD          <- BCM 4 = DHT11 DATA
+    -  (7)  (8)  TXD
         GND (9) (10) RXD
    STEP (11)(12) DRAWER       <- BCM 17 mag STEP / BCM 18 drawer servo (PWM0)
     DIR (13)(14) GND          <- BCM 27 mag DIR
-    EN  (15)(16) -            <- BCM 22 mag EN
+    EN  (15)(16) DHT          <- BCM 22 mag EN / BCM 23 DHT11 DATA
    3V3 (17)(18) -
     -  (19)(20) GND
     -  (21)(22) -

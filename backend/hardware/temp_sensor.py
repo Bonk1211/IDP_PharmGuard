@@ -1,10 +1,15 @@
 """
 Tray temperature sensor — DHT11 over a single GPIO data line.
 
-Wiring (BCM 4, physical pin 7) — same pin DS18B20 used:
+Wiring (BCM 23, physical pin 16):
     DHT11 VCC  -> Pi 3V3 (pin 1)
-    DHT11 DATA -> Pi BCM 4 (pin 7)  + 10 kohm pull-up to 3V3
+    DHT11 DATA -> Pi BCM 23 (pin 16)  + 10 kohm pull-up to 3V3
     DHT11 GND  -> Pi GND  (pin 9)
+
+(Was BCM 4 originally; moved because Pi 5 kernel can claim BCM 4 for
+w1-gpio / camera-i2c overlays, leaving lgpio with 'GPIO busy'. BCM 23
+is plain GPIO with no peripheral aliasing — free since we removed the
+solenoid drawer-lock.)
 
 DHT11 quirks vs DS18B20:
   * Bit-banged single-wire protocol; we use adafruit-circuitpython-dht which
@@ -30,8 +35,9 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# Same physical pin DS18B20 used (BCM 4 / phys 7). board.D4 maps to it.
-DHT_BCM_PIN = 4
+# BCM 23 / physical pin 16. Re-using the pin freed when we dropped the
+# solenoid drawer-lock — plain GPIO, no peripheral aliasing.
+DHT_BCM_PIN = 23
 STUB_TEMP_C = 22.0  # safe-room value; below the 30 C default backend threshold
 READ_RETRIES = 3
 RETRY_BACKOFF_S = 1.1  # DHT11 needs ~1 s between successful reads
@@ -53,8 +59,9 @@ class TempSensor:
             import adafruit_dht
             import board
 
-            # board.D4 = BCM 4; if DHT_BCM_PIN ever changes, swap accordingly.
-            self._sensor = adafruit_dht.DHT11(board.D4, use_pulseio=False)
+            # board.D23 = BCM 23. Keep this attribute name in sync with
+            # DHT_BCM_PIN above — adafruit-blinka exposes board.D0 .. D27.
+            self._sensor = adafruit_dht.DHT11(board.D23, use_pulseio=False)
             self._is_stub = False
             log.info("DHT11 initialized on BCM %d", DHT_BCM_PIN)
             return
