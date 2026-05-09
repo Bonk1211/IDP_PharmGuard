@@ -1,22 +1,23 @@
-"""Bench-test the ejector SG90 servo (BCM 18 / hardware PWM0).
+"""Bench-test the ejector 28BYJ-48 stepper (ULN2003 on BCM 5/6/16/26).
 
-Run on the Pi only. END-STOPS MUST BE FITTED — SG90 burns out under
-sustained stall.
+Run on the Pi only.
 
     sudo systemctl stop pharmguard
-    cd ~/IDP_PharmGuard/edge_pi && source .venv/bin/activate
-    python hardware/test_ejector.py
+    cd ~/IDP_PharmGuard/backend && source .venv/bin/activate
+    sudo -E .venv/bin/python hardware/test_ejector.py
 
-Repeats the push-then-rest cycle 3 times (push() already returns servo
-to rest internally — see ejector.py:55-66).
+Repeats the push (forward + return) cycle 3 times. push() de-energises
+coils between cycles so the motor doesn't overheat.
 
-Expected: 3 clean swing-and-return motions.
+Expected: 3 clean rotations forward + back. Quiet operation between cycles.
 Fail modes:
-  * Twitches, doesn't reach end -> 5 V rail sagging. Move SG90 V+ off Pi
-    pin 2 onto an external 5 V PSU (still tie GND to Pi GND).
-  * Jitters at rest -> soft-PWM jitter. Confirm signal IS on BCM 18
-    (physical pin 12) AND `dtparam=i2s=off` (default on Bookworm/Trixie).
-  * No movement at all -> signal pin wrong, OR ext 5V GND not tied to Pi GND.
+  * No movement -> ULN2003 +5V supply not connected, or external 5V GND
+    not tied to Pi GND. Use a multimeter on IN1..IN4 — should toggle.
+  * Stalls / loud buzzing -> step rate too fast or 5V sagging. Increase
+    STEP_DELAY_S in ejector.py, or use a beefier 5V PSU (>= 1A).
+  * Coils get hot at rest -> push() didn't de-energise; verify the
+    de-energise loop at the bottom of push() runs.
+  * Direction reversed -> swap any 2 of the 4 IN pins.
 """
 
 from __future__ import annotations
