@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from core.security import verify_device_api_key
@@ -81,16 +81,27 @@ async def reset(request: Request):
 
 
 @router.get("/stream/{cam_num}")
-async def stream_camera(cam_num: int, request: Request):
+async def stream_camera(
+    cam_num: int,
+    request: Request,
+    annotate: bool = Query(
+        default=False,
+        description="Overlay YOLO spotter boxes (cam 0 only).",
+    ),
+):
     """MJPEG live stream for `cam_num` (0=tray, 1=intake/face).
 
     Reads frames from the dispense cycle's camera handle (a producer
     thread inside RpicamSource fans the single rpicam-vid TCP feed out
     to N consumers — the cycle and any number of /stream/* clients).
 
+    With `?annotate=1` and cam_num=0, each frame is run through the
+    YOLO spotter (the same model PillVerifier loaded at first cycle)
+    and bounding boxes are rendered. Stream rate drops to ~5 fps in
+    annotated mode because YOLO on Pi 5 CPU is ~150-200 ms/frame.
+
     Returns multipart/x-mixed-replace which browsers render natively in
-    an <img> tag. Frame rate matches rpicam-vid (~15 fps); each frame
-    is JPEG-encoded at quality 70.
+    an <img> tag. Frame rate matches rpicam-vid (~15 fps) when raw.
 
     Auth: same X-Device-API-Key as the rest of /api/device/*. For
     browser <img> tags (which can't set headers) pass `?key=<value>`.
@@ -111,28 +122,59 @@ async def stream_camera(cam_num: int, request: Request):
     if cam is None:
         raise HTTPException(status_code=503, detail=f"cam_{cam_num} not open")
     if not hasattr(cam, "latest_frame_jpeg"):
-        # Cv2Source / Picamera2Source don't (yet) implement the multi-consumer
-        # buffer. Should never happen on Pi 5 + rpicam-vid path.
         raise HTTPException(
             status_code=501,
             detail="Camera backend doesn't expose latest_frame_jpeg",
         )
 
-    # Cap stream framerate — no point sending faster than rpicam-vid produces.
-    target_fps = 15
+    # Annotation: only meaningful for cam 0 (the spotter is for the tray).
+    # Cam 1 uses MediaPipe FaceMesh+Hands during cycle's swallow FSM —
+    # different output shape; not exposed here.
+    do_annotate = annotate and cam_num == 0
+    verifier = getattr(state, "verifier", None) if state else None
+
+    # ── Annotated path: run YOLO, draw boxes, encode ───────────────────
+    if do_annotate:
+        if verifier is None:
+            raise HTTPException(status_code=503, detail="PillVerifier not initialised")
+        # Force-load the model now (would otherwise wait for first cycle).
+        await asyncio.to_thread(verifier._ensure_model)
+        target_fps = 5  # YOLO Pi-5 CPU is ~5 fps max
+    else:
+        target_fps = 15
     frame_interval_s = 1.0 / target_fps
 
+    def _annotate_frame(frame):
+        """Run YOLO + draw boxes; return JPEG bytes. Lazy cv2/ultralytics import."""
+        import cv2
+        results = verifier._model(frame, verbose=False)
+        # ultralytics' .plot() returns a numpy ndarray with boxes/labels burned in.
+        annotated = results[0].plot() if results else frame
+        ok, jpeg = cv2.imencode(
+            ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), _STREAM_JPEG_QUALITY],
+        )
+        return jpeg.tobytes() if ok else None
+
     async def frame_generator():
-        log.info("stream %d: client connected", cam_num)
+        log.info(
+            "stream %d: client connected (annotate=%s, target_fps=%d)",
+            cam_num, do_annotate, target_fps,
+        )
         try:
             while True:
                 if await request.is_disconnected():
                     break
-                payload = await asyncio.to_thread(
-                    cam.latest_frame_jpeg, _STREAM_JPEG_QUALITY
-                )
+                if do_annotate:
+                    frame = await asyncio.to_thread(cam.read_frame)
+                    if frame is None:
+                        await asyncio.sleep(0.05)
+                        continue
+                    payload = await asyncio.to_thread(_annotate_frame, frame)
+                else:
+                    payload = await asyncio.to_thread(
+                        cam.latest_frame_jpeg, _STREAM_JPEG_QUALITY
+                    )
                 if payload is None:
-                    # First frame not yet captured by the producer thread.
                     await asyncio.sleep(0.05)
                     continue
                 yield (

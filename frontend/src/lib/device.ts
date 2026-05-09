@@ -89,14 +89,16 @@ export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
  * <img src="..." />. Auth flows via `?key=...` query param because
  * browser <img> can't set custom headers.
  *
- * SECURITY NOTE: the API key is in the URL; it'll appear in browser
- * history + ngrok logs. Acceptable for a dev/demo dashboard;
- * route through a Supabase Edge Function proxy for production.
+ * `annotate=true` overlays YOLO spotter boxes (cam 0 only). Cam 1
+ * ignores the flag — its mediapipe FSM doesn't have a bbox output.
+ * Annotated streams drop to ~5 fps (YOLO inference ~150-200 ms on Pi 5).
  *
- * Returns null when device env isn't configured (UI should hide the
- * <img> in that case).
+ * SECURITY NOTE: the API key is in the URL; it'll appear in browser
+ * history + ngrok logs. Acceptable for a dev/demo dashboard.
  */
-export function streamUrl(camNum: 0 | 1): string | null {
+export function streamUrl(camNum: 0 | 1, opts?: { annotate?: boolean }): string | null {
   if (!isDeviceConfigured()) return null;
-  return `${baseUrl}/api/device/stream/${camNum}?key=${encodeURIComponent(apiKey)}`;
+  const params = new URLSearchParams({ key: apiKey });
+  if (opts?.annotate) params.set("annotate", "1");
+  return `${baseUrl}/api/device/stream/${camNum}?${params.toString()}`;
 }

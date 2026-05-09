@@ -19,8 +19,12 @@ export default function DispenserStreamPage() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [dispensing, setDispensing] = useState(false);
   const [dispenseMsg, setDispenseMsg] = useState<string | null>(null);
+  const [annotate, setAnnotate] = useState(false);
 
-  const cam0Url = streamUrl(0);
+  // Re-key the <img> when the toggle flips so the browser tears down
+  // the existing MJPEG connection and opens a fresh one with the new
+  // URL. Without re-keying, browsers may keep the old stream alive.
+  const cam0Url = streamUrl(0, { annotate });
   const cam1Url = streamUrl(1);
   const configured = isDeviceConfigured();
 
@@ -132,9 +136,29 @@ export default function DispenserStreamPage() {
         </div>
       )}
 
+      {/* Annotation toggle — affects cam 0 only */}
+      <div className="mb-3 flex items-center gap-2 text-xs">
+        <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-sand-200 bg-white px-3 py-1.5">
+          <input
+            type="checkbox"
+            checked={annotate}
+            onChange={(e) => setAnnotate(e.target.checked)}
+            className="h-3 w-3"
+          />
+          <span className="text-gray-700">Show YOLO spotter overlay (cam 0)</span>
+        </label>
+        {annotate && (
+          <span className="text-gray-400">~5 fps · YOLO inference is CPU-heavy</span>
+        )}
+      </div>
+
       {/* Live streams */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <CameraTile label="Cam 0 — tray (pill ID)" url={cam0Url} />
+        <CameraTile
+          key={`cam0-${annotate ? "annot" : "raw"}`}
+          label={`Cam 0 — tray (pill ID)${annotate ? " · annotated" : ""}`}
+          url={cam0Url}
+        />
         <CameraTile label="Cam 1 — patient-facing (intake)" url={cam1Url} />
       </div>
 
