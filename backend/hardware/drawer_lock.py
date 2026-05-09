@@ -37,10 +37,11 @@ class DrawerLock:
             import RPi.GPIO as GPIO
 
             GPIO.setmode(GPIO.BCM)
-            GPIO.setup(PIN_SOLENOID, GPIO.OUT)
             # Fail-safe default: drawer stays locked at boot. Patient must
             # never see an open drawer just because the Pi power-cycled.
-            GPIO.output(PIN_SOLENOID, GPIO.LOW)
+            # initial=GPIO.LOW required on Pi 5 + rpi-lgpio 0.6 (see magazine.py)
+            # AND it serves as the locked-state default for HI-012 fail-safe.
+            GPIO.setup(PIN_SOLENOID, GPIO.OUT, initial=GPIO.LOW)
             self.gpio = GPIO
             self._is_stub = False
             log.info("DrawerLock GPIO initialized (locked)")

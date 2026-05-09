@@ -37,9 +37,12 @@ class Magazine:
             import RPi.GPIO as GPIO
 
             GPIO.setmode(GPIO.BCM)
-            GPIO.setup(PIN_STEP, GPIO.OUT)
-            GPIO.setup(PIN_DIR, GPIO.OUT)
-            GPIO.setup(PIN_ENABLE, GPIO.OUT)
+            # initial=GPIO.LOW required on Pi 5 + rpi-lgpio 0.6: without
+            # an explicit initial value the shim calls lgpio.gpio_read on
+            # a not-yet-claimed line, raising 'GPIO not allocated'.
+            GPIO.setup(PIN_STEP, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(PIN_DIR, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(PIN_ENABLE, GPIO.OUT, initial=GPIO.LOW)
             GPIO.output(PIN_ENABLE, GPIO.LOW)  # Enable driver
             self.gpio = GPIO
             self._is_stub = False

@@ -39,7 +39,8 @@ class Diverter:
             import RPi.GPIO as GPIO
 
             GPIO.setmode(GPIO.BCM)
-            GPIO.setup(PIN_SERVO, GPIO.OUT)
+            # initial=GPIO.LOW required on Pi 5 + rpi-lgpio 0.6 (see magazine.py).
+            GPIO.setup(PIN_SERVO, GPIO.OUT, initial=GPIO.LOW)
             self.pwm = GPIO.PWM(PIN_SERVO, 50)  # 50 Hz for servo
             self.pwm.start(0)
             self._is_stub = False

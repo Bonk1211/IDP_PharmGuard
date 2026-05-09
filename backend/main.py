@@ -16,6 +16,14 @@ systemd unit pins --workers 1.
 
 from __future__ import annotations
 
+# Force matplotlib (pulled in transitively by mediapipe -> drawing_utils)
+# to use the headless Agg backend. Without this it tries to load a Qt /
+# Tk GUI backend on import, which on Pi 5 wastes ~10s and ~50 MB. MUST
+# come before anything that imports mediapipe (i.e. before vision/* /
+# scheduler/cycle_runner). setdefault so the operator can override.
+import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 import logging
 from contextlib import asynccontextmanager
 

@@ -13,10 +13,15 @@ import time
 from typing import Any
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from vision.camera import CameraSource, open_camera
+
+# mediapipe is lazy-loaded inside IntakeMonitor.__init__ — at module
+# import time it transitively pulls matplotlib (~10s on Pi 5). The
+# import only happens when the backend actually instantiates the
+# monitor (i.e. cycle init on real hardware). BACKEND_HEADLESS skips
+# that path entirely so dev-mac never pays the cost.
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +74,11 @@ class IntakeMonitor:
         self.camera_index = camera_index
         self._source: CameraSource | None = camera
         self._owns_source = camera is None
+
+        # Lazy import — pulls in matplotlib via mediapipe.solutions on the
+        # Pi (~10s). Only happens when the cycle actually constructs the
+        # monitor (real-hardware path), never under BACKEND_HEADLESS=1.
+        import mediapipe as mp
 
         self._face_mesh = mp.solutions.face_mesh.FaceMesh(
             max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5
