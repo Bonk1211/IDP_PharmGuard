@@ -80,3 +80,12 @@ app.include_router(logs.router, prefix="/api/logs", tags=["logs"])
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+if __name__ == "__main__":
+    # Direct run: `python main.py`. Same entrypoint medispecs uses.
+    # No systemd needed for dev / demo. For production, use systemd or
+    # a process manager so the loop survives Pi reboots.
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
