@@ -132,12 +132,6 @@ export default function PatientDetailPage() {
                 <span className={`rounded-full px-3 py-1 text-xs font-semibold ${statusStyle(patient.status ?? "Active")}`}>
                   {patient.status ?? "Active"}
                 </span>
-                <Link
-                  href={`/patients/${patient.id}/enroll`}
-                  className="inline-flex items-center gap-1 rounded-full border border-olive-300 bg-olive-50 px-3 py-1 text-xs font-medium text-olive-700 hover:bg-olive-100"
-                >
-                  {patient.face_embedding ? "Re-enrol Face" : "Enrol Face"}
-                </Link>
                 <button
                   onClick={handleDispenseNow}
                   disabled={!deviceConfigured || dispensing}
