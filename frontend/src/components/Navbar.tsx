@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { label: "Patients", href: "/patients" },
   { label: "Inventory", href: "/inventory" },
   { label: "Reports", href: "/reports" },
+  { label: "Assistant", href: "/agent" },
 ];
 
 export default function Navbar() {

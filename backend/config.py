@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     device_api_key: str = ""                        # frontend -> ngrok -> Pi auth header
     backend_headless: bool = False                  # 1 = skip hardware lifespan (dev-mac)
 
+    # ── Clinician assistant (read-only Gemini agent) ──────────────────────
+    agent_model_name: str = "gemini-2.0-flash"
+    # CSV of LOCAL hours (24h) when the brief scheduler fires.
+    # Empty string -> scheduler still runs but never fires (manual-only briefs).
+    agent_brief_local_hours: str = "7,19"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

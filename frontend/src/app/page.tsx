@@ -7,6 +7,7 @@ import IntakeLog from "@/components/IntakeLog";
 import NeedsAttention from "@/components/NeedsAttention";
 import ActivePatients from "@/components/ActivePatients";
 import AlertsPanel from "@/components/AlertsPanel";
+import BriefCard from "@/components/BriefCard";
 import {
   fetchAllSlots, fetchLogs, fetchPatients,
   type SlotInfo, type IntakeRecord, type Patient,
@@ -109,8 +110,11 @@ export default function Home() {
           </div>
         </div>
 
-        {/* Right column: Alerts + Needs Attention + Active Patients */}
+        {/* Right column: Brief + Alerts + Needs Attention + Active Patients */}
         <div className="space-y-6">
+          <div className="animate-slide-in-right stagger-2">
+            <BriefCard />
+          </div>
           <div className="animate-slide-in-right stagger-3">
             <AlertsPanel />
           </div>

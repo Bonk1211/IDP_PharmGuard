@@ -24,15 +24,17 @@ from __future__ import annotations
 import os
 os.environ.setdefault("MPLBACKEND", "Agg")
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import alerts, auth, device, inventory, logs
+from api import agent, alerts, auth, device, inventory, logs
 from config import settings
 from scheduler.background import HardwareLoop
+from scheduler.brief_scheduler import brief_scheduler_loop
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,15 +45,36 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: validate settings, optionally start HardwareLoop.
-    Shutdown: stop HardwareLoop (which awaits cleanup of GPIO + cameras).
+    """Startup: validate settings, optionally start HardwareLoop, always
+    start the brief-scheduler.
+
+    Shutdown: cancel brief task, then stop HardwareLoop (which awaits
+    cleanup of GPIO + cameras).
     """
     settings.validate_runtime()
+
+    # Brief scheduler runs regardless of headless mode — agent endpoints
+    # work without hardware. Spawn it FIRST so a HardwareLoop init failure
+    # doesn't deny the dashboard its assistant.
+    brief_task = asyncio.create_task(
+        brief_scheduler_loop(), name="brief_scheduler"
+    )
+    app.state.brief_task = brief_task
+    log.info("Brief scheduler task started")
+
     if settings.backend_headless:
         log.info("BACKEND_HEADLESS=1 — skipping hardware loop init")
         app.state.hardware_loop = None
-        yield
+        try:
+            yield
+        finally:
+            brief_task.cancel()
+            try:
+                await brief_task
+            except asyncio.CancelledError:
+                pass
         return
+
     loop = HardwareLoop()
     await loop.start()
     app.state.hardware_loop = loop
@@ -59,6 +82,12 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        log.info("Stopping brief scheduler")
+        brief_task.cancel()
+        try:
+            await brief_task
+        except asyncio.CancelledError:
+            pass
         log.info("Stopping hardware loop")
         await loop.stop()
 
@@ -78,6 +107,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(agent.router, prefix="/api/agent", tags=["agent"])
 app.include_router(alerts.router, prefix="/api/alerts", tags=["alerts"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(device.router, prefix="/api/device", tags=["device"])
