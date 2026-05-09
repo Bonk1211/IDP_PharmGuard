@@ -7,6 +7,7 @@ import {
   fetchPatient, fetchLogs, fetchSlotsByPatient, updateSlot, deleteSlot,
   type Patient, type IntakeRecord, type SlotInfo,
 } from "@/lib/api";
+import { isDeviceConfigured, triggerDispense } from "@/lib/device";
 
 function statusStyle(s: string) {
   switch (s) {
@@ -32,6 +33,25 @@ export default function PatientDetailPage() {
   // Slot editing
   const [editingSlot, setEditingSlot] = useState<number | null>(null);
   const [slotForm, setSlotForm] = useState({ medication_name: "", quantity: 0 });
+
+  // Dispense Now (Pi via ngrok)
+  const [dispensing, setDispensing] = useState(false);
+  const [dispenseMsg, setDispenseMsg] = useState<string | null>(null);
+  const deviceConfigured = isDeviceConfigured();
+
+  async function handleDispenseNow() {
+    setDispensing(true);
+    setDispenseMsg(null);
+    const r = await triggerDispense();
+    setDispensing(false);
+    if (r.ok) {
+      setDispenseMsg("Queued — Pi will run the next cycle now.");
+    } else if (r.status === 0) {
+      setDispenseMsg("Cannot reach device (ngrok URL unreachable?).");
+    } else {
+      setDispenseMsg(`Device returned ${r.status}.`);
+    }
+  }
 
   async function loadData() {
     const [p, l, s] = await Promise.all([
@@ -118,8 +138,23 @@ export default function PatientDetailPage() {
                 >
                   {patient.face_embedding ? "Re-enrol Face" : "Enrol Face"}
                 </Link>
+                <button
+                  onClick={handleDispenseNow}
+                  disabled={!deviceConfigured || dispensing}
+                  title={
+                    deviceConfigured
+                      ? "Trigger an out-of-cycle dispense on the Pi"
+                      : "Set NEXT_PUBLIC_DEVICE_URL + NEXT_PUBLIC_DEVICE_API_KEY to enable"
+                  }
+                  className="inline-flex items-center gap-1 rounded-full border border-olive-300 bg-olive-700 px-3 py-1 text-xs font-medium text-white hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {dispensing ? "Dispensing..." : "Dispense Now"}
+                </button>
               </div>
             </div>
+            {dispenseMsg && (
+              <p className="mt-2 text-xs text-gray-600">{dispenseMsg}</p>
+            )}
 
             <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 sm:grid-cols-4">
               <div>
