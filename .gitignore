@@ -43,6 +43,16 @@ ml/**/train/
 ml/**/test_data/
 *.zip
 
-# Pi runtime venv
-edge_pi/.venv/
-edge_pi/.env
+# Backend runtime venv + secrets (was edge_pi/* pre-refactor)
+backend/.venv/
+backend/.env
+
+# Subagent worktrees (some Claude tools clone here)
+.claude/worktrees/
+
+# Next.js incremental build info (auto-regen on every type-check)
+**/tsconfig.tsbuildinfo
+
+# Common Python caches anywhere in the tree
+**/.pytest_cache/
+**/.ruff_cache/
