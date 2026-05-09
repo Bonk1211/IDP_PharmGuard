@@ -58,7 +58,7 @@ journalctl -u pharmguard -f                   # tail logs
 - `core/config.py` uses `pydantic-settings` reading `backend/.env`. The Supabase **service_role** key lives here — backend has full DB access. The frontend uses the anon key in its own `.env.local`.
 - `db/base.py` exports `get_supabase() -> Client`, a lazy singleton. Always go through this — do not instantiate `create_client` elsewhere.
 - `services/gemini_fallback.py` — Google Generative AI is wired up as a fallback path (likely for pill ID when on-device YOLO confidence is low). Keep that boundary: the Pi calls the backend, the backend calls Gemini; the Pi never holds a Gemini key.
-- Several endpoints are stubs (e.g. `/api/auth/verify-face` returns the first patient row; `/api/auth/login` raises 501). Don't assume an endpoint is fully implemented — read it first.
+- Several endpoints are stubs (e.g. `/api/auth/login` raises 501). Don't assume an endpoint is fully implemented — read it first.
 
 ### Edge Pi (`backend/`)
 - `main.py` is a `while True` polling loop hitting `BACKEND_URL/api/inventory/next-dispense`, then sequencing magazine → ejector → vision verify → `POST /api/logs`. `BACKEND_URL` is currently hardcoded to `http://localhost:8000` and must be overridden in production.

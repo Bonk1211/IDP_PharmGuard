@@ -1,12 +1,11 @@
 # PharmGuard
 
-PharmGuard is a smart pill dispenser system. It is split across three tiers: an edge device (Raspberry Pi 5) that handles physical dispensing, face authentication, and intake verification; a cloud backend (FastAPI + Supabase) that owns patient records, schedules, and intake logs; and a web dashboard (Next.js) used by caregivers and admins to manage patients and review activity.
+PharmGuard is a smart pill dispenser system. It runs in two tiers: a Pi-hosted FastAPI backend (handles physical dispensing, pill ID, intake verification, and Supabase telemetry) and a Next.js dashboard (used by caregivers + admins to manage patients and review activity). The dashboard reaches the Pi over a free-tier ngrok tunnel for control actions; reads stay direct to Supabase.
 
 ## Repo layout
 
-- `backend/` — FastAPI service. Runs on cloud / dev machine.
+- `backend/` — FastAPI service. Runs ON the Pi (production) and dev-mac with `BACKEND_HEADLESS=1`. Contains the dispense cycle (`scheduler/`), hardware drivers (`hardware/`), vision (`vision/`), offline queue (`storage/`), API routers (`api/`), and the YOLO weights (`models/`).
 - `frontend/` — Next.js dashboard. Runs on cloud (Vercel) / dev machine.
-- `backend/` — Raspberry Pi 5 runtime: `main.py`, `vision/`, `hardware/`, `models/`, `scripts/`. Runs on the Pi.
 - `ml/` — Training code and datasets (`pill_detector/`, `spotter/`, `swallow/`, `datasets/`). Dev workstation only; not deployed.
 - `scripts/` — Repo-level dev setup scripts.
 - `Makefile` — Top-level entry points.

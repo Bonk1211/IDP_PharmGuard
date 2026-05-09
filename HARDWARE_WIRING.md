@@ -9,7 +9,7 @@ Pin map derived from current source. Authoritative sources:
 | Diverter servo | `backend/hardware/diverter.py:17` | `PIN_SERVO=13` |
 | Drawer solenoid | `backend/hardware/drawer_lock.py:17` | `PIN_SOLENOID=23` |
 | Tray temp DHT11 | `backend/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=4` (single GPIO, no 1-wire overlay) |
-| Pill / face cams | `backend/vision/camera.py` | CSI ports CAM0 + CAM1 |
+| Pill / intake cams | `backend/vision/camera.py` | CSI ports CAM0 + CAM1 |
 
 ### Operator BOM in hand
 
@@ -48,7 +48,7 @@ CSI camera ports (separate ribbon connectors, NOT the 40-pin header):
 | Port | Camera | Purpose |
 |---|---|---|
 | CAM0 | imx219 (Camera Module v2) | Pill ID - over the catch tray |
-| CAM1 | imx708 (Camera Module 3) | Intake / Face - patient-facing |
+| CAM1 | imx708 (Camera Module 3) | Intake (swallow FSM) - patient-facing |
 
 `vision/camera.py` opens cam_num 0 first, then 1. Match the ribbon to the role.
 
