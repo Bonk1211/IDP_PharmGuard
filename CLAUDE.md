@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 PharmGuard is a smart pill dispenser split into three tiers that run on different machines:
 
-- **`edge_pi/`** — runs on a Raspberry Pi 5. Drives stepper/servo hardware, Pi Camera (libcamera/picamera2), and runs computer-vision inference (YOLO + MediaPipe) entirely on-device. Polls the backend over HTTP for the next dispense and POSTs intake logs back.
+- **`backend/`** — runs on a Raspberry Pi 5. Drives stepper/servo hardware, Pi Camera (libcamera/picamera2), and runs computer-vision inference (YOLO + MediaPipe) entirely on-device. Polls the backend over HTTP for the next dispense and POSTs intake logs back.
 - **`backend/`** — FastAPI service. Stateless app layer on top of **Supabase** (Postgres + storage). No local database — `app/db/base.py` is just a Supabase client singleton. All routes live under `/api/*` (auth, inventory, logs).
 - **`frontend/`** — Next.js 15 (App Router, React 19, Tailwind v4) caregiver dashboard. Talks to **Supabase directly** via `@supabase/supabase-js` for reads (`src/lib/supabase.ts`); not all UI routes through the FastAPI backend.
-- **`ml/`** — training-only. Never deployed. Produces `.pt` weights that get promoted into `edge_pi/models/`.
+- **`ml/`** — training-only. Never deployed. Produces `.pt` weights that get promoted into `backend/models/`.
 
-The contract between tiers is **HTTP + Supabase**, not a shared library. Changing a route in `backend/app/api/` requires updating both the Pi (`edge_pi/main.py` calls) and any frontend code that hits it.
+The contract between tiers is **HTTP + Supabase**, not a shared library. Changing a route in `backend/app/api/` requires updating both the Pi (`backend/main.py` calls) and any frontend code that hits it.
 
 ## Common commands
 
@@ -22,8 +22,8 @@ make setup            # one-time: backend venv + frontend npm install
 make backend          # uvicorn app.main:app --reload --port 8000  (cwd: backend/)
 make frontend         # next dev                                    (cwd: frontend/)
 make dev              # both in parallel
-make pi-models        # ls -lh edge_pi/models/*.pt — verify weights present
-make pi-sync HOST=pi@<host>   # rsync edge_pi/ → Pi, excluding .venv & __pycache__
+make pi-models        # ls -lh backend/models/*.pt — verify weights present
+make pi-sync HOST=pi@<host>   # rsync backend/ → Pi, excluding .venv & __pycache__
 make clean-ml         # prints what to rm to free ML disk; does NOT delete
 ```
 
@@ -44,7 +44,7 @@ There is **no test suite** in this repo yet — `pytest`, `vitest`, etc. are not
 
 Pi-side (run on the Pi, not the dev machine):
 ```bash
-cd ~/IDP_PharmGuard/edge_pi
+cd ~/IDP_PharmGuard/backend
 bash scripts/install.sh                       # first-time only
 sudo systemctl enable --now pharmguard
 sudo systemctl restart pharmguard             # after a sync
@@ -60,7 +60,7 @@ journalctl -u pharmguard -f                   # tail logs
 - `services/gemini_fallback.py` — Google Generative AI is wired up as a fallback path (likely for pill ID when on-device YOLO confidence is low). Keep that boundary: the Pi calls the backend, the backend calls Gemini; the Pi never holds a Gemini key.
 - Several endpoints are stubs (e.g. `/api/auth/verify-face` returns the first patient row; `/api/auth/login` raises 501). Don't assume an endpoint is fully implemented — read it first.
 
-### Edge Pi (`edge_pi/`)
+### Edge Pi (`backend/`)
 - `main.py` is a `while True` polling loop hitting `BACKEND_URL/api/inventory/next-dispense`, then sequencing magazine → ejector → vision verify → `POST /api/logs`. `BACKEND_URL` is currently hardcoded to `http://localhost:8000` and must be overridden in production.
 - `vision/pill_verifier.py` — wraps YOLO (`models/spotter.pt`) for tray-empty detection. Uses **lazy init** (model + camera open on first call), not in `__init__`. Falls back from `picamera2` → `cv2.VideoCapture` if picamera2 isn't available.
 - `vision/intake_monitor.py` — MediaPipe FaceMesh + Hands, ported from `ml/swallow/main5.py` as a 5-step FSM (HAND → TILT → LEVEL → MOUTH → TONGUE) with EMA smoothing. The reference script `ml/swallow/main5.py` is the canonical spec — when behavior is ambiguous, that file wins. Step 4 has **inverted logic** (pill *visible* in mouth resets the timer); preserve this when refactoring.
@@ -78,8 +78,8 @@ journalctl -u pharmguard -f                   # tail logs
 - Datasets and training artifacts are gitignored: `ml/datasets/`, `ml/**/Medicine_Images/`, `ml/**/train/`, plus `ml/**/*.pt`.
 - Promoting a new training run to the Pi means manually copying:
   ```bash
-  cp ml/pill_detector/my_model.pt  edge_pi/models/pill_detector.pt
-  cp ml/spotter/spotter_model.pt    edge_pi/models/spotter.pt
+  cp ml/pill_detector/my_model.pt  backend/models/pill_detector.pt
+  cp ml/spotter/spotter_model.pt    backend/models/spotter.pt
   ```
   Then commit the new `.pt` and `make pi-sync`.
 
@@ -92,6 +92,6 @@ journalctl -u pharmguard -f                   # tail logs
 ## Caveats and known mismatches
 
 - `scripts/setup_dev.sh` references a `dashboard/` directory that **does not exist** — this repo uses `frontend/`. Use `make setup` instead, which is correct.
-- `edge_pi/main.py` has `BACKEND_URL = "http://localhost:8000"` hardcoded. Production deploys must override (planned via `.env` per `edge_pi/README.md`, but the code does not yet read it — search for `BACKEND_URL` before assuming env-var support).
+- `backend/main.py` has `BACKEND_URL = "http://localhost:8000"` hardcoded. Production deploys must override (planned via `.env` per `backend/README.md`, but the code does not yet read it — search for `BACKEND_URL` before assuming env-var support).
 - macOS dev hosts are case-insensitive: be careful renaming directories that differ only in case (`Spotter` vs `spotter`) — they collide silently and `mv` becomes a no-op while `rm -rf` of the "old" name takes both.
-- The repo has no CI configured. Linting/type-checking is manual: `npm run lint` for frontend, nothing for backend or `edge_pi/`.
+- The repo has no CI configured. Linting/type-checking is manual: `npm run lint` for frontend, nothing for backend or `backend/`.

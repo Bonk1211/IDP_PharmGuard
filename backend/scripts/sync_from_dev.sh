@@ -16,11 +16,11 @@ fi
 
 PI_HOST="$1"
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-EDGE_PI_DIR="$REPO_ROOT/edge_pi"
+BACKEND_DIR="$REPO_ROOT/backend"
 
-echo "=== PharmGuard Edge Sync to Pi ==="
-echo "Source: $EDGE_PI_DIR"
-echo "Destination: $PI_HOST:~/IDP_PharmGuard/edge_pi/"
+echo "=== PharmGuard Backend Sync to Pi ==="
+echo "Source: $BACKEND_DIR"
+echo "Destination: $PI_HOST:~/IDP_PharmGuard/backend/"
 echo ""
 
 ##
@@ -38,8 +38,8 @@ rsync -avz --delete-after \
     --exclude '.env' \
     --exclude '.pytest_cache' \
     --exclude '.eggs' \
-    "$EDGE_PI_DIR/" \
-    "$PI_HOST:~/IDP_PharmGuard/edge_pi/"
+    "$BACKEND_DIR/" \
+    "$PI_HOST:~/IDP_PharmGuard/backend/"
 
 echo ""
 echo "=== Sync Complete ==="

@@ -41,7 +41,7 @@ if [[ "$PY_VER" == "3.13" || "$PY_VER" == "3.14" ]]; then
     echo "ERROR: Python $PY_VER detected — mediapipe has no wheel for this version."
     echo "       Install Python 3.11 or 3.12 alongside, then re-run with:"
     echo "         PHARMGUARD_PYTHON=python3.12 bash scripts/install.sh"
-    echo "       See edge_pi/README.md for the apt + pyenv recipes."
+    echo "       See backend/README.md for the apt + pyenv recipes."
     exit 5
 fi
 

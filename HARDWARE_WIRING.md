@@ -4,12 +4,12 @@ Pin map derived from current source. Authoritative sources:
 
 | Component | File | Pin constant |
 |---|---|---|
-| Magazine stepper | `edge_pi/hardware/magazine.py:15-18` | `PIN_STEP=17`, `PIN_DIR=27`, `PIN_ENABLE=22` |
-| Ejector servo | `edge_pi/hardware/ejector.py:15` | `PIN_SERVO=18` |
-| Diverter servo | `edge_pi/hardware/diverter.py:17` | `PIN_SERVO=13` |
-| Drawer solenoid | `edge_pi/hardware/drawer_lock.py:17` | `PIN_SOLENOID=23` |
-| Tray temp DHT11 | `edge_pi/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=4` (single GPIO, no 1-wire overlay) |
-| Pill / face cams | `edge_pi/vision/camera.py` | CSI ports CAM0 + CAM1 |
+| Magazine stepper | `backend/hardware/magazine.py:15-18` | `PIN_STEP=17`, `PIN_DIR=27`, `PIN_ENABLE=22` |
+| Ejector servo | `backend/hardware/ejector.py:15` | `PIN_SERVO=18` |
+| Diverter servo | `backend/hardware/diverter.py:17` | `PIN_SERVO=13` |
+| Drawer solenoid | `backend/hardware/drawer_lock.py:17` | `PIN_SOLENOID=23` |
+| Tray temp DHT11 | `backend/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=4` (single GPIO, no 1-wire overlay) |
+| Pill / face cams | `backend/vision/camera.py` | CSI ports CAM0 + CAM1 |
 
 ### Operator BOM in hand
 
@@ -155,9 +155,9 @@ The 3-pin DHT11 module variant has the 10 kohm pull-up already on board (look fo
 **No `dtoverlay`** required — DHT11 is bit-banged via libgpiod. Just enable the python lib:
 
 ```bash
-# already pinned in edge_pi/requirements.txt:
+# already pinned in backend/requirements.txt:
 #   adafruit-circuitpython-dht>=4.0.0,<5.0.0
-.venv/bin/pip install -r edge_pi/requirements.txt
+.venv/bin/pip install -r backend/requirements.txt
 ```
 
 Verify after wiring (with the venv active):
@@ -245,7 +245,7 @@ Before flipping the service back on:
 
 ```bash
 # 1. confirm pin constants haven't drifted
-grep -RnE "PIN_STEP|PIN_DIR|PIN_ENABLE|PIN_SERVO|PIN_SOLENOID" edge_pi/hardware/
+grep -RnE "PIN_STEP|PIN_DIR|PIN_ENABLE|PIN_SERVO|PIN_SOLENOID" backend/hardware/
 
 # 2. dry-run each driver with stub OFF
 PHARMGUARD_STUB=0 .venv/bin/python -c "from hardware.drawer_lock import DrawerLock; d=DrawerLock(); d.unlock(); d.lock(); d.cleanup()"
