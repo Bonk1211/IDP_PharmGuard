@@ -1,17 +1,22 @@
-"""Bench-test the drawer-lock solenoid (BCM 23 -> MOSFET -> coil).
+"""Bench-test the drawer-lock SG90 servo (BCM 18 / hardware PWM0).
 
-Run on the Pi only. Drawer mechanism PHYSICALLY DETACHED so nothing
-slams shut. From edge_pi/ with the venv active, service stopped:
+Run on the Pi only. Drawer mechanism PHYSICALLY DETACHED so the latch
+arm doesn't bind on anything during the swing.
 
     sudo systemctl stop pharmguard
-    cd ~/IDP_PharmGuard/edge_pi && source .venv/bin/activate
-    python hardware/test_solenoid.py
+    cd ~/IDP_PharmGuard/backend && source .venv/bin/activate
+    sudo -E .venv/bin/python hardware/test_drawer.py
 
-Expected: audible click on unlock, audible click on lock.
+Expected: visible servo arm rotation to UNLOCK angle, hold 2 s, return
+to LOCK angle.
 Fail modes:
-  * No click -> MOSFET gate not driven; check 1 kohm gate resistor + Pi GND <-> PSU GND tie.
-  * One click only / sticks open -> missing flyback diode (1N4007); MOSFET likely damaged.
-  * RuntimeError on init -> service still running (it owns the pin).
+  * No movement -> servo V+ on Pi 5V (sagging); use ext 5V PSU. Or
+    signal pin wrong (must be BCM 18 = phys 12).
+  * Stalls / buzzes at end -> end-stop preventing full rotation; reduce
+    UNLOCK_DUTY or adjust mounting angle.
+  * Drifts mid-cycle -> coils being de-energised mid-motion. Increase
+    SERVO_SETTLE_S in drawer_lock.py.
+  * Reverses direction -> swap LOCK_DUTY <-> UNLOCK_DUTY.
 """
 
 from __future__ import annotations
