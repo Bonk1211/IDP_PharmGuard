@@ -61,12 +61,17 @@ class OfflineQueue:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        # check_same_thread=True is the default; we never use a thread,
-        # but if a future contributor adds one they'll get a clear
-        # ProgrammingError instead of silent corruption.
+        # check_same_thread=False because the Pi-hosted FastAPI refactor
+        # (scheduler/cycle_runner.py) wraps queue ops in `asyncio.to_thread`,
+        # so the connection ends up handed between the main asyncio thread
+        # and worker threads in the default executor. Concurrent access is
+        # NOT a concern because the HardwareLoop supervisor serializes every
+        # cycle pass — only one queue op runs at a time.
         # isolation_level=None makes each statement autocommit -- combined
         # with WAL + NORMAL, every enqueue is durable on return.
-        self._conn = sqlite3.connect(str(self.db_path), isolation_level=None)
+        self._conn = sqlite3.connect(
+            str(self.db_path), isolation_level=None, check_same_thread=False,
+        )
         self._conn.row_factory = sqlite3.Row
         # WAL + NORMAL is the correct durability pairing for high write rate.
         self._conn.execute("PRAGMA journal_mode=WAL")
