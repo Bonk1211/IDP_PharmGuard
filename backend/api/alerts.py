@@ -27,16 +27,10 @@ router = APIRouter()
 
 ALERT_KIND_EXPIRY = "expiry"
 ALERT_KIND_LOW_STOCK = "low_stock"
-ALERT_KIND_OVER_TEMP = "over_temperature"
 
 SEVERITY_INFO = "info"
 SEVERITY_WARNING = "warning"
 SEVERITY_CRITICAL = "critical"
-
-
-class TemperatureSample(BaseModel):
-    value_c: float
-    dispenser_id: str | None = None
 
 
 _ws_clients: list[WebSocket] = []
@@ -95,27 +89,6 @@ async def list_alerts(limit: int = 100, kind: str | None = None):
         query = query.eq("kind", kind)
     result = query.execute()
     return result.data or []
-
-
-@router.post("/temperature", dependencies=[Depends(verify_device_token)])
-async def post_temperature(sample: TemperatureSample):
-    """Pi-posted temperature sample. Inserts an alert iff over threshold."""
-    threshold = settings.over_temp_celsius
-    if sample.value_c <= threshold:
-        return {
-            "alert_created": False,
-            "value_c": sample.value_c,
-            "threshold_c": threshold,
-        }
-
-    payload = {"value_c": sample.value_c, "threshold_c": threshold}
-    record = await _insert_alert(
-        kind=ALERT_KIND_OVER_TEMP,
-        severity=SEVERITY_CRITICAL,
-        dispenser_id=sample.dispenser_id,
-        payload=payload,
-    )
-    return {"alert_created": True, "alert": record}
 
 
 @router.post("/scan", dependencies=[Depends(verify_device_token)])

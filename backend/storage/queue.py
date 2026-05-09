@@ -35,7 +35,7 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-_VALID_KINDS = ("intake", "temperature")
+_VALID_KINDS = ("intake",)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (

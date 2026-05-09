@@ -7,7 +7,6 @@ Pin map derived from current source. Authoritative sources:
 | Magazine stepper (NEMA17 + A4988) | `backend/hardware/magazine.py:15-18` | `PIN_STEP=17`, `PIN_DIR=27`, `PIN_ENABLE=22` |
 | Ejector stepper (28BYJ-48 + ULN2003) | `backend/hardware/ejector.py:34-38` | `PIN_IN1=5`, `PIN_IN2=6`, `PIN_IN3=16`, `PIN_IN4=26` |
 | Drawer-lock servo (SG90) | `backend/hardware/drawer_lock.py:42` | `PIN_SERVO=18` (hardware PWM0) |
-| Tray temp DHT11 | `backend/hardware/temp_sensor.py:33` | `DHT_BCM_PIN=23` |
 | Pill / intake cams | `backend/vision/camera.py` | CSI ports CAM0 + CAM1 |
 
 If a pin constant changes in code, update this file in the same commit.
@@ -19,7 +18,6 @@ If a pin constant changes in code, update this file in the same commit.
 | 17HS8401 NEMA 17 + A4988 driver | Magazine rotation | 1.7 A/phase, 0.43 Nm holding torque, 1.8°/step (200 step/rev) |
 | 28BYJ-48 (5 V) + ULN2003 board | Ejector slider drive | 4-pin half-step sequence; rotates the cam that pushes a pill out of the slot |
 | SG90 micro servo | Drawer latch | One servo arm, two angles (LOCK / UNLOCK). 50 Hz hardware PWM |
-| DHT11 | Tray temperature | Library `adafruit-circuitpython-dht`, in `requirements.txt` |
 
 No diverter (single-chute design — pill-ID fail keeps the drawer locked).
 
@@ -31,7 +29,7 @@ BCM <-> physical pin mapping for every pin we drive:
 
 | BCM | Phys | Header role | Project use | Direction | Notes |
 |----:|----:|---|---|---|---|
-| 3V3 | 1 | 3V3 power | DHT11 VDD + 10 kohm pull-up | - | Do NOT power servo / 28BYJ-48 from this rail |
+| 3V3 | 1 | 3V3 power | (unused — sensors removed) | - | Do NOT power servo / 28BYJ-48 from this rail |
 | 5V  | 2  | 5V power  | (unused — SG90 + ULN2003 use ext 5V) | - | Pi 5V is for the Pi itself |
 | GND | 6,9,14,20,25,30,34,39 | Ground | Common ground for ALL subsystems | - | Tie every PSU GND back here |
 | 5   | 29 | GPIO        | ULN2003 IN1 (28BYJ-48 ejector) | OUT | 1 of 4 stepper coils |
@@ -40,11 +38,10 @@ BCM <-> physical pin mapping for every pin we drive:
 | 17  | 11 | GPIO        | A4988 STEP (NEMA17 magazine) | OUT | 5 us pulses |
 | 18  | 12 | PWM0 (HW)   | SG90 drawer-lock servo signal | PWM 50 Hz | hardware PWM channel 0 |
 | 22  | 15 | GPIO        | A4988 ENABLE (NEMA17 magazine) | OUT | active-low -> driven LOW = enabled |
-| 23  | 16 | GPIO        | DHT11 DATA | IN/OUT | bit-banged via `adafruit-circuitpython-dht`; 10 kohm pull-up to 3V3 |
 | 26  | 37 | GPIO        | ULN2003 IN4 (28BYJ-48 ejector) | OUT | 4 of 4 stepper coils |
 | 27  | 13 | GPIO        | A4988 DIR (NEMA17 magazine) | OUT | HIGH = forward (slot index +) |
 
-Free / unused: BCM 4 (kernel can claim for w1-gpio / camera-i2c), BCM 13 (was diverter PWM1). Reserve hardware PWM0 (BCM 18) for the servo — software PWM jitters and the SG90 will twitch.
+Free / unused: BCM 4 (kernel can claim for w1-gpio / camera-i2c), BCM 13 (was diverter PWM1), BCM 23 (was DHT11 — sensor removed). Reserve hardware PWM0 (BCM 18) for the servo — software PWM jitters and the SG90 will twitch.
 
 CSI camera ports (separate ribbon connectors, NOT the 40-pin header):
 
@@ -140,32 +137,7 @@ After every move, the driver calls `ChangeDutyCycle(0)` so the coils don't sing 
 
 **Fail-safe note**: install a spring-return latch so a dead servo drifts to LOCK by physical bias. The driver also drives to LOCK at boot, but a physical default is the real safety net.
 
-### 3.4 DHT11 temperature sensor
-
-The 3-pin DHT11 module variant has the 10 kohm pull-up already on board (look for the SMD resistor next to the VCC pin). The bare 4-pin sensor needs an external pull-up — add 10 kohm between DATA and 3V3.
-
-```
-   3V3 (pin 1) --+-- DHT11 VCC (+)
-                 |
-                 +-- [10 kohm] -- DHT11 DATA -- Pi physical 16 (BCM 23)
-                 |   (skip if 3-pin module — pull-up is on the PCB)
-                 +
-                GND ----------- DHT11 GND (-) -- Pi GND (pin 9)
-```
-
-Pin choice rationale: BCM 4 (the obvious "default" for w1-gpio) is risky on Pi 5 because kernel overlays (w1-gpio, camera-i2c) can claim it system-wide and lgpio sees `'GPIO busy'`. BCM 23 has no peripheral aliasing.
-
-**No `dtoverlay`** required — DHT11 is bit-banged via libgpiod. The python lib is already pinned in `backend/requirements.txt` (`adafruit-circuitpython-dht`).
-
-Verify after wiring (with the venv active):
-
-```bash
-sudo -E .venv/bin/python -c "from hardware.temp_sensor import TempSensor; t=TempSensor(); print('temp_c =', t.read_celsius())"
-```
-
-Expected: a number between ~20 and ~30 (room temperature). DHT11 returns `None` on a checksum miss; the reader retries 3 times with ~1 s backoff. Persistent `None` -> wiring fault.
-
-### 3.5 Cameras
+### 3.4 Cameras
 
 CSI ribbons go straight into CAM0 / CAM1 on the Pi 5 board. No GPIO wiring. `vision/camera.py` falls back from `Picamera2Source` -> `RpicamSource` (rpicam-vid + cv2) -> `Cv2Source`. Both ribbon orientations: contacts toward the HDMI side.
 
@@ -175,9 +147,8 @@ CSI ribbons go straight into CAM0 / CAM1 on the Pi 5 board. No GPIO wiring. `vis
 
 Follow this sequence on the bench. Each step is a kill-switch — stop if it fails.
 
-1. **Pi alone** boots. `pinctrl get 17,27,22,18,23,5,6,16,26` returns `ip` / `op` cleanly.
-2. **DHT11** wired. `python hardware/test_dht11.py` returns a number, not `None`.
-3. **Drawer servo** wired (latch arm detached so it can swing freely). `sudo -E .venv/bin/python hardware/test_drawer.py` shows visible rotation LOCK -> UNLOCK -> LOCK.
+1. **Pi alone** boots. `pinctrl get 17,27,22,18,5,6,16,26` returns `ip` / `op` cleanly.
+2. **Drawer servo** wired (latch arm detached so it can swing freely). `sudo -E .venv/bin/python hardware/test_drawer.py` shows visible rotation LOCK -> UNLOCK -> LOCK.
 4. **A4988 Vref** set with motor disconnected. Then plug 17HS8401.
 5. **One magazine rotation** in REPL: `Magazine().rotate_to(1)` — smooth rotation forward + back.
 6. **28BYJ-48 ejector** wired. `sudo -E .venv/bin/python hardware/test_ejector.py` rotates the motor 3 cycles.
@@ -193,7 +164,6 @@ Stub mode (`PHARMGUARD_STUB=1`) skips every wiring failure with warnings — onl
 | Risk | Mitigation |
 |---|---|
 | BCM 18 is also I2S — leave I2S disabled in raspi-config | Default Bookworm/Trixie config is fine; do not `dtparam=i2s=on` |
-| DHT11 is bit-banged on BCM 4 — preempted by other GPIO consumers | Don't put any other driver on BCM 4 |
 | `RPi.GPIO` setmode is global — re-entrant `GPIO.cleanup()` in one driver wipes the others | Each driver guards its own pin only; do **not** add bare `GPIO.cleanup()` calls |
 | Stepper, 28BYJ-48, and servo PSUs sharing one cheap 5V/12V combo brick | OK if rated >3 A on the 5 V leg AND has separate windings; otherwise stepper pulses inject noise into the servo PWM |
 | 28BYJ-48 coils overheat at rest | `ejector.py:push()` de-energises all 4 coils after each cycle |
@@ -210,7 +180,7 @@ Stub mode (`PHARMGUARD_STUB=1`) skips every wiring failure with warnings — onl
         GND (9) (10) RXD
    STEP (11)(12) DRAWER       <- BCM 17 mag STEP / BCM 18 drawer servo (PWM0)
     DIR (13)(14) GND          <- BCM 27 mag DIR
-    EN  (15)(16) DHT          <- BCM 22 mag EN / BCM 23 DHT11 DATA
+    EN  (15)(16) -            <- BCM 22 mag EN
    3V3 (17)(18) -
     -  (19)(20) GND
     -  (21)(22) -
@@ -233,10 +203,9 @@ Before flipping the service back on:
 
 ```bash
 # 1. confirm pin constants haven't drifted
-grep -RnE "PIN_STEP|PIN_DIR|PIN_ENABLE|PIN_SERVO|PIN_IN[1-4]|DHT_BCM_PIN" backend/hardware/
+grep -RnE "PIN_STEP|PIN_DIR|PIN_ENABLE|PIN_SERVO|PIN_IN[1-4]" backend/hardware/
 
 # 2. dry-run each driver with stub OFF
-sudo -E .venv/bin/python hardware/test_dht11.py
 sudo -E .venv/bin/python hardware/test_drawer.py
 sudo -E .venv/bin/python hardware/test_magazine.py
 sudo -E .venv/bin/python hardware/test_ejector.py

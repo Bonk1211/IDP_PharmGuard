@@ -22,12 +22,6 @@ function describe(alert: Alert): string {
         "Stock running low"
       );
     }
-    case "over_temperature": {
-      const t = p.value_c as number | undefined;
-      return t != null
-        ? `Temperature ${t.toFixed(1)} °C above threshold`
-        : "Over-temperature event";
-    }
     default:
       return String(alert.kind).replace(/_/g, " ");
   }

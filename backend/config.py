@@ -39,7 +39,6 @@ class Settings(BaseSettings):
     default_dispenser_id: str = "dispenser-001"
     expiry_warn_days: int = 14
     low_stock_threshold: int = 3
-    over_temp_celsius: float = 30.0
 
     # ── from old edge_pi/config.py ────────────────────────────────────────
     poll_interval_s: float = 30.0

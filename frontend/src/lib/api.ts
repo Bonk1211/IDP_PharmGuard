@@ -175,7 +175,7 @@ export async function deleteSlot(patientId: number, slot: number): Promise<void>
 
 // ── Alerts (Phase 5 schema; Phase 7 dashboard reads from public.alerts) ──
 
-export type AlertKind = "expiry" | "low_stock" | "over_temperature";
+export type AlertKind = "expiry" | "low_stock";
 export type AlertSeverity = "info" | "warning" | "critical";
 
 /**

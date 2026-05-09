@@ -31,7 +31,6 @@ from db.base import get_supabase
 from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
-from hardware.temp_sensor import TempSensor
 from storage.queue import OfflineQueue
 from vision import (
     CameraSource,
@@ -65,7 +64,6 @@ class CycleState:
         self.magazine: Magazine | None = None
         self.ejector: Ejector | None = None
         self.drawer_lock: DrawerLock | None = None
-        self.temp_sensor: TempSensor | None = None
         self.cam_a: CameraSource | None = None
         self.cam_b: CameraSource | None = None
         self.verifier: PillVerifier | None = None
@@ -87,7 +85,6 @@ class CycleState:
         self.magazine = await asyncio.to_thread(Magazine)
         self.ejector = await asyncio.to_thread(Ejector)
         self.drawer_lock = await asyncio.to_thread(DrawerLock)
-        self.temp_sensor = await asyncio.to_thread(TempSensor)
 
         # HI-012: refuse to run as if hardware were real when it isn't.
         # Mirror of edge_pi/main.py:295-316 — sys.exit(1) becomes RuntimeError.
@@ -95,7 +92,6 @@ class CycleState:
             self.magazine.is_stub
             or self.ejector.is_stub
             or self.drawer_lock.is_stub
-            or self.temp_sensor.is_stub
         )
         if self.hardware_stubbed:
             if not settings.pharmguard_stub:
@@ -103,8 +99,7 @@ class CycleState:
                     "Hardware initialization degraded "
                     f"(magazine.is_stub={self.magazine.is_stub}, "
                     f"ejector.is_stub={self.ejector.is_stub}, "
-                    f"drawer_lock.is_stub={self.drawer_lock.is_stub}, "
-                    f"temp_sensor.is_stub={self.temp_sensor.is_stub}) "
+                    f"drawer_lock.is_stub={self.drawer_lock.is_stub}) "
                     "but PHARMGUARD_STUB is not set. "
                     "Refusing to run — telemetry would be falsified."
                 )
@@ -262,44 +257,6 @@ async def _report_intake_direct(
         log.warning("intake insert failed: %s; row %d retained for replay", exc, row_id)
 
 
-async def _report_temperature_direct(
-    state: CycleState,
-    value_c: float,
-    *,
-    is_stub: bool = False,
-) -> None:
-    """Direct DB write — replaces edge_pi/main.py:129-161 (HTTP self-call).
-
-    Threshold logic mirrors backend/api/alerts.py:post_temperature.
-    """
-    assert state.queue is not None
-    payload: dict = {"value_c": value_c}
-    if settings.dispenser_id:
-        payload["dispenser_id"] = settings.dispenser_id
-    row_id = await asyncio.to_thread(
-        state.queue.enqueue, "temperature", payload, is_stub=is_stub
-    )
-    if value_c <= settings.over_temp_celsius:
-        # Sub-threshold — no alert row. Still mark_sent so the queue drains.
-        await asyncio.to_thread(state.queue.mark_sent, [row_id])
-        return
-    # Over threshold — insert alert + broadcast.
-    from api.alerts import _insert_alert, ALERT_KIND_OVER_TEMP, SEVERITY_CRITICAL
-    try:
-        await _insert_alert(
-            kind=ALERT_KIND_OVER_TEMP,
-            severity=SEVERITY_CRITICAL,
-            dispenser_id=settings.dispenser_id or None,
-            payload={"value_c": value_c, "threshold_c": settings.over_temp_celsius},
-        )
-        await asyncio.to_thread(state.queue.mark_sent, [row_id])
-    except Exception as exc:
-        log.warning(
-            "temperature alert insert failed: %s; row %d retained for replay",
-            exc, row_id,
-        )
-
-
 async def _replay_drain(state: CycleState) -> None:
     """Replay up to _REPLAY_BATCH_LIMIT unposted rows. HI-012 defensive guard."""
     assert state.queue is not None
@@ -326,22 +283,6 @@ async def _replay_drain(state: CycleState) -> None:
                 await asyncio.to_thread(
                     lambda p=payload: sb.table("adherence_logs").insert(p).execute()
                 )
-            elif kind == "temperature":
-                if payload.get("value_c", 0.0) > settings.over_temp_celsius:
-                    from api.alerts import (
-                        _insert_alert,
-                        ALERT_KIND_OVER_TEMP,
-                        SEVERITY_CRITICAL,
-                    )
-                    await _insert_alert(
-                        kind=ALERT_KIND_OVER_TEMP,
-                        severity=SEVERITY_CRITICAL,
-                        dispenser_id=payload.get("dispenser_id"),
-                        payload={
-                            "value_c": payload["value_c"],
-                            "threshold_c": settings.over_temp_celsius,
-                        },
-                    )
             else:
                 log.error("queue row %d: unknown kind %r", row_id, kind)
                 continue
@@ -374,16 +315,6 @@ async def run_cycle(state: CycleState) -> None:
             age, settings.offline_max_age_seconds,
         )
         return
-
-    # Phase 5: tray temperature sample.
-    try:
-        value_c = await asyncio.to_thread(state.temp_sensor.read_celsius)
-        if value_c is not None:
-            await _report_temperature_direct(
-                state, value_c, is_stub=state.hardware_stubbed
-            )
-    except Exception:
-        log.exception("temperature sample failed")
 
     # Schedule lookup.
     t0 = time.perf_counter()

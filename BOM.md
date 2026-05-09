@@ -17,7 +17,6 @@ Operator owns SKU + price columns; this file is the canonical row list.
 | SG90 micro servo | 1 | Phase 4 | drawer-lock latch | TBD | TBD | TBD | 50 Hz hardware PWM on BCM 18 |
 | Pi Camera Module v2 — cam 0 | 1 | Phase 2 | tray top-down (pill ID) | TBD | TBD | TBD | imx219 |
 | Pi Camera Module 3 — cam 1 | 1 | Phase 2 | patient-facing (swallow FSM) | TBD | TBD | TBD | imx708; wide-angle helps Step-1 hand detection |
-| DHT11 temperature + humidity sensor | 1 | Phase 5 | tray temperature | TBD | TBD | TBD | 3-pin module has on-board pull-up; 4-pin needs 10 kΩ |
 | 10-slot magazine (3D-printed, PLA / PETG) | 1 | Phase 2 mech | rotates over ejector | TBD (in-house) | TBD | TBD | injection-molded for hygiene compliance is V2+ |
 | Slider + cam linkage | 1 | Phase 2 mech | driven by 28BYJ-48 | TBD (in-house) | TBD | TBD | tune EJECT_STEPS once geometry fixed |
 | Lockable drawer + spring-return latch | 1 | Phase 4 | servo-arm released | TBD | TBD | TBD | spring-return = fail-safe LOCK on power loss |
