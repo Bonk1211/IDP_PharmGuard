@@ -1,0 +1,534 @@
+"""Async port of edge_pi/main.py:run().
+
+The body of the old while-loop becomes ``run_cycle(state)`` — one pass.
+``HardwareLoop._supervised_loop`` (scheduler/background.py) wraps it in
+the equivalent of a while-True with exponential-backoff restart.
+
+All synchronous I/O (GPIO, OpenCV, picamera2, dlib face_recognition,
+Supabase HTTP) is wrapped in ``asyncio.to_thread`` so it does not block
+the FastAPI event loop. ``time.sleep`` becomes ``await asyncio.sleep``.
+
+The HI-012 stub guard (edge_pi/main.py:295-316) ports verbatim into
+``CycleState.init`` — only ``sys.exit(1)`` becomes ``raise RuntimeError``
+so FastAPI's lifespan can fail startup cleanly.
+
+The 2-phase commit from edge_pi/main.py:108-126 (enqueue -> POST -> mark)
+becomes (enqueue -> Supabase INSERT -> mark). Same defensive HI-012
+replay guard at edge_pi/main.py:184-196 ports verbatim.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import csv
+import logging
+import time
+from pathlib import Path
+from typing import Any
+
+from config import settings
+from db.base import get_supabase
+from hardware.diverter import Diverter
+from hardware.drawer_lock import DrawerLock
+from hardware.ejector import Ejector
+from hardware.magazine import Magazine
+from hardware.temp_sensor import TempSensor
+from services.face_recognition import compute_embedding, match_embedding
+from storage.queue import OfflineQueue
+from vision import (
+    CameraSource,
+    IntakeMonitor,
+    LivenessDetector,
+    PillVerifier,
+    open_camera,
+)
+
+log = logging.getLogger(__name__)
+
+
+_BENCH_FIELDS = (
+    "cycle", "patient_id", "slot",
+    "t_schedule_ms", "t_auth_ms", "t_rotate_ms", "t_eject_ms",
+    "t_pillid_ms", "t_diverter_ms", "t_drawer_ms",
+    "t_log_ms", "t_total_ms",
+    "pill_taken",
+)
+
+_REPLAY_BATCH_LIMIT = 20
+
+
+class CycleState:
+    """Holds per-process cycle resources. Built once by HardwareLoop.start.
+
+    All hardware/camera/queue handles live here, not at module level, so
+    HardwareLoop.stop() can deterministically clean up by walking attributes.
+    """
+
+    def __init__(self) -> None:
+        self.magazine: Magazine | None = None
+        self.ejector: Ejector | None = None
+        self.diverter: Diverter | None = None
+        self.drawer_lock: DrawerLock | None = None
+        self.temp_sensor: TempSensor | None = None
+        self.cam_a: CameraSource | None = None
+        self.cam_b: CameraSource | None = None
+        self.verifier: PillVerifier | None = None
+        self.monitor: IntakeMonitor | None = None
+        self.liveness: LivenessDetector | None = None
+        self.queue: OfflineQueue | None = None
+        self.bench_writer: csv.DictWriter | None = None
+        self._bench_fh = None  # underlying file handle for flush
+        self.hardware_stubbed: bool = False
+        self.cycle_n: int = 0
+        self.last_cycle_summary: dict[str, Any] | None = None  # exposed via /api/device/status
+
+    async def init(self) -> None:
+        """Build all hardware resources. Raises RuntimeError on HI-012 violation.
+
+        Called from HardwareLoop.start, which is called from main.py:lifespan.
+        Any RuntimeError raised here aborts FastAPI startup cleanly.
+        """
+        # Wrap blocking GPIO init in to_thread so we don't block the loop.
+        self.magazine = await asyncio.to_thread(Magazine)
+        self.ejector = await asyncio.to_thread(Ejector)
+        self.diverter = await asyncio.to_thread(Diverter)
+        self.drawer_lock = await asyncio.to_thread(DrawerLock)
+        self.temp_sensor = await asyncio.to_thread(TempSensor)
+
+        # HI-012: refuse to run as if hardware were real when it isn't.
+        # Mirror of edge_pi/main.py:295-316 — sys.exit(1) becomes RuntimeError.
+        self.hardware_stubbed = (
+            self.magazine.is_stub
+            or self.ejector.is_stub
+            or self.diverter.is_stub
+            or self.drawer_lock.is_stub
+            or self.temp_sensor.is_stub
+        )
+        if self.hardware_stubbed:
+            if not settings.pharmguard_stub:
+                raise RuntimeError(
+                    "Hardware initialization degraded "
+                    f"(magazine.is_stub={self.magazine.is_stub}, "
+                    f"ejector.is_stub={self.ejector.is_stub}, "
+                    f"diverter.is_stub={self.diverter.is_stub}, "
+                    f"drawer_lock.is_stub={self.drawer_lock.is_stub}, "
+                    f"temp_sensor.is_stub={self.temp_sensor.is_stub}) "
+                    "but PHARMGUARD_STUB is not set. "
+                    "Refusing to run — telemetry would be falsified."
+                )
+            log.warning(
+                "STUB MODE: hardware not real — pill_taken will always be reported "
+                "False. DO NOT use this build in production."
+            )
+
+        # Open dual cameras (only when hardware is real). Same fail-loud rule.
+        if not self.hardware_stubbed:
+            try:
+                self.cam_a = await asyncio.to_thread(open_camera, 0)  # tray top-down
+                self.cam_b = await asyncio.to_thread(open_camera, 1)  # patient-facing
+            except Exception:
+                log.exception("Camera initialization failed")
+                if not settings.pharmguard_stub:
+                    raise RuntimeError("Camera init failed and stub disallowed")
+                log.warning(
+                    "STUB MODE: camera unavailable — vision verifies will be skipped"
+                )
+
+        self.verifier = PillVerifier(camera=self.cam_a)
+        self.monitor = IntakeMonitor(camera=self.cam_b)
+        self.liveness = LivenessDetector(camera=self.cam_b)
+
+        # Phase 8: open the offline queue.
+        self.queue = await asyncio.to_thread(OfflineQueue, settings.offline_queue_path)
+        log.info(
+            "Offline queue: %d pending events at startup",
+            self.queue.pending_count(),
+        )
+
+        # Phase 6: bench-mode safety + writer.
+        if settings.bench_mode and self.hardware_stubbed:
+            raise RuntimeError(
+                "BENCH_MODE=1 but hardware is stubbed — bench numbers would be invalid."
+            )
+        self.bench_writer, self._bench_fh = _open_bench_writer()
+        if self.bench_writer is not None:
+            log.warning(
+                "BENCH_MODE=1 — writing per-cycle metrics to %s. "
+                "Face ID + swallow are MOCKED. Restart with BENCH_MODE=0 for production.",
+                settings.bench_log_path,
+            )
+
+        log.info("CycleState ready — hardware_stubbed=%s", self.hardware_stubbed)
+
+    async def cleanup(self) -> None:
+        """Best-effort resource release. Idempotent."""
+        for h in (self.magazine, self.ejector, self.diverter, self.drawer_lock):
+            if h is not None:
+                try:
+                    await asyncio.to_thread(h.cleanup)
+                except Exception:
+                    log.exception("hardware cleanup failed (continuing)")
+        for cam in (self.cam_a, self.cam_b):
+            if cam is not None:
+                try:
+                    await asyncio.to_thread(cam.close)
+                except Exception:
+                    log.exception("camera close failed (continuing)")
+        if self._bench_fh is not None:
+            try:
+                self._bench_fh.close()
+            except Exception:
+                pass
+
+
+def _open_bench_writer():
+    """Open the bench_log_path CSV for append. Returns (writer, fh) or (None, None)."""
+    if not settings.bench_mode:
+        return None, None
+    path = Path(settings.bench_log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    new = not path.exists()
+    fh = path.open("a", newline="")
+    w = csv.DictWriter(fh, fieldnames=_BENCH_FIELDS)
+    if new:
+        w.writeheader()
+    return w, fh
+
+
+async def _next_dispense() -> dict | None:
+    """Direct DB query — replaces session.get('/api/inventory/next-dispense').
+
+    Mirrors backend/api/inventory.py:next_dispense body.
+    """
+    sb = get_supabase()
+    def _query():
+        q = (
+            sb.table("medications")
+            .select("*")
+            .gt("quantity", 0)
+            .not_.is_("patient_id", "null")
+        )
+        if settings.dispenser_id:
+            q = q.eq("dispenser_id", settings.dispenser_id)
+        return q.limit(1).execute()
+    result = await asyncio.to_thread(_query)
+    if not result.data:
+        return None
+    med = result.data[0]
+    return {
+        "patient_id": med["patient_id"],
+        "slot": med["slot"],
+        "medication": med["name"],
+        "expiry_date": med.get("expiry_date"),
+        "pills_per_dose": med.get("pills_per_dose", 1),
+        "dispenser_id": med.get("dispenser_id"),
+    }
+
+
+async def _authenticate_patient(state: CycleState) -> dict | None:
+    """Capture a live (post-blink) face crop, embed in-process, match against
+    stored patients. Replaces the old POST /api/auth/verify-face self-call.
+
+    Returns {"patient_id", "name", "distance"} on match, or None.
+    """
+    assert state.liveness is not None
+    crop_bytes = await asyncio.to_thread(state.liveness.capture_live_face, 15.0)
+    if crop_bytes is None:
+        log.warning("No live face captured")
+        return None
+    probe = await asyncio.to_thread(compute_embedding, crop_bytes)
+    if probe is None:
+        log.warning("Face embedding failed (zero or multiple faces)")
+        return None
+    sb = get_supabase()
+    rows = await asyncio.to_thread(
+        lambda: sb.table("patients")
+        .select("id,name,face_embedding")
+        .not_.is_("face_embedding", "null")
+        .execute()
+    )
+    candidates = [
+        (r["id"], r["face_embedding"])
+        for r in (rows.data or [])
+        if r.get("face_embedding")
+    ]
+    match = match_embedding(probe, candidates, tolerance=settings.face_match_tolerance)
+    if match is None:
+        return None
+    pid, dist = match
+    name = next((r["name"] for r in (rows.data or []) if r["id"] == pid), "")
+    return {"patient_id": pid, "name": name, "distance": dist}
+
+
+async def _report_intake_direct(
+    state: CycleState,
+    patient_id: int,
+    slot: int,
+    *,
+    verified: bool,
+    confidence: float | None = None,
+    is_stub: bool = False,
+) -> None:
+    """Direct DB write — replaces edge_pi/main.py:80-126 (HTTP self-call).
+
+    Same 2-phase commit shape: enqueue -> INSERT -> mark_sent. Mirrors
+    backend/api/logs.py:create_log body for the insert + quantity-decrement.
+    """
+    assert state.queue is not None
+    payload: dict = {
+        "patient_id": patient_id,
+        "slot": slot,
+        "pill_taken": verified,
+    }
+    if settings.dispenser_id:
+        payload["dispenser_id"] = settings.dispenser_id
+    if confidence is not None:
+        payload["confidence_score"] = float(confidence)
+    row_id = await asyncio.to_thread(
+        state.queue.enqueue, "intake", payload, is_stub=is_stub
+    )
+    sb = get_supabase()
+    try:
+        await asyncio.to_thread(
+            lambda: sb.table("adherence_logs").insert(payload).execute()
+        )
+        # Decrement medication quantity (mirrors backend/api/logs.py:44-49).
+        med_q = await asyncio.to_thread(
+            lambda: sb.table("medications").select("quantity").eq("slot", slot).execute()
+        )
+        if med_q.data and med_q.data[0]["quantity"] > 0:
+            new_q = med_q.data[0]["quantity"] - 1
+            await asyncio.to_thread(
+                lambda: sb.table("medications").update({"quantity": new_q}).eq("slot", slot).execute()
+            )
+        await asyncio.to_thread(state.queue.mark_sent, [row_id])
+    except Exception as exc:
+        log.warning("intake insert failed: %s; row %d retained for replay", exc, row_id)
+
+
+async def _report_temperature_direct(
+    state: CycleState,
+    value_c: float,
+    *,
+    is_stub: bool = False,
+) -> None:
+    """Direct DB write — replaces edge_pi/main.py:129-161 (HTTP self-call).
+
+    Threshold logic mirrors backend/api/alerts.py:post_temperature.
+    """
+    assert state.queue is not None
+    payload: dict = {"value_c": value_c}
+    if settings.dispenser_id:
+        payload["dispenser_id"] = settings.dispenser_id
+    row_id = await asyncio.to_thread(
+        state.queue.enqueue, "temperature", payload, is_stub=is_stub
+    )
+    if value_c <= settings.over_temp_celsius:
+        # Sub-threshold — no alert row. Still mark_sent so the queue drains.
+        await asyncio.to_thread(state.queue.mark_sent, [row_id])
+        return
+    # Over threshold — insert alert + broadcast.
+    from api.alerts import _insert_alert, ALERT_KIND_OVER_TEMP, SEVERITY_CRITICAL
+    try:
+        await _insert_alert(
+            kind=ALERT_KIND_OVER_TEMP,
+            severity=SEVERITY_CRITICAL,
+            dispenser_id=settings.dispenser_id or None,
+            payload={"value_c": value_c, "threshold_c": settings.over_temp_celsius},
+        )
+        await asyncio.to_thread(state.queue.mark_sent, [row_id])
+    except Exception as exc:
+        log.warning(
+            "temperature alert insert failed: %s; row %d retained for replay",
+            exc, row_id,
+        )
+
+
+async def _replay_drain(state: CycleState) -> None:
+    """Replay up to _REPLAY_BATCH_LIMIT unposted rows. HI-012 defensive guard."""
+    assert state.queue is not None
+    batch = state.queue.peek_batch(limit=_REPLAY_BATCH_LIMIT)
+    if not batch:
+        return
+    sent_ids: list[int] = []
+    sb = get_supabase()
+    for row_id, kind, payload, is_stub in batch:
+        # HI-012 defensive guard — never post a stub-mode pill_taken=true.
+        if (
+            is_stub
+            and kind == "intake"
+            and payload.get("pill_taken") is True
+        ):
+            log.error(
+                "queue row %d: stub-mode intake with pill_taken=true — "
+                "refusing to post (HI-012)",
+                row_id,
+            )
+            continue
+        try:
+            if kind == "intake":
+                await asyncio.to_thread(
+                    lambda p=payload: sb.table("adherence_logs").insert(p).execute()
+                )
+            elif kind == "temperature":
+                if payload.get("value_c", 0.0) > settings.over_temp_celsius:
+                    from api.alerts import (
+                        _insert_alert,
+                        ALERT_KIND_OVER_TEMP,
+                        SEVERITY_CRITICAL,
+                    )
+                    await _insert_alert(
+                        kind=ALERT_KIND_OVER_TEMP,
+                        severity=SEVERITY_CRITICAL,
+                        dispenser_id=payload.get("dispenser_id"),
+                        payload={
+                            "value_c": payload["value_c"],
+                            "threshold_c": settings.over_temp_celsius,
+                        },
+                    )
+            else:
+                log.error("queue row %d: unknown kind %r", row_id, kind)
+                continue
+            sent_ids.append(row_id)
+        except Exception as exc:
+            log.warning("replay row %d failed: %s; will retry", row_id, exc)
+            break  # backend looks unhealthy; stop draining this cycle
+    if sent_ids:
+        await asyncio.to_thread(state.queue.mark_sent, sent_ids)
+        log.info("replay drained %d/%d rows", len(sent_ids), len(batch))
+
+
+async def run_cycle(state: CycleState) -> None:
+    """One pass of the dispense loop.
+
+    Mirror of the body of edge_pi/main.py:run() inside its while True.
+    Conversions: time.sleep -> asyncio.sleep, blocking I/O -> to_thread.
+    Self-HTTP calls -> direct DB writes via the helpers above.
+    """
+    # Phase 8: replay drain + refuse-to-dispense gate.
+    await _replay_drain(state)
+    age = state.queue.oldest_age_seconds()
+    if (
+        age is not None
+        and age > settings.offline_max_age_seconds
+        and not settings.bench_mode
+    ):
+        log.warning(
+            "Refusing dispense — oldest unposted event %.0fs old (> %.0fs)",
+            age, settings.offline_max_age_seconds,
+        )
+        return
+
+    # Phase 5: tray temperature sample.
+    try:
+        value_c = await asyncio.to_thread(state.temp_sensor.read_celsius)
+        if value_c is not None:
+            await _report_temperature_direct(
+                state, value_c, is_stub=state.hardware_stubbed
+            )
+    except Exception:
+        log.exception("temperature sample failed")
+
+    # Schedule lookup.
+    t0 = time.perf_counter()
+    task = await _next_dispense()
+    t_schedule = time.perf_counter()
+    if task is None:
+        # No pending dispense — cycle no-ops. Caller waits POLL_INTERVAL_S.
+        return
+
+    patient_id = task["patient_id"]
+    slot = task["slot"]
+    log.info("Dispensing slot %d for patient %d", slot, patient_id)
+
+    # Right-patient gate. BENCH_MODE mocks a synthetic match.
+    if settings.bench_mode:
+        auth = {"patient_id": patient_id, "name": "bench", "distance": 0.0}
+    else:
+        auth = None if state.hardware_stubbed else await _authenticate_patient(state)
+    t_auth = time.perf_counter()
+
+    if not state.hardware_stubbed and auth is None:
+        log.warning("Skipping cycle: authentication failed for slot %d", slot)
+        return
+    if auth is not None and auth.get("patient_id") != patient_id:
+        log.warning(
+            "Authenticated patient_id=%s does not match scheduled %d; skipping cycle",
+            auth.get("patient_id"), patient_id,
+        )
+        return
+
+    # Magazine + ejector.
+    await asyncio.to_thread(state.magazine.rotate_to, slot)
+    t_rotate = time.perf_counter()
+    await asyncio.to_thread(state.ejector.push)
+    t_eject = time.perf_counter()
+
+    # Phase 4: pill-ID + diverter + drawer-lock.
+    if state.hardware_stubbed:
+        pill_taken_actual = False
+        pill_conf: float | None = None
+        t_pillid = t_diverter = t_drawer = t_eject
+        log.info(
+            "Stub mode: skipping vision verify, diverter, drawer_lock, swallow watch"
+        )
+    else:
+        pill_id_pass, pill_conf = await asyncio.to_thread(
+            state.verifier.confirm_tray_empty, True
+        )
+        t_pillid = time.perf_counter()
+        if pill_id_pass:
+            await asyncio.to_thread(state.diverter.deliver)
+            t_diverter = time.perf_counter()
+            await asyncio.to_thread(state.drawer_lock.hold_unlocked)
+            t_drawer = time.perf_counter()
+            pill_taken_actual = True
+            if not settings.bench_mode:
+                await asyncio.to_thread(state.monitor.watch_for_swallow, 60)
+        else:
+            log.warning("Pill-ID verification failed; routing to reject bin")
+            await asyncio.to_thread(state.diverter.reject)
+            t_diverter = time.perf_counter()
+            t_drawer = t_diverter
+            pill_taken_actual = False
+
+    # Adherence log (direct DB + queue).
+    await _report_intake_direct(
+        state,
+        patient_id,
+        slot,
+        verified=pill_taken_actual,
+        confidence=pill_conf,
+        is_stub=state.hardware_stubbed,
+    )
+    t_log = time.perf_counter()
+    log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
+
+    # Phase 6: per-cycle metrics row.
+    if state.bench_writer is not None:
+        state.cycle_n += 1
+        row = {
+            "cycle": state.cycle_n,
+            "patient_id": patient_id,
+            "slot": slot,
+            "t_schedule_ms": (t_schedule - t0) * 1000.0,
+            "t_auth_ms": (t_auth - t_schedule) * 1000.0,
+            "t_rotate_ms": (t_rotate - t_auth) * 1000.0,
+            "t_eject_ms": (t_eject - t_rotate) * 1000.0,
+            "t_pillid_ms": (t_pillid - t_eject) * 1000.0,
+            "t_diverter_ms": (t_diverter - t_pillid) * 1000.0,
+            "t_drawer_ms": (t_drawer - t_diverter) * 1000.0,
+            "t_log_ms": (t_log - t_drawer) * 1000.0,
+            "t_total_ms": (t_log - t0) * 1000.0,
+            "pill_taken": pill_taken_actual,
+        }
+        state.bench_writer.writerow(row)
+        if state._bench_fh is not None:
+            state._bench_fh.flush()
+
+    # Status snapshot for /api/device/status.
+    state.last_cycle_summary = {
+        "cycle": state.cycle_n,
+        "pill_taken": pill_taken_actual,
+        "t_total_ms": (t_log - t0) * 1000.0,
+    }
