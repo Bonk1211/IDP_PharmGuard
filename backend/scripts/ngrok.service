@@ -1,0 +1,22 @@
+[Unit]
+Description=ngrok HTTP tunnel for PharmGuard (free tier, rotating URL)
+After=pharmguard.service network-online.target
+Requires=pharmguard.service
+
+[Service]
+Type=simple
+# ngrok runs as the install user, NOT root — its config (authtoken)
+# lives in ~/.config/ngrok/ngrok.yml under that user.
+User=__USER__
+ExecStart=/usr/local/bin/ngrok http --log=stdout 8000
+Restart=on-failure
+RestartSec=5s
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ngrok-pharmguard
+
+[Install]
+WantedBy=multi-user.target

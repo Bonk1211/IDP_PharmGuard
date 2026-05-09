@@ -16,7 +16,7 @@ set -euo pipefail
 ##
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-INSTALL_DIR="$REPO_ROOT/edge_pi"
+INSTALL_DIR="$REPO_ROOT/backend"
 VENV_PATH="$INSTALL_DIR/.venv"
 CURRENT_USER="${SUDO_USER:-$(whoami)}"
 
@@ -180,6 +180,48 @@ if [[ "$NEW_HASH" != "$OLD_HASH" ]]; then
     echo "systemd unit refreshed at $SERVICE_FILE"
 else
     echo "systemd unit unchanged ($SERVICE_FILE) — skipping daemon-reload"
+fi
+echo ""
+
+##
+## Install or refresh ngrok systemd service (only if template changed).
+## ngrok itself must already be on the PATH (`apt install -y ngrok` after
+## adding the ngrok apt repo, or download the static binary). Authtoken
+## must be configured separately:
+##     ngrok config add-authtoken <YOUR_TOKEN>
+##
+NGROK_SERVICE_FILE="/etc/systemd/system/ngrok.service"
+NGROK_SERVICE_SRC="$INSTALL_DIR/scripts/ngrok.service"
+if [[ -f "$NGROK_SERVICE_SRC" ]]; then
+    if ! command -v ngrok >/dev/null 2>&1; then
+        echo "WARNING: ngrok binary not on PATH — skipping ngrok.service install."
+        echo "         Install ngrok then re-run this script:"
+        echo "           https://ngrok.com/docs/agent/linux/"
+    else
+        NGROK_CONTENT=$(cat "$NGROK_SERVICE_SRC")
+        NGROK_CONTENT="${NGROK_CONTENT//__INSTALL_DIR__/$INSTALL_DIR}"
+        NGROK_CONTENT="${NGROK_CONTENT//__USER__/$CURRENT_USER}"
+        NGROK_NEW_HASH=$(echo "$NGROK_CONTENT" | sha256sum | cut -d' ' -f1)
+        NGROK_OLD_HASH=""
+        if [[ -f "$NGROK_SERVICE_FILE" ]]; then
+            NGROK_OLD_HASH=$(sudo sha256sum "$NGROK_SERVICE_FILE" | cut -d' ' -f1)
+        fi
+        if [[ "$NGROK_NEW_HASH" != "$NGROK_OLD_HASH" ]]; then
+            echo "$NGROK_CONTENT" | sudo tee "$NGROK_SERVICE_FILE" > /dev/null
+            sudo chmod 644 "$NGROK_SERVICE_FILE"
+            sudo systemctl daemon-reload
+            echo "ngrok unit refreshed at $NGROK_SERVICE_FILE"
+        else
+            echo "ngrok unit unchanged ($NGROK_SERVICE_FILE) — skipping daemon-reload"
+        fi
+        # Auth token must be configured at least once before the unit can run.
+        if ! sudo -u "$CURRENT_USER" ngrok config check >/dev/null 2>&1; then
+            echo ""
+            echo "NOTE: ngrok authtoken not configured for user '$CURRENT_USER'."
+            echo "      Run (as that user):  ngrok config add-authtoken <YOUR_TOKEN>"
+            echo "      Then:                 sudo systemctl enable --now ngrok"
+        fi
+    fi
 fi
 echo ""
 

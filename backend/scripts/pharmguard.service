@@ -1,5 +1,5 @@
 [Unit]
-Description=PharmGuard Edge - Raspberry Pi Pill Dispenser
+Description=PharmGuard Backend - FastAPI + asyncio dispense loop
 After=network-online.target
 Wants=network-online.target
 
@@ -7,7 +7,10 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=__INSTALL_DIR__
-ExecStart=__INSTALL_DIR__/.venv/bin/python -u __INSTALL_DIR__/main.py
+# Workers MUST stay 1 — RPi.GPIO / picamera2 / lgpio hold per-process
+# state, so multi-worker uvicorn would fork-corrupt the hardware.
+# The lifespan handler in main.py builds the HardwareLoop on startup.
+ExecStart=__INSTALL_DIR__/.venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
 EnvironmentFile=-__INSTALL_DIR__/.env
 
 # Restart policy: bound the restart storm so a wedged service doesn't burn
