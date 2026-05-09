@@ -35,9 +35,24 @@ class HardwareLoop:
         self._stop_event = asyncio.Event()
 
     async def start(self) -> None:
-        """Build CycleState + launch the supervised loop. May raise from init()."""
+        """Build CycleState + launch the supervised loop. May raise from init().
+
+        If init() raises after partially claiming hardware, cleanup() runs
+        before re-raising so GPIO pins / cameras don't leak into kernel
+        state. Without this, a startup error mid-init would leave the next
+        run staring at "GPIO not allocated" until reboot.
+        """
         self._state = CycleState()
-        await self._state.init()  # HI-012 fail-loud lives here
+        try:
+            await self._state.init()  # HI-012 fail-loud lives here
+        except Exception:
+            log.warning("CycleState.init failed; releasing partial claims")
+            try:
+                await self._state.cleanup()
+            except Exception:
+                log.exception("cleanup after init failure also raised (continuing)")
+            self._state = None
+            raise
         self._task = asyncio.create_task(
             self._supervised_loop(), name="hardware_loop"
         )
