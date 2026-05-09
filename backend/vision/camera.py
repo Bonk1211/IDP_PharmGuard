@@ -6,6 +6,7 @@ import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 from typing import Protocol, runtime_checkable
 
@@ -102,11 +103,18 @@ class Cv2Source:
 
 
 class RpicamSource:
-    """Spawn rpicam-vid → MJPEG/TCP → cv2.VideoCapture.
+    """Spawn rpicam-vid → MJPEG/TCP → cv2.VideoCapture, fanned out to N consumers.
 
     Workaround for Trixie + cp312 venv where the system python3-libcamera
     bindings aren't ABI-compatible with the venv's Python. rpicam-vid is
     the libcamera CLI; cv2 reads its MJPEG stream over TCP.
+
+    rpicam-vid `-l` is single-consumer: only ONE TCP client at a time.
+    To support both the dispense cycle AND the /api/device/stream/* HTTP
+    endpoint, we spawn a daemon producer thread that holds the sole cv2
+    connection and continuously copies the latest frame into a thread-safe
+    slot. Both the cycle (read_frame) and the streaming endpoint
+    (latest_frame_jpeg) read from that slot independently.
     """
 
     BASE_PORT = 8888
@@ -146,27 +154,71 @@ class RpicamSource:
                 ok, _ = cap.read()
                 if ok:
                     self._cap = cap
-                    log.info(
-                        "RpicamSource opened (cam_num=%d, port=%d, %dx%d)",
-                        cam_num, self._port, width, height,
-                    )
-                    return
+                    break
                 cap.release()
             time.sleep(0.5)
-        # Couldn't connect to the rpicam-vid stream — kill the subprocess
-        if self._proc.poll() is None:
-            self._proc.terminate()
-        raise RuntimeError(
-            f"RpicamSource: cv2 failed to open tcp://localhost:{self._port} after 15s"
+        if self._cap is None:
+            if self._proc.poll() is None:
+                self._proc.terminate()
+            raise RuntimeError(
+                f"RpicamSource: cv2 failed to open tcp://localhost:{self._port} after 15s"
+            )
+
+        # ── Multi-consumer fan-out ────────────────────────────────────
+        self._latest_frame: np.ndarray | None = None
+        self._frame_lock = threading.Lock()
+        self._stop_evt = threading.Event()
+        self._producer = threading.Thread(
+            target=self._producer_loop,
+            name=f"rpicam-producer-{cam_num}",
+            daemon=True,
+        )
+        self._producer.start()
+        log.info(
+            "RpicamSource opened (cam_num=%d, port=%d, %dx%d, multi-consumer)",
+            cam_num, self._port, width, height,
         )
 
+    def _producer_loop(self) -> None:
+        """Pull frames as fast as rpicam-vid emits them; cache the latest."""
+        assert self._cap is not None
+        while not self._stop_evt.is_set():
+            ok, frame = self._cap.read()
+            if ok and frame is not None:
+                with self._frame_lock:
+                    self._latest_frame = frame
+            else:
+                # Brief backoff on spurious read failure
+                time.sleep(0.02)
+
     def read_frame(self) -> np.ndarray | None:
-        if self._cap is None:
-            return None
-        ok, frame = self._cap.read()
-        return frame if ok else None
+        """Return a copy of the latest frame (or None until first frame)."""
+        with self._frame_lock:
+            if self._latest_frame is None:
+                return None
+            return self._latest_frame.copy()
+
+    def latest_frame_jpeg(self, quality: int = 70) -> bytes | None:
+        """Return latest frame encoded as JPEG bytes (None until first frame).
+
+        Used by /api/device/stream/* — does its own encode here so the
+        streaming endpoint stays simple. Quality is the IMWRITE_JPEG_QUALITY
+        value (0-100); 70 is a reasonable balance.
+        """
+        with self._frame_lock:
+            frame = self._latest_frame
+            if frame is None:
+                return None
+            # encode while NOT holding the lock — cv2.imencode is CPU-heavy
+        ok, jpeg = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        )
+        return jpeg.tobytes() if ok else None
 
     def close(self) -> None:
+        self._stop_evt.set()
+        if hasattr(self, "_producer") and self._producer.is_alive():
+            self._producer.join(timeout=2)
         try:
             if self._cap is not None:
                 self._cap.release()
