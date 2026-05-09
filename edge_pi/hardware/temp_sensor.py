@@ -1,96 +1,107 @@
 """
-Tray temperature sensor — DS18B20 over 1-wire.
+Tray temperature sensor — DHT11 over a single GPIO data line.
 
-Reads /sys/bus/w1/devices/28-*/w1_slave; no third-party dependency. Enable on
-the Pi 5 with `dtoverlay=w1-gpio` in /boot/firmware/config.txt and a 4.7 kohm
-pull-up between data and 3V3 (single-sensor wiring).
+Wiring (BCM 4, physical pin 7) — same pin DS18B20 used:
+    DHT11 VCC  -> Pi 3V3 (pin 1)
+    DHT11 DATA -> Pi BCM 4 (pin 7)  + 10 kohm pull-up to 3V3
+    DHT11 GND  -> Pi GND  (pin 9)
 
-STUB_FAIL_LOUD: refuses to construct on dev hosts unless PHARMGUARD_STUB=1.
-Stub mode returns the same canned value every read; the backend treats it as
-below-threshold so no alerts are forged. HI-012 invariant preserved.
+DHT11 quirks vs DS18B20:
+  * Bit-banged single-wire protocol; we use adafruit-circuitpython-dht which
+    drives libgpiod for precise pulse timing on the Pi 5.
+  * 1 C resolution, +/- 2 C accuracy. Below DS18B20's +/- 0.5 C — adequate
+    for the 30 C tray-overheat threshold but not for clinical-grade telemetry.
+  * Max read rate ~1 Hz. Reading more often raises RuntimeError.
+  * ~10 % of reads fail with a checksum / timing error; retry up to 3 times
+    before returning None. Backend treats None as "no datum", not as cold.
+
+STUB_FAIL_LOUD: refuses to construct on dev hosts (no GPIO) unless
+PHARMGUARD_STUB=1. Stub mode returns the same canned value every read; the
+backend treats it as below-threshold so no alerts are forged. HI-012
+invariant preserved.
 """
 
 from __future__ import annotations
 
-import glob
 import logging
 import os
-from pathlib import Path
+import time
+from typing import Any
 
 log = logging.getLogger(__name__)
 
-W1_DEVICES_GLOB = "/sys/bus/w1/devices/28-*/w1_slave"
+# Same physical pin DS18B20 used (BCM 4 / phys 7). board.D4 maps to it.
+DHT_BCM_PIN = 4
 STUB_TEMP_C = 22.0  # safe-room value; below the 30 C default backend threshold
+READ_RETRIES = 3
+RETRY_BACKOFF_S = 1.1  # DHT11 needs ~1 s between successful reads
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
 STUB_ALLOWED: bool = os.environ.get("PHARMGUARD_STUB", "0") == "1"
 
 
 class TempSensor:
-    """DS18B20 1-wire reader. One sensor only; multi-sensor support deferred."""
+    """DHT11 reader. Public interface preserved from the DS18B20 version."""
 
     def __init__(self) -> None:
-        self.device_path: Path | None = None
+        self._sensor: Any = None
         self._is_stub: bool = False
         self._init_device()
 
     def _init_device(self) -> None:
-        paths = sorted(glob.glob(W1_DEVICES_GLOB))
-        if paths:
-            self.device_path = Path(paths[0])
+        try:
+            import adafruit_dht
+            import board
+
+            # board.D4 = BCM 4; if DHT_BCM_PIN ever changes, swap accordingly.
+            self._sensor = adafruit_dht.DHT11(board.D4, use_pulseio=False)
             self._is_stub = False
-            log.info("DS18B20 1-wire device found at %s", self.device_path)
+            log.info("DHT11 initialized on BCM %d", DHT_BCM_PIN)
             return
-
-        if STUB_ALLOWED:
-            log.warning(
-                "1-wire device not present at %s — stub mode (PHARMGUARD_STUB=1)",
-                W1_DEVICES_GLOB,
+        except Exception as exc:
+            if STUB_ALLOWED:
+                log.warning(
+                    "DHT11 unavailable (%s) — stub mode (PHARMGUARD_STUB=1)",
+                    exc,
+                )
+                self._sensor = None
+                self._is_stub = True
+                return
+            raise RuntimeError(
+                f"TempSensor: DHT11 init failed ({exc}); set PHARMGUARD_STUB=1 "
+                "to allow stub mode, or check the data-line pull-up."
             )
-            self.device_path = None
-            self._is_stub = True
-            return
-
-        raise RuntimeError(
-            "TempSensor: no 1-wire device under /sys/bus/w1/devices/28-*; "
-            "set PHARMGUARD_STUB=1 to allow stub mode"
-        )
 
     @property
     def is_stub(self) -> bool:
         return self._is_stub
 
     def read_celsius(self) -> float | None:
-        """Return the latest temperature in C, or None if the read failed.
+        """Return the latest temperature in C, or None if all retries failed.
 
         Stub mode returns a constant safe-room value (22 C). Never invents an
-        over-threshold reading.
+        over-threshold reading. A None return means "no datum this cycle" —
+        the caller (main.py) is expected to skip the temp report, NOT to
+        synthesize a fallback value.
         """
         if self._is_stub:
-            log.debug("stub: would read DS18B20")
+            log.debug("stub: would read DHT11")
             return STUB_TEMP_C
 
-        assert self.device_path is not None  # set by _init_device when not stub
-        try:
-            raw = self.device_path.read_text().splitlines()
-        except OSError:
-            log.exception("Failed to read 1-wire device %s", self.device_path)
-            return None
+        assert self._sensor is not None  # set by _init_device when not stub
+        last_exc: Exception | None = None
+        for attempt in range(1, READ_RETRIES + 1):
+            try:
+                value = self._sensor.temperature
+                if value is None:
+                    last_exc = RuntimeError("DHT11 returned None")
+                else:
+                    return float(value)
+            except RuntimeError as exc:
+                # adafruit_dht raises RuntimeError on checksum / timing fails.
+                last_exc = exc
+            if attempt < READ_RETRIES:
+                time.sleep(RETRY_BACKOFF_S)
 
-        # File format (current Linux w1-gpio):
-        #   <hex bytes> : crc=XX YES
-        #   <hex bytes> t=23437
-        # Use rfind to be tolerant of legacy / future kernel format drift.
-        if len(raw) < 2 or "YES" not in raw[0]:
-            log.warning("DS18B20 CRC bad: %r", raw)
-            return None
-        marker = raw[1].rfind("t=")
-        if marker == -1:
-            log.warning("DS18B20 unrecognized payload: %r", raw)
-            return None
-        try:
-            millicelsius = int(raw[1][marker + 2:])
-        except ValueError:
-            log.warning("DS18B20 unparseable payload: %r", raw)
-            return None
-        return millicelsius / 1000.0
+        log.warning("DHT11 read failed after %d attempts: %s", READ_RETRIES, last_exc)
+        return None

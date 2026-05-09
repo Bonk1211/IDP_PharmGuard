@@ -7,3 +7,5 @@ requests>=2.31.0,<3.0.0
 picamera2>=0.3.12,<0.4.0
 # rpi-lgpio is a drop-in replacement for RPi.GPIO on Pi 5 / Bookworm (uses lgpio backend)
 rpi-lgpio>=0.6
+# DHT11 tray temperature sensor (BCM 4). Pulls adafruit-blinka transitively for `board` module.
+adafruit-circuitpython-dht>=4.0.0,<5.0.0
