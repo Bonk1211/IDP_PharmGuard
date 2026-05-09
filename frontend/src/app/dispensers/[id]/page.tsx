@@ -25,7 +25,7 @@ export default function DispenserStreamPage() {
   // the existing MJPEG connection and opens a fresh one with the new
   // URL. Without re-keying, browsers may keep the old stream alive.
   const cam0Url = streamUrl(0, { annotate });
-  const cam1Url = streamUrl(1);
+  const cam1Url = streamUrl(1, { annotate });
   const configured = isDeviceConfigured();
 
   // Poll /status every 3 s so cycle_n / last_cycle stay fresh.
@@ -136,7 +136,7 @@ export default function DispenserStreamPage() {
         </div>
       )}
 
-      {/* Annotation toggle — affects cam 0 only */}
+      {/* Annotation toggle — overlays model output on BOTH cams */}
       <div className="mb-3 flex items-center gap-2 text-xs">
         <label className="inline-flex cursor-pointer items-center gap-2 rounded-full border border-sand-200 bg-white px-3 py-1.5">
           <input
@@ -145,10 +145,12 @@ export default function DispenserStreamPage() {
             onChange={(e) => setAnnotate(e.target.checked)}
             className="h-3 w-3"
           />
-          <span className="text-gray-700">Show YOLO spotter overlay (cam 0)</span>
+          <span className="text-gray-700">
+            Show model overlay (cam 0 = pill_detector boxes · cam 1 = MediaPipe landmarks)
+          </span>
         </label>
         {annotate && (
-          <span className="text-gray-400">~5 fps · YOLO inference is CPU-heavy</span>
+          <span className="text-gray-400">cam 0 ~5 fps · cam 1 ~10 fps · CPU-heavy</span>
         )}
       </div>
 
@@ -156,10 +158,14 @@ export default function DispenserStreamPage() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <CameraTile
           key={`cam0-${annotate ? "annot" : "raw"}`}
-          label={`Cam 0 — tray (pill ID)${annotate ? " · annotated" : ""}`}
+          label={`Cam 0 — tray${annotate ? " · pill_detector" : ""}`}
           url={cam0Url}
         />
-        <CameraTile label="Cam 1 — patient-facing (intake)" url={cam1Url} />
+        <CameraTile
+          key={`cam1-${annotate ? "annot" : "raw"}`}
+          label={`Cam 1 — patient${annotate ? " · MediaPipe FaceMesh + Hands" : ""}`}
+          url={cam1Url}
+        />
       </div>
 
       <p className="mt-6 text-xs text-gray-400">

@@ -80,33 +80,52 @@ async def reset(request: Request):
     return {"reset": True}
 
 
+_PILL_DETECTOR_PATH = "models/pill_detector.pt"
+
+
+def _get_pill_detector(app):
+    """Lazy-load and cache models/pill_detector.pt on app.state.
+
+    Separate from PillVerifier's spotter — pill_detector is a multi-class
+    pill identifier. The cycle's tray-empty gate still uses spotter.pt;
+    this is purely for the live-stream overlay.
+    """
+    cached = getattr(app.state, "pill_detector_model", None)
+    if cached is not None:
+        return cached
+    from ultralytics import YOLO
+    log.info("Loading YOLO pill_detector from %s", _PILL_DETECTOR_PATH)
+    model = YOLO(_PILL_DETECTOR_PATH)
+    app.state.pill_detector_model = model
+    return model
+
+
 @router.get("/stream/{cam_num}")
 async def stream_camera(
     cam_num: int,
     request: Request,
     annotate: bool = Query(
         default=False,
-        description="Overlay YOLO spotter boxes (cam 0 only).",
+        description="Overlay model output. cam 0 -> YOLO pill_detector boxes, "
+                    "cam 1 -> MediaPipe FaceMesh + Hands landmarks.",
     ),
 ):
     """MJPEG live stream for `cam_num` (0=tray, 1=intake/face).
 
-    Reads frames from the dispense cycle's camera handle (a producer
-    thread inside RpicamSource fans the single rpicam-vid TCP feed out
-    to N consumers — the cycle and any number of /stream/* clients).
+    Reads frames from the dispense cycle's camera handle (RpicamSource
+    keeps a producer thread that fans the single rpicam-vid TCP feed
+    out to N consumers).
 
-    With `?annotate=1` and cam_num=0, each frame is run through the
-    YOLO spotter (the same model PillVerifier loaded at first cycle)
-    and bounding boxes are rendered. Stream rate drops to ~5 fps in
-    annotated mode because YOLO on Pi 5 CPU is ~150-200 ms/frame.
+    `?annotate=1` overlays:
+      cam 0 -> YOLO pill_detector.pt bounding boxes (~5 fps; YOLO is
+                ~150-200 ms/frame on Pi 5 CPU).
+      cam 1 -> MediaPipe FaceMesh + Hands landmarks (~10 fps; uses
+                the SAME mp.solutions instances the cycle's IntakeMonitor
+                holds, so overlay reflects exactly what the swallow FSM
+                sees).
 
-    Returns multipart/x-mixed-replace which browsers render natively in
-    an <img> tag. Frame rate matches rpicam-vid (~15 fps) when raw.
-
-    Auth: same X-Device-API-Key as the rest of /api/device/*. For
-    browser <img> tags (which can't set headers) pass `?key=<value>`.
-
-    Headless mode (BACKEND_HEADLESS=1): cameras aren't open, returns 503.
+    Auth: X-Device-API-Key header OR ?key=<value> query param.
+    Headless mode: cameras not open -> 503.
     """
     if cam_num not in (0, 1):
         raise HTTPException(status_code=404, detail="cam_num must be 0 or 1")
@@ -114,9 +133,6 @@ async def stream_camera(
     if loop is None:
         raise HTTPException(status_code=503, detail="Headless mode — no cameras")
 
-    # Pull the camera handle that the cycle already opened. This is the
-    # SAME RpicamSource instance the dispense cycle uses for pill_id —
-    # its internal producer thread keeps the latest frame slot fresh.
     state = getattr(loop, "_state", None)
     cam = getattr(state, "cam_a" if cam_num == 0 else "cam_b", None) if state else None
     if cam is None:
@@ -127,29 +143,76 @@ async def stream_camera(
             detail="Camera backend doesn't expose latest_frame_jpeg",
         )
 
-    # Annotation: only meaningful for cam 0 (the spotter is for the tray).
-    # Cam 1 uses MediaPipe FaceMesh+Hands during cycle's swallow FSM —
-    # different output shape; not exposed here.
-    do_annotate = annotate and cam_num == 0
-    verifier = getattr(state, "verifier", None) if state else None
+    # ── Decide annotation backend per-camera ───────────────────────────
+    do_annotate = bool(annotate)
+    pill_detector = None
+    monitor = None  # IntakeMonitor — owns _face_mesh + _hands
 
-    # ── Annotated path: run YOLO, draw boxes, encode ───────────────────
-    if do_annotate:
-        if verifier is None:
-            raise HTTPException(status_code=503, detail="PillVerifier not initialised")
-        # Force-load the model now (would otherwise wait for first cycle).
-        await asyncio.to_thread(verifier._ensure_model)
-        target_fps = 5  # YOLO Pi-5 CPU is ~5 fps max
+    if do_annotate and cam_num == 0:
+        # Cam 0 → pill_detector.pt (multi-class pill identification).
+        pill_detector = await asyncio.to_thread(_get_pill_detector, request.app)
+        target_fps = 5
+    elif do_annotate and cam_num == 1:
+        # Cam 1 → MediaPipe overlay. Reuse the cycle's already-loaded models.
+        monitor = getattr(state, "monitor", None) if state else None
+        if monitor is None or getattr(monitor, "_face_mesh", None) is None:
+            raise HTTPException(
+                status_code=503,
+                detail="IntakeMonitor not initialised (cycle hasn't started)",
+            )
+        target_fps = 10
     else:
         target_fps = 15
     frame_interval_s = 1.0 / target_fps
 
-    def _annotate_frame(frame):
-        """Run YOLO + draw boxes; return JPEG bytes. Lazy cv2/ultralytics import."""
+    def _annotate_yolo(frame):
+        """Cam 0: run pill_detector, draw boxes, encode JPEG."""
         import cv2
-        results = verifier._model(frame, verbose=False)
-        # ultralytics' .plot() returns a numpy ndarray with boxes/labels burned in.
+        results = pill_detector(frame, verbose=False)
         annotated = results[0].plot() if results else frame
+        ok, jpeg = cv2.imencode(
+            ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), _STREAM_JPEG_QUALITY],
+        )
+        return jpeg.tobytes() if ok else None
+
+    def _annotate_mediapipe(frame):
+        """Cam 1: run FaceMesh + Hands, draw landmarks, encode JPEG."""
+        import cv2
+        import mediapipe as mp
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face = monitor._face_mesh.process(rgb)
+        hands = monitor._hands.process(rgb)
+        annotated = frame.copy()
+
+        drawing = mp.solutions.drawing_utils
+        drawing_styles = mp.solutions.drawing_styles
+        if face.multi_face_landmarks:
+            for face_lm in face.multi_face_landmarks:
+                drawing.draw_landmarks(
+                    annotated, face_lm,
+                    mp.solutions.face_mesh.FACEMESH_CONTOURS,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=drawing_styles.get_default_face_mesh_contours_style(),
+                )
+        if hands.multi_hand_landmarks:
+            for hand_lm in hands.multi_hand_landmarks:
+                drawing.draw_landmarks(
+                    annotated, hand_lm,
+                    mp.solutions.hands.HAND_CONNECTIONS,
+                    drawing_styles.get_default_hand_landmarks_style(),
+                    drawing_styles.get_default_hand_connections_style(),
+                )
+
+        # Quick-glance status badge: face / hands counts so the operator
+        # can confirm at a glance what the cycle's FSM has to work with.
+        fcount = len(face.multi_face_landmarks or [])
+        hcount = len(hands.multi_hand_landmarks or [])
+        cv2.putText(
+            annotated, f"face={fcount} hands={hcount}",
+            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA,
+        )
+
         ok, jpeg = cv2.imencode(
             ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), _STREAM_JPEG_QUALITY],
         )
@@ -169,7 +232,8 @@ async def stream_camera(
                     if frame is None:
                         await asyncio.sleep(0.05)
                         continue
-                    payload = await asyncio.to_thread(_annotate_frame, frame)
+                    fn = _annotate_yolo if cam_num == 0 else _annotate_mediapipe
+                    payload = await asyncio.to_thread(fn, frame)
                 else:
                     payload = await asyncio.to_thread(
                         cam.latest_frame_jpeg, _STREAM_JPEG_QUALITY
