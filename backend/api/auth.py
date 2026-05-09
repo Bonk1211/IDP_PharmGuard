@@ -4,10 +4,10 @@ import logging
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from app.core.config import settings
-from app.core.security import verify_device_token
-from app.db.base import get_supabase
-from app.services.face_recognition import compute_embedding, match_embedding
+from core.config import settings
+from core.security import verify_device_token
+from db.base import get_supabase
+from services.face_recognition import compute_embedding, match_embedding
 
 log = logging.getLogger(__name__)
 

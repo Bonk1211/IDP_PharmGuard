@@ -2,7 +2,7 @@
 
 from supabase import create_client, Client
 
-from app.core.config import settings
+from core.config import settings
 
 _client: Client | None = None
 

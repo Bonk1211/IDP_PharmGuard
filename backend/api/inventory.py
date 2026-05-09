@@ -3,8 +3,8 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.core.security import verify_device_token
-from app.db.base import get_supabase
+from core.security import verify_device_token
+from db.base import get_supabase
 
 router = APIRouter()
 

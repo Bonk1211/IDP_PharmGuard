@@ -6,7 +6,7 @@ Used when the local YOLO models fail or have low confidence.
 
 import logging
 
-from app.core.config import settings
+from core.config import settings
 
 log = logging.getLogger(__name__)
 

@@ -16,9 +16,9 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
-from app.core.config import settings
-from app.core.security import verify_device_token
-from app.db.base import get_supabase
+from core.config import settings
+from core.security import verify_device_token
+from db.base import get_supabase
 
 log = logging.getLogger(__name__)
 
