@@ -351,8 +351,13 @@ async def run_cycle(state: CycleState) -> None:
             "Stub mode: skipping vision verify, drawer_lock, swallow watch"
         )
     else:
+        # confirm_tray_empty(timeout_s=5.0, *, return_confidence=False).
+        # Pass return_confidence as kwarg via functools.partial so it's
+        # actually keyword (was being passed as positional `timeout_s`,
+        # which set timeout=1s AND made the function return a bare bool).
+        import functools
         pill_id_pass, pill_conf = await asyncio.to_thread(
-            state.verifier.confirm_tray_empty, True
+            functools.partial(state.verifier.confirm_tray_empty, return_confidence=True)
         )
         t_pillid = time.perf_counter()
         if pill_id_pass:
