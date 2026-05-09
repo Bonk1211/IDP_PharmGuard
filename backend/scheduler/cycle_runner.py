@@ -28,7 +28,6 @@ from typing import Any
 
 from config import settings
 from db.base import get_supabase
-from hardware.diverter import Diverter
 from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
@@ -47,7 +46,7 @@ log = logging.getLogger(__name__)
 _BENCH_FIELDS = (
     "cycle", "patient_id", "slot",
     "t_schedule_ms", "t_auth_ms", "t_rotate_ms", "t_eject_ms",
-    "t_pillid_ms", "t_diverter_ms", "t_drawer_ms",
+    "t_pillid_ms", "t_drawer_ms",
     "t_log_ms", "t_total_ms",
     "pill_taken",
 )
@@ -65,7 +64,6 @@ class CycleState:
     def __init__(self) -> None:
         self.magazine: Magazine | None = None
         self.ejector: Ejector | None = None
-        self.diverter: Diverter | None = None
         self.drawer_lock: DrawerLock | None = None
         self.temp_sensor: TempSensor | None = None
         self.cam_a: CameraSource | None = None
@@ -88,7 +86,6 @@ class CycleState:
         # Wrap blocking GPIO init in to_thread so we don't block the loop.
         self.magazine = await asyncio.to_thread(Magazine)
         self.ejector = await asyncio.to_thread(Ejector)
-        self.diverter = await asyncio.to_thread(Diverter)
         self.drawer_lock = await asyncio.to_thread(DrawerLock)
         self.temp_sensor = await asyncio.to_thread(TempSensor)
 
@@ -97,7 +94,6 @@ class CycleState:
         self.hardware_stubbed = (
             self.magazine.is_stub
             or self.ejector.is_stub
-            or self.diverter.is_stub
             or self.drawer_lock.is_stub
             or self.temp_sensor.is_stub
         )
@@ -107,7 +103,6 @@ class CycleState:
                     "Hardware initialization degraded "
                     f"(magazine.is_stub={self.magazine.is_stub}, "
                     f"ejector.is_stub={self.ejector.is_stub}, "
-                    f"diverter.is_stub={self.diverter.is_stub}, "
                     f"drawer_lock.is_stub={self.drawer_lock.is_stub}, "
                     f"temp_sensor.is_stub={self.temp_sensor.is_stub}) "
                     "but PHARMGUARD_STUB is not set. "
@@ -158,7 +153,7 @@ class CycleState:
 
     async def cleanup(self) -> None:
         """Best-effort resource release. Idempotent."""
-        for h in (self.magazine, self.ejector, self.diverter, self.drawer_lock):
+        for h in (self.magazine, self.ejector, self.drawer_lock):
             if h is not None:
                 try:
                     await asyncio.to_thread(h.cleanup)
@@ -413,13 +408,16 @@ async def run_cycle(state: CycleState) -> None:
     await asyncio.to_thread(state.ejector.push)
     t_eject = time.perf_counter()
 
-    # Phase 4: pill-ID + diverter + drawer-lock.
+    # Pill-ID + drawer-lock (single-chute design — no diverter).
+    # Fail-safe: if pill-ID rejects, drawer stays LOCKED. Pill sits in
+    # the chute for the operator to remove. Adherence log records
+    # pill_taken=false. Patient never gets a wrong-pill delivery.
     if state.hardware_stubbed:
         pill_taken_actual = False
         pill_conf: float | None = None
-        t_pillid = t_diverter = t_drawer = t_eject
+        t_pillid = t_drawer = t_eject
         log.info(
-            "Stub mode: skipping vision verify, diverter, drawer_lock, swallow watch"
+            "Stub mode: skipping vision verify, drawer_lock, swallow watch"
         )
     else:
         pill_id_pass, pill_conf = await asyncio.to_thread(
@@ -427,18 +425,18 @@ async def run_cycle(state: CycleState) -> None:
         )
         t_pillid = time.perf_counter()
         if pill_id_pass:
-            await asyncio.to_thread(state.diverter.deliver)
-            t_diverter = time.perf_counter()
             await asyncio.to_thread(state.drawer_lock.hold_unlocked)
             t_drawer = time.perf_counter()
             pill_taken_actual = True
             if not settings.bench_mode:
                 await asyncio.to_thread(state.monitor.watch_for_swallow, 60)
         else:
-            log.warning("Pill-ID verification failed; routing to reject bin")
-            await asyncio.to_thread(state.diverter.reject)
-            t_diverter = time.perf_counter()
-            t_drawer = t_diverter
+            log.warning(
+                "Pill-ID verification failed (slot=%d, conf=%s); drawer stays "
+                "LOCKED. Operator must remove the rejected pill from the chute.",
+                slot, pill_conf,
+            )
+            t_drawer = t_pillid
             pill_taken_actual = False
 
     # Adherence log (direct DB + queue).
@@ -465,8 +463,7 @@ async def run_cycle(state: CycleState) -> None:
             "t_rotate_ms": (t_rotate - t_auth) * 1000.0,
             "t_eject_ms": (t_eject - t_rotate) * 1000.0,
             "t_pillid_ms": (t_pillid - t_eject) * 1000.0,
-            "t_diverter_ms": (t_diverter - t_pillid) * 1000.0,
-            "t_drawer_ms": (t_drawer - t_diverter) * 1000.0,
+            "t_drawer_ms": (t_drawer - t_pillid) * 1000.0,
             "t_log_ms": (t_log - t_drawer) * 1000.0,
             "t_total_ms": (t_log - t0) * 1000.0,
             "pill_taken": pill_taken_actual,
