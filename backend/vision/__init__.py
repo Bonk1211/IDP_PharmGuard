@@ -1,4 +1,4 @@
-"""Vision pipeline: pill spotter, swallow verification, liveness, and the camera abstraction."""
+"""Vision pipeline: pill spotter, swallow verification, and the camera abstraction."""
 
 from vision.camera import (
     CameraSource,
@@ -8,14 +8,12 @@ from vision.camera import (
     open_camera,
 )
 from vision.intake_monitor import IntakeMonitor
-from vision.liveness import LivenessDetector
 from vision.pill_verifier import PillVerifier
 
 __all__ = [
     "CameraSource",
     "Cv2Source",
     "IntakeMonitor",
-    "LivenessDetector",
     "Picamera2Source",
     "PillVerifier",
     "RpicamSource",

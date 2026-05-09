@@ -33,12 +33,10 @@ from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
 from hardware.temp_sensor import TempSensor
-from services.face_recognition import compute_embedding, match_embedding
 from storage.queue import OfflineQueue
 from vision import (
     CameraSource,
     IntakeMonitor,
-    LivenessDetector,
     PillVerifier,
     open_camera,
 )
@@ -74,7 +72,6 @@ class CycleState:
         self.cam_b: CameraSource | None = None
         self.verifier: PillVerifier | None = None
         self.monitor: IntakeMonitor | None = None
-        self.liveness: LivenessDetector | None = None
         self.queue: OfflineQueue | None = None
         self.bench_writer: csv.DictWriter | None = None
         self._bench_fh = None  # underlying file handle for flush
@@ -136,7 +133,6 @@ class CycleState:
 
         self.verifier = PillVerifier(camera=self.cam_a)
         self.monitor = IntakeMonitor(camera=self.cam_b)
-        self.liveness = LivenessDetector(camera=self.cam_b)
 
         # Phase 8: open the offline queue.
         self.queue = await asyncio.to_thread(OfflineQueue, settings.offline_queue_path)
@@ -223,41 +219,6 @@ async def _next_dispense() -> dict | None:
         "pills_per_dose": med.get("pills_per_dose", 1),
         "dispenser_id": med.get("dispenser_id"),
     }
-
-
-async def _authenticate_patient(state: CycleState) -> dict | None:
-    """Capture a live (post-blink) face crop, embed in-process, match against
-    stored patients. Replaces the old POST /api/auth/verify-face self-call.
-
-    Returns {"patient_id", "name", "distance"} on match, or None.
-    """
-    assert state.liveness is not None
-    crop_bytes = await asyncio.to_thread(state.liveness.capture_live_face, 15.0)
-    if crop_bytes is None:
-        log.warning("No live face captured")
-        return None
-    probe = await asyncio.to_thread(compute_embedding, crop_bytes)
-    if probe is None:
-        log.warning("Face embedding failed (zero or multiple faces)")
-        return None
-    sb = get_supabase()
-    rows = await asyncio.to_thread(
-        lambda: sb.table("patients")
-        .select("id,name,face_embedding")
-        .not_.is_("face_embedding", "null")
-        .execute()
-    )
-    candidates = [
-        (r["id"], r["face_embedding"])
-        for r in (rows.data or [])
-        if r.get("face_embedding")
-    ]
-    match = match_embedding(probe, candidates, tolerance=settings.face_match_tolerance)
-    if match is None:
-        return None
-    pid, dist = match
-    name = next((r["name"] for r in (rows.data or []) if r["id"] == pid), "")
-    return {"patient_id": pid, "name": name, "distance": dist}
 
 
 async def _report_intake_direct(
@@ -441,22 +402,10 @@ async def run_cycle(state: CycleState) -> None:
     slot = task["slot"]
     log.info("Dispensing slot %d for patient %d", slot, patient_id)
 
-    # Right-patient gate. BENCH_MODE mocks a synthetic match.
-    if settings.bench_mode:
-        auth = {"patient_id": patient_id, "name": "bench", "distance": 0.0}
-    else:
-        auth = None if state.hardware_stubbed else await _authenticate_patient(state)
-    t_auth = time.perf_counter()
-
-    if not state.hardware_stubbed and auth is None:
-        log.warning("Skipping cycle: authentication failed for slot %d", slot)
-        return
-    if auth is not None and auth.get("patient_id") != patient_id:
-        log.warning(
-            "Authenticated patient_id=%s does not match scheduled %d; skipping cycle",
-            auth.get("patient_id"), patient_id,
-        )
-        return
+    # Right-patient gate removed — schedule decides who gets the dispense
+    # (single-patient-per-Pi model). t_auth is kept at the schedule time
+    # so the bench CSV schema (`t_auth_ms` column) stays stable.
+    t_auth = t_schedule
 
     # Magazine + ejector.
     await asyncio.to_thread(state.magazine.rotate_to, slot)

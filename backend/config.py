@@ -37,7 +37,6 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     device_tokens: str = ""                         # legacy bearer tokens, comma-sep
     default_dispenser_id: str = "dispenser-001"
-    face_match_tolerance: float = 0.6
     expiry_warn_days: int = 14
     low_stock_threshold: int = 3
     over_temp_celsius: float = 30.0
