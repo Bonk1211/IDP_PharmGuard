@@ -1,16 +1,43 @@
-"""Patient swallow verification — ported from ml/swallow/main5.py.
+"""Patient intake verification — 3-step game FSM over MediaPipe FaceMesh + Hands.
 
-Runs a 5-step pose state machine over MediaPipe FaceMesh + Hands landmarks,
-accumulating temporally-smoothed confidence per step. Each step must be held
-above REQUIRED_CONFIDENCE for its target duration before the FSM advances.
+Replaces the old 5-step HSV-color-based monster (HAND -> TILT -> LEVEL ->
+MOUTH -> TONGUE) which depended on the pill being a specific blue colour.
+This version uses only face/hand landmark geometry, so it works for any
+pill colour and is patient-friendly.
+
+Game flow:
+    1. READY    — bring hand close to your mouth.    hold 1.5 s
+    2. SWALLOW  — close your mouth and swallow.      hold 2.0 s
+    3. DONE     — open your mouth (empty).           hold 1.5 s
+
+Each step's confidence is EMA-smoothed; once it stays above
+``REQUIRED_CONFIDENCE`` for the step's hold duration, the FSM advances.
+The state dict is updated every frame and read by /api/device/intake
+for the dashboard's live "game panel" UI.
+
+Public API:
+    IntakeMonitor()                       -- constructor, lazy-loads mediapipe
+    .process_frame(frame)   -> dict       -- one tick; returns state snapshot
+    .get_state()            -> dict       -- thread-safe state snapshot
+    .reset()                              -- back to step 1, idle status
+    .watch_for_swallow(timeout_s) -> bool -- cycle's blocking wrapper
+    .close()                              -- release mediapipe + camera
+    ._face_mesh / ._hands                 -- exposed for /stream overlay
+
+Thread-safety: state mutations + reads are guarded by self._lock. The
+cycle runs watch_for_swallow on an asyncio.to_thread executor; the
+/api/device/intake handler reads state from the FastAPI loop. Both
+hold the lock while touching `_state`.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import cv2
 import numpy as np
@@ -18,55 +45,120 @@ import numpy as np
 from vision.camera import CameraSource, open_camera
 
 # mediapipe is lazy-loaded inside IntakeMonitor.__init__ — at module
-# import time it transitively pulls matplotlib (~10s on Pi 5). The
-# import only happens when the backend actually instantiates the
-# monitor (i.e. cycle init on real hardware). BACKEND_HEADLESS skips
-# that path entirely so dev-mac never pays the cost.
+# import time it transitively pulls matplotlib (~10s on Pi 5).
 
 log = logging.getLogger(__name__)
 
-# ---- Thresholds ported from main5.py ----
-REQUIRED_CONFIDENCE = 0.85
-POSE_HOLD_TIME = 1.5
-INSPECTION_HOLD_TIME = 3.0
-SMOOTHING_ALPHA = 0.3
+# ---- Tunables ----
+REQUIRED_CONFIDENCE = 0.70   # smoothed confidence to trigger the hold timer
+SMOOTHING_ALPHA = 0.40       # EMA factor (higher = more responsive, less stable)
+HAND_NEAR_MOUTH_PX = 200.0   # absolute distance threshold (640x480 frame)
+MOUTH_OPEN_RATIO = 0.30      # mouth-open if vertical/horizontal lip ratio > this
+MOUTH_CLOSED_RATIO = 0.10    # mouth-closed if ratio <= this
 
-PILL_HSV_LOWER = np.array([100, 150, 50])
-PILL_HSV_UPPER = np.array([140, 255, 255])
-TONGUE_HSV_LOWER = np.array([160, 50, 50])
-TONGUE_HSV_UPPER = np.array([180, 255, 255])
 
-# Anthropometric model points for solvePnP head pose
-MODEL_POINTS = np.array(
-    [
-        (0.0, 0.0, 0.0),          # Nose tip      (1)
-        (0.0, -330.0, -65.0),     # Chin          (152)
-        (-225.0, 170.0, -135.0),  # Left eye      (33)
-        (225.0, 170.0, -135.0),   # Right eye     (263)
-        (-150.0, -150.0, -125.0), # Left mouth    (61)
-        (150.0, -150.0, -125.0),  # Right mouth   (291)
-    ],
-    dtype="double",
-)
+@dataclass
+class StepDef:
+    name: str            # short ID used in state dict
+    label: str           # human-readable label for UI
+    instruction: str     # patient-facing prompt
+    hold_s: float        # how long confidence must stay above threshold
 
-_STEP_ORDER = (
-    "STEP_1_HAND",
-    "STEP_2_TILT",
-    "STEP_3_LEVEL",
-    "STEP_4_MOUTH",
-    "STEP_5_TONGUE",
+
+# Step 1: READY — hand close to mouth
+# Step 2: SWALLOW — mouth closed (after the patient swallows)
+# Step 3: DONE — mouth open + empty
+_STEPS: tuple[StepDef, ...] = (
+    StepDef("READY",   "Take the pill",      "Bring your hand close to your mouth", 1.5),
+    StepDef("SWALLOW", "Swallow",            "Close your mouth and swallow",         2.0),
+    StepDef("DONE",    "Show empty mouth",   "Open your mouth (empty) to confirm",   1.5),
 )
 
 
-def _sigmoid(x: float, x0: float, k: float) -> float:
-    try:
-        return 1.0 / (1.0 + math.exp(-k * (x - x0)))
-    except OverflowError:
-        return 0.0 if x < x0 else 1.0
+def _initial_state() -> dict:
+    return {
+        "running": False,
+        "step_index": 0,
+        "total_steps": len(_STEPS),
+        "step_name": _STEPS[0].name,
+        "step_label": _STEPS[0].label,
+        "instruction": _STEPS[0].instruction,
+        "confidence": 0.0,           # EMA of current step's verifier
+        "hold_progress": 0.0,        # 0..1 — fraction of hold_s accumulated
+        "face_visible": False,
+        "hands_count": 0,
+        "history": [],               # completed steps with timestamps
+        "result": None,              # "passed" | "timeout" | None
+        "started_at": None,          # epoch seconds
+        "ended_at": None,
+        "updated_at": time.time(),
+    }
 
 
-def _dist(p1: Any, p2: Any, w: int, h: int) -> float:
+def _dist_norm(p1: Any, p2: Any, w: int, h: int) -> float:
     return math.hypot((p2.x - p1.x) * w, (p2.y - p1.y) * h)
+
+
+def _mouth_open_ratio(lms: list[Any], w: int, h: int) -> float:
+    """Vertical lip gap / mouth width. ~0 closed, ~0.5+ wide open."""
+    horizontal = _dist_norm(lms[61], lms[291], w, h)
+    if horizontal == 0:
+        return 0.0
+    vertical = _dist_norm(lms[13], lms[14], w, h)
+    return vertical / horizontal
+
+
+def _hand_to_mouth(lms: list[Any], hand_lms: list[Any] | None, w: int, h: int) -> float:
+    """Smallest pixel distance from any fingertip-like point to the upper lip."""
+    if not hand_lms:
+        return float("inf")
+    upper_lip = lms[13]
+    best = float("inf")
+    for hand in hand_lms:
+        for idx in (4, 8):  # thumb tip + index tip
+            d = _dist_norm(upper_lip, hand.landmark[idx], w, h)
+            if d < best:
+                best = d
+    return best
+
+
+# ---- Per-step verifiers (return 0..1 confidence) ----
+
+def _step_ready(open_ratio: float, hand_d: float) -> float:
+    """Confidence the patient is bringing pill+hand to mouth."""
+    if hand_d == float("inf"):
+        return 0.0
+    proximity = max(0.0, 1.0 - hand_d / HAND_NEAR_MOUTH_PX)
+    return float(proximity)
+
+
+def _step_swallow(open_ratio: float, hand_d: float) -> float:
+    """Confidence the patient has closed mouth (ready to swallow / swallowing)."""
+    if open_ratio <= MOUTH_CLOSED_RATIO:
+        return 1.0
+    if open_ratio >= MOUTH_OPEN_RATIO:
+        return 0.0
+    return float(
+        1.0 - (open_ratio - MOUTH_CLOSED_RATIO)
+            / (MOUTH_OPEN_RATIO - MOUTH_CLOSED_RATIO)
+    )
+
+
+def _step_done(open_ratio: float, hand_d: float) -> float:
+    """Confidence the patient has opened mouth (showing it's empty)."""
+    if open_ratio >= MOUTH_OPEN_RATIO:
+        return 1.0
+    if open_ratio <= MOUTH_CLOSED_RATIO:
+        return 0.0
+    return float(
+        (open_ratio - MOUTH_CLOSED_RATIO)
+            / (MOUTH_OPEN_RATIO - MOUTH_CLOSED_RATIO)
+    )
+
+
+_VERIFIERS: tuple[Callable[[float, float], float], ...] = (
+    _step_ready, _step_swallow, _step_done,
+)
 
 
 class IntakeMonitor:
@@ -87,6 +179,11 @@ class IntakeMonitor:
             max_num_hands=2, min_detection_confidence=0.5
         )
 
+        self._lock = threading.Lock()
+        self._state: dict = _initial_state()
+        self._smoothed_conf: float = 0.0
+        self._timer_started_at: float = 0.0
+
     # ---- camera ----
     def _ensure_camera(self) -> None:
         if self._source is not None:
@@ -96,188 +193,151 @@ class IntakeMonitor:
     def _read_frame(self) -> np.ndarray | None:
         return self._source.read_frame() if self._source is not None else None
 
-    # ---- pose & confidence calculators (ported from main5.py) ----
-    def _head_pitch(self, lms: list[Any], w: int, h: int) -> float:
-        image_points = np.array(
-            [
-                (lms[1].x * w, lms[1].y * h),
-                (lms[152].x * w, lms[152].y * h),
-                (lms[33].x * w, lms[33].y * h),
-                (lms[263].x * w, lms[263].y * h),
-                (lms[61].x * w, lms[61].y * h),
-                (lms[291].x * w, lms[291].y * h),
-            ],
-            dtype="double",
-        )
-        focal = float(w)
-        cam_matrix = np.array(
-            [[focal, 0, w / 2], [0, focal, h / 2], [0, 0, 1]], dtype="double"
-        )
-        ok, rvec, tvec = cv2.solvePnP(
-            MODEL_POINTS,
-            image_points,
-            cam_matrix,
-            np.zeros((4, 1)),
-            flags=cv2.SOLVEPNP_ITERATIVE,
-        )
-        if not ok:
-            return 0.0
-        rmat, _ = cv2.Rodrigues(rvec)
-        _, _, _, _, _, _, euler = cv2.decomposeProjectionMatrix(np.hstack((rmat, tvec)))
-        return float(euler.flatten()[0])
+    # ---- state ----
+    def get_state(self) -> dict:
+        with self._lock:
+            return dict(self._state)  # shallow copy of top-level keys
 
-    def _conf_hand_to_mouth(
-        self, lms: list[Any], hand_lms: list[Any] | None, w: int, h: int
-    ) -> float:
-        if not hand_lms:
-            return 0.0
-        upper_lip = lms[13]
-        best = 0.0
-        for hand in hand_lms:
-            d = _dist(upper_lip, hand.landmark[8], w, h)
-            best = max(best, _sigmoid(max(0.0, 400.0 - d), 250, 0.05))
-        return best
+    def reset(self) -> None:
+        """Reset FSM to step 1, idle status. Called at cycle start."""
+        with self._lock:
+            self._state = _initial_state()
+            self._smoothed_conf = 0.0
+            self._timer_started_at = 0.0
 
-    def _conf_tilt(self, lms: list[Any], w: int, h: int) -> float:
-        return _sigmoid(self._head_pitch(lms, w, h), 25, 0.4)
+    # ---- frame processing ----
+    def process_frame(self, frame: np.ndarray) -> dict:
+        """One FSM tick. Updates state, returns snapshot.
 
-    def _conf_level(self, lms: list[Any], w: int, h: int) -> float:
-        return _sigmoid(-self._head_pitch(lms, w, h), -10, 0.4)
+        Idempotent on terminal state (passed/timeout) — just returns last state.
+        """
+        with self._lock:
+            if self._state["result"] is not None:
+                return dict(self._state)
+            self._state["updated_at"] = time.time()
 
-    def _conf_mouth_open(self, lms: list[Any], w: int, h: int) -> float:
-        hz = _dist(lms[61], lms[291], w, h)
-        if hz == 0:
-            return 0.0
-        vt = _dist(lms[13], lms[14], w, h)
-        return _sigmoid(vt / hz, 0.35, 15)
+        h, w = frame.shape[:2]
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        face_res = self._face_mesh.process(rgb)
+        hand_res = self._hands.process(rgb)
 
-    def _mouth_roi(self, lms: list[Any], w: int, h: int) -> tuple[int, int, int, int]:
-        xs = [int(lms[i].x * w) for i in (61, 291, 0, 17)]
-        ys = [int(lms[i].y * h) for i in (61, 291, 0, 17)]
-        b = 15
-        return (
-            max(0, min(xs) - b),
-            max(0, min(ys) - b),
-            min(w, max(xs) + b),
-            min(h, max(ys) + b),
-        )
+        face_visible = bool(face_res.multi_face_landmarks)
+        hand_lms = hand_res.multi_hand_landmarks if hand_res.multi_hand_landmarks else None
+        hands_count = len(hand_lms) if hand_lms else 0
 
-    def _pill_in_mouth(self, frame: np.ndarray, lms: list[Any], w: int, h: int) -> bool:
-        x0, y0, x1, y1 = self._mouth_roi(lms, w, h)
-        roi = frame[y0:y1, x0:x1]
-        if roi.size == 0:
-            return False
-        mask = cv2.inRange(
-            cv2.cvtColor(roi, cv2.COLOR_BGR2HSV), PILL_HSV_LOWER, PILL_HSV_UPPER
-        )
-        return cv2.countNonZero(mask) > 15
+        if not face_visible:
+            with self._lock:
+                self._state["face_visible"] = False
+                self._state["hands_count"] = hands_count
+                self._smoothed_conf *= (1.0 - SMOOTHING_ALPHA)  # decay
+                self._state["confidence"] = self._smoothed_conf
+                self._timer_started_at = 0.0
+                self._state["hold_progress"] = 0.0
+                return dict(self._state)
 
-    def _tongue_lifted(self, frame: np.ndarray, lms: list[Any], w: int, h: int) -> bool:
-        y_mid = (int(lms[13].y * h) + int(lms[14].y * h)) // 2
-        x0, y0, x1, y1 = self._mouth_roi(lms, w, h)
-        roi = frame[y0:y1, x0:x1]
-        if roi.size == 0:
-            return False
-        mask = cv2.inRange(
-            cv2.cvtColor(roi, cv2.COLOR_BGR2HSV), TONGUE_HSV_LOWER, TONGUE_HSV_UPPER
-        )
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            return False
-        c = max(contours, key=cv2.contourArea)
-        m = cv2.moments(c)
-        if m["m00"] <= 0:
-            return False
-        cy = int(m["m01"] / m["m00"]) + y0
-        return cy < y_mid
+        lms = face_res.multi_face_landmarks[0].landmark
+        open_ratio = _mouth_open_ratio(lms, w, h)
+        hand_d = _hand_to_mouth(lms, hand_lms, w, h)
 
-    # ---- main FSM ----
-    def _raw_confidence(
-        self,
-        step: str,
-        frame: np.ndarray,
-        lms: list[Any],
-        hand_lms: list[Any] | None,
-        w: int,
-        h: int,
-    ) -> float:
-        if step == "STEP_1_HAND":
-            return self._conf_hand_to_mouth(lms, hand_lms, w, h)
-        if step == "STEP_2_TILT":
-            return self._conf_tilt(lms, w, h)
-        if step == "STEP_3_LEVEL":
-            return self._conf_level(lms, w, h)
-        if step == "STEP_4_MOUTH":
-            return self._conf_mouth_open(lms, w, h)
-        if step == "STEP_5_TONGUE":
-            mouth = self._conf_mouth_open(lms, w, h)
-            if mouth >= REQUIRED_CONFIDENCE and not self._tongue_lifted(frame, lms, w, h):
-                return 0.0
-            return mouth
-        return 0.0
+        with self._lock:
+            step_idx = self._state["step_index"]
+            verifier = _VERIFIERS[step_idx]
+            step_def = _STEPS[step_idx]
+            raw = verifier(open_ratio, hand_d)
+            self._smoothed_conf = (
+                (1.0 - SMOOTHING_ALPHA) * self._smoothed_conf
+                + SMOOTHING_ALPHA * raw
+            )
 
+            self._state["face_visible"] = True
+            self._state["hands_count"] = hands_count
+            self._state["confidence"] = self._smoothed_conf
+
+            if self._smoothed_conf >= REQUIRED_CONFIDENCE:
+                if self._timer_started_at == 0.0:
+                    self._timer_started_at = time.time()
+                elapsed = time.time() - self._timer_started_at
+                self._state["hold_progress"] = min(1.0, elapsed / step_def.hold_s)
+                if elapsed >= step_def.hold_s:
+                    # Step complete — advance.
+                    self._state["history"].append({
+                        "step_index": step_idx,
+                        "step_name": step_def.name,
+                        "passed_at": time.time(),
+                    })
+                    log.info("Intake game: step %d (%s) PASSED", step_idx + 1, step_def.name)
+                    next_idx = step_idx + 1
+                    if next_idx >= len(_STEPS):
+                        self._state["result"] = "passed"
+                        self._state["ended_at"] = time.time()
+                        self._state["running"] = False
+                        self._state["hold_progress"] = 1.0
+                        log.info("Intake game: COMPLETE")
+                    else:
+                        next_def = _STEPS[next_idx]
+                        self._state["step_index"] = next_idx
+                        self._state["step_name"] = next_def.name
+                        self._state["step_label"] = next_def.label
+                        self._state["instruction"] = next_def.instruction
+                        self._state["hold_progress"] = 0.0
+                        self._smoothed_conf = 0.0
+                        self._timer_started_at = 0.0
+            else:
+                self._timer_started_at = 0.0
+                self._state["hold_progress"] = 0.0
+
+            return dict(self._state)
+
+    # ---- cycle integration ----
     def watch_for_swallow(self, timeout_s: float = 60.0) -> bool:
-        """Run the 5-step swallow FSM. Returns True on completion, False on timeout."""
+        """Run the FSM until completion or timeout. Returns True on success."""
         try:
             self._ensure_camera()
         except Exception:
             log.exception("Intake camera initialization failed")
             return False
 
-        deadline = time.time() + timeout_s
-        step_idx = 0
-        smoothed = 0.0
-        timer_start = 0.0
+        # Reset state so /api/device/intake reflects this run from step 1.
+        self.reset()
+        with self._lock:
+            self._state["running"] = True
+            self._state["started_at"] = time.time()
 
+        deadline = time.time() + timeout_s
         while time.time() < deadline:
             frame = self._read_frame()
             if frame is None:
                 time.sleep(0.02)
                 continue
-            frame = cv2.flip(frame, 1)
-            h, w = frame.shape[:2]
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            face_res = self._face_mesh.process(rgb)
-            hand_res = self._hands.process(rgb)
+            frame = cv2.flip(frame, 1)  # mirror for selfie-cam ergonomics
+            self.process_frame(frame)
+            with self._lock:
+                if self._state["result"] == "passed":
+                    return True
+            time.sleep(0.05)  # ~20 fps inner cap
 
-            if not face_res.multi_face_landmarks:
-                timer_start = 0.0
-                continue
-
-            lms = face_res.multi_face_landmarks[0].landmark
-            hand_lms = hand_res.multi_hand_landmarks
-            step = _STEP_ORDER[step_idx]
-
-            raw = self._raw_confidence(step, frame, lms, hand_lms, w, h)
-            smoothed = (1 - SMOOTHING_ALPHA) * smoothed + SMOOTHING_ALPHA * raw
-
-            target = INSPECTION_HOLD_TIME if step == "STEP_4_MOUTH" else POSE_HOLD_TIME
-
-            if smoothed >= REQUIRED_CONFIDENCE:
-                # STEP 4 inspection: mouth open, but pill must NOT be visible.
-                if step == "STEP_4_MOUTH" and self._pill_in_mouth(frame, lms, w, h):
-                    timer_start = time.time()  # reset; pill still in mouth
-                    continue
-                if timer_start == 0.0:
-                    timer_start = time.time()
-                if time.time() - timer_start >= target:
-                    log.info("Swallow FSM step complete: %s", step)
-                    timer_start = 0.0
-                    smoothed = 0.0
-                    step_idx += 1
-                    if step_idx >= len(_STEP_ORDER):
-                        log.info("Swallow verification SUCCESS")
-                        return True
-            else:
-                timer_start = 0.0
-
-        log.warning("Swallow verification timed out after %.1fs", timeout_s)
+        # Timeout.
+        with self._lock:
+            self._state["result"] = "timeout"
+            self._state["ended_at"] = time.time()
+            self._state["running"] = False
+            last_step = self._state["step_index"]
+            last_name = self._state["step_name"]
+        log.warning(
+            "Intake game timed out after %.1fs at step %d (%s)",
+            timeout_s, last_step + 1, last_name,
+        )
         return False
 
     def close(self) -> None:
         if self._source is not None and self._owns_source:
             self._source.close()
         self._source = None
-        self._face_mesh.close()
-        self._hands.close()
+        try:
+            self._face_mesh.close()
+        except Exception:
+            pass
+        try:
+            self._hands.close()
+        except Exception:
+            pass

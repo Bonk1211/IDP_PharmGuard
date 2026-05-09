@@ -33,6 +33,30 @@ export type DeviceStatus = {
   task_running: boolean;
 };
 
+export type IntakeStepHistoryRow = {
+  step_index: number;
+  step_name: string;
+  passed_at: number;
+};
+
+export type IntakeState = {
+  running: boolean;
+  step_index: number;       // 0-based
+  total_steps: number;
+  step_name: string;        // READY | SWALLOW | DONE
+  step_label: string;       // human label, e.g. "Take the pill"
+  instruction: string;      // patient prompt
+  confidence: number;       // 0..1, EMA of current step verifier
+  hold_progress: number;    // 0..1, hold-timer fraction
+  face_visible: boolean;
+  hands_count: number;
+  history: IntakeStepHistoryRow[];
+  result: "passed" | "timeout" | null;
+  started_at: number | null;
+  ended_at: number | null;
+  updated_at: number | null;
+};
+
 export function isDeviceConfigured(): boolean {
   return Boolean(baseUrl && apiKey);
 }
@@ -53,6 +77,20 @@ export async function fetchDeviceStatus(): Promise<DeviceStatus | null> {
     });
     if (!r.ok) return null;
     return (await r.json()) as DeviceStatus;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchIntakeState(): Promise<IntakeState | null> {
+  if (!isDeviceConfigured()) return null;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/intake`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as IntakeState;
   } catch {
     return null;
   }

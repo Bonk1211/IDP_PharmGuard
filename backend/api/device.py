@@ -80,6 +80,39 @@ async def reset(request: Request):
     return {"reset": True}
 
 
+@router.get("/intake")
+async def intake_state(request: Request):
+    """Live state of the 3-step intake-verification game.
+
+    Polled by the dashboard's IntakeGamePanel ~4×/s. Returns an idle
+    snapshot when the cycle hasn't reached the swallow phase yet, so
+    the UI can render the steps grayed out instead of erroring.
+    """
+    loop = _get_loop(request)
+    state = getattr(loop, "_state", None) if loop else None
+    monitor = getattr(state, "monitor", None) if state else None
+    if monitor is None:
+        # Headless or cycle not yet started — synthesize idle state.
+        return {
+            "running": False,
+            "step_index": 0,
+            "total_steps": 3,
+            "step_name": "READY",
+            "step_label": "Take the pill",
+            "instruction": "Waiting for cycle to start",
+            "confidence": 0.0,
+            "hold_progress": 0.0,
+            "face_visible": False,
+            "hands_count": 0,
+            "history": [],
+            "result": None,
+            "started_at": None,
+            "ended_at": None,
+            "updated_at": None,
+        }
+    return monitor.get_state()
+
+
 _PILL_DETECTOR_PATH = "models/pill_detector.pt"
 
 
