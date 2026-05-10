@@ -53,10 +53,26 @@ async def device_status(request: Request):
             "task_running": False,
             "is_unlocked": False,
         }
-    base = loop.status()
-    state = getattr(loop, "_state", None)
-    drawer = getattr(state, "drawer_lock", None) if state else None
-    base["is_unlocked"] = bool(drawer.is_unlocked()) if drawer else False
+    try:
+        base = loop.status()
+    except Exception:
+        log.exception("loop.status() raised")
+        base = {
+            "headless": False,
+            "hardware_stubbed": True,
+            "cycle_n": 0,
+            "last_cycle": None,
+            "task_running": False,
+        }
+    is_unlocked = False
+    try:
+        state = getattr(loop, "_state", None)
+        drawer = getattr(state, "drawer_lock", None) if state else None
+        if drawer is not None:
+            is_unlocked = bool(drawer.is_unlocked())
+    except Exception:
+        log.exception("drawer.is_unlocked() probe failed")
+    base["is_unlocked"] = is_unlocked
     return base
 
 

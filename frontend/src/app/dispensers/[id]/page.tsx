@@ -41,7 +41,9 @@ export default function DispenserStreamPage() {
         setStatus(s);
         setStatusError(null);
       } else {
-        setStatusError("Device unreachable. Check NEXT_PUBLIC_DEVICE_URL.");
+        setStatusError(
+          "Device unreachable — open browser DevTools → Console for the exact reason (env not loaded, ngrok warning, 401, network).",
+        );
       }
     }
     tick();

@@ -70,15 +70,43 @@ function authHeaders(): HeadersInit {
 }
 
 export async function fetchDeviceStatus(): Promise<DeviceStatus | null> {
-  if (!isDeviceConfigured()) return null;
+  if (!isDeviceConfigured()) {
+    console.warn(
+      "[device] not configured — set NEXT_PUBLIC_DEVICE_URL + NEXT_PUBLIC_DEVICE_API_KEY in frontend/.env.local, then restart `npm run dev`.",
+    );
+    return null;
+  }
   try {
     const r = await fetch(`${baseUrl}/api/device/status`, {
       headers: authHeaders(),
       cache: "no-store",
     });
-    if (!r.ok) return null;
+    if (!r.ok) {
+      const body = await r.text().catch(() => "");
+      console.error(
+        `[device] /status ${r.status} ${r.statusText}`,
+        body.slice(0, 200),
+      );
+      return null;
+    }
+    const ct = r.headers.get("content-type") ?? "";
+    if (!ct.includes("application/json")) {
+      const body = await r.text().catch(() => "");
+      const looksLikeNgrokWarning =
+        body.includes("ngrok") || body.includes("interstitial");
+      console.error(
+        `[device] /status returned non-JSON (${ct})${
+          looksLikeNgrokWarning
+            ? " — ngrok warning page; open the URL in a browser tab once to dismiss"
+            : ""
+        }`,
+        body.slice(0, 200),
+      );
+      return null;
+    }
     return (await r.json()) as DeviceStatus;
-  } catch {
+  } catch (err) {
+    console.error("[device] /status fetch failed:", err);
     return null;
   }
 }
