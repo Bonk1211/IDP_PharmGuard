@@ -147,6 +147,30 @@ export async function fetchSlotsByPatient(patientId: number): Promise<SlotInfo[]
 
 // ── Adherence Logs ──
 
+export interface CreateIntakeLogInput {
+  patient_id: number;
+  slot: number;
+  pill_taken: boolean;
+  dispenser_id?: string | null;
+  confidence_score?: number | null;
+}
+
+/**
+ * Insert one adherence log via Supabase. Used by the dispenser confirm/
+ * override actions so the dashboard doesn't need a server-side hop.
+ * Mirrors the shape of POST /api/logs on the backend.
+ */
+export async function createIntakeLog(input: CreateIntakeLogInput): Promise<IntakeRecord> {
+  const { data, error } = await supabase
+    .from("adherence_logs")
+    .insert(input)
+    .select("*, patient:patients(id, name)")
+    .single();
+  if (error) throw error;
+  const row = data as Record<string, unknown> & { patient?: Patient | null };
+  return { ...row, patient: row.patient ?? null } as IntakeRecord;
+}
+
 export async function fetchLogs(patientId?: number): Promise<IntakeRecord[]> {
   let query = supabase
     .from("adherence_logs")
