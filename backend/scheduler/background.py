@@ -19,7 +19,7 @@ import asyncio
 import logging
 
 from config import settings
-from scheduler.cycle_runner import CycleState, run_cycle
+from scheduler.cycle_runner import CycleState, next_scheduled_dispense, run_cycle
 
 log = logging.getLogger(__name__)
 
@@ -100,22 +100,55 @@ class HardwareLoop:
         }
 
     async def _supervised_loop(self) -> None:
-        """Run cycles forever. Exponential backoff on exception, reset on success."""
+        """Run cycles forever. Exponential backoff on exception, reset on success.
+
+        manual_dispense_only=True: every `schedule_check_interval_s` ticks,
+        check if any med's `schedule_at` matches the current minute. If so,
+        run that cycle. A manual trigger (Dispense Now button) wakes the
+        wait early and fires the standard quantity>0 cycle.
+        =False: original behaviour — poll every `poll_interval_s` for any
+        quantity>0 med, fire early on trigger.
+        """
         assert self._state is not None
         backoff = _INITIAL_BACKOFF_S
         while not self._stop_event.is_set():
             try:
-                await run_cycle(self._state)
-                backoff = _INITIAL_BACKOFF_S  # reset after a successful pass
-                # Sleep until poll_interval_s OR until trigger_dispense_now flips.
-                try:
-                    await asyncio.wait_for(
-                        self._dispense_now_event.wait(),
-                        timeout=settings.poll_interval_s,
-                    )
-                    self._dispense_now_event.clear()
-                except asyncio.TimeoutError:
-                    pass
+                if settings.manual_dispense_only:
+                    triggered = False
+                    try:
+                        await asyncio.wait_for(
+                            self._dispense_now_event.wait(),
+                            timeout=settings.schedule_check_interval_s,
+                        )
+                        self._dispense_now_event.clear()
+                        triggered = True
+                    except asyncio.TimeoutError:
+                        pass
+                    if self._stop_event.is_set():
+                        break
+                    if triggered:
+                        await run_cycle(self._state)
+                    else:
+                        scheduled = await next_scheduled_dispense()
+                        if scheduled is not None:
+                            log.info(
+                                "schedule fired: slot=%s patient=%s",
+                                scheduled["slot"], scheduled["patient_id"],
+                            )
+                            await run_cycle(self._state, task=scheduled)
+                        # else: no work this tick
+                    backoff = _INITIAL_BACKOFF_S
+                else:
+                    await run_cycle(self._state)
+                    backoff = _INITIAL_BACKOFF_S
+                    try:
+                        await asyncio.wait_for(
+                            self._dispense_now_event.wait(),
+                            timeout=settings.poll_interval_s,
+                        )
+                        self._dispense_now_event.clear()
+                    except asyncio.TimeoutError:
+                        pass
             except asyncio.CancelledError:
                 raise
             except Exception:

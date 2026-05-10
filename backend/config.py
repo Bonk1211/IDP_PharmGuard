@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     # ── new (Pi-hosted refactor) ──────────────────────────────────────────
     device_api_key: str = ""                        # frontend -> ngrok -> Pi auth header
     backend_headless: bool = False                  # 1 = skip hardware lifespan (dev-mac)
+    # 1 = cycle loop stays idle until /api/device/dispense_now (or another
+    # manual-trigger endpoint) fires. 0 = auto-polls medications every
+    # poll_interval_s. Default ON so a freshly-started Pi doesn't drain
+    # the magazine before an operator is at the dashboard.
+    manual_dispense_only: bool = True
+    # In manual mode, how often to wake and check for a scheduled dispense
+    # (medications.schedule_at == current minute). 60 s = at-most one-minute
+    # latency on schedule firing. Lower = tighter, higher = more idle.
+    schedule_check_interval_s: float = 60.0
 
     # ── Clinician assistant (read-only Gemini agent) ──────────────────────
     agent_model_name: str = "gemini-2.5-flash"

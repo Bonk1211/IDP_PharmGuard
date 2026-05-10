@@ -203,7 +203,10 @@ async def _next_dispense() -> dict | None:
     result = await asyncio.to_thread(_query)
     if not result.data:
         return None
-    med = result.data[0]
+    return _med_row_to_task(result.data[0])
+
+
+def _med_row_to_task(med: dict) -> dict:
     return {
         "patient_id": med["patient_id"],
         "slot": med["slot"],
@@ -212,6 +215,38 @@ async def _next_dispense() -> dict | None:
         "pills_per_dose": med.get("pills_per_dose", 1),
         "dispenser_id": med.get("dispenser_id"),
     }
+
+
+async def next_scheduled_dispense() -> dict | None:
+    """Return the med whose `schedule_at` matches the current minute, if any.
+
+    Public so background.py can call it on the manual-mode tick. Returns
+    a task dict shaped like _next_dispense's, or None when no match.
+    Comparison is HH:MM (seconds dropped) so we match a one-minute window.
+    """
+    sb = get_supabase()
+    def _query():
+        q = (
+            sb.table("medications")
+            .select("*")
+            .gt("quantity", 0)
+            .not_.is_("patient_id", "null")
+            .not_.is_("schedule_at", "null")
+        )
+        if settings.dispenser_id:
+            q = q.eq("dispenser_id", settings.dispenser_id)
+        return q.execute()
+    result = await asyncio.to_thread(_query)
+    rows = result.data or []
+    if not rows:
+        return None
+    from datetime import datetime
+    now_hhmm = datetime.now().strftime("%H:%M")
+    for med in rows:
+        sched = str(med.get("schedule_at") or "")
+        if sched[:5] == now_hhmm:
+            return _med_row_to_task(med)
+    return None
 
 
 async def _report_intake_direct(
@@ -298,14 +333,17 @@ async def _replay_drain(state: CycleState) -> None:
         log.info("replay drained %d/%d rows", len(sent_ids), len(batch))
 
 
-async def run_cycle(state: CycleState) -> None:
+async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     """One pass of the dispense loop.
 
     Mirror of the body of edge_pi/main.py:run() inside its while True.
     Conversions: time.sleep -> asyncio.sleep, blocking I/O -> to_thread.
     Self-HTTP calls -> direct DB writes via the helpers above.
+
+    `task` may be pre-fetched by the caller (e.g. background.py passes
+    a scheduled-dispense row when the daily HH:MM matches). When None,
+    we fall back to _next_dispense() which picks the first quantity>0 med.
     """
-    # Phase 8: replay drain + refuse-to-dispense gate.
     await _replay_drain(state)
     age = state.queue.oldest_age_seconds()
     if (
@@ -319,9 +357,9 @@ async def run_cycle(state: CycleState) -> None:
         )
         return
 
-    # Schedule lookup.
     t0 = time.perf_counter()
-    task = await _next_dispense()
+    if task is None:
+        task = await _next_dispense()
     t_schedule = time.perf_counter()
     if task is None:
         # No pending dispense — cycle no-ops. Caller waits POLL_INTERVAL_S.

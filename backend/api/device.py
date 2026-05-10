@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from core.log_ring import get_ring
 from core.security import verify_device_api_key
+from db.base import get_supabase
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +177,71 @@ async def recent_logs(n: int = Query(default=200, ge=1, le=500)):
     if ring is None:
         return {"records": [], "note": "ring buffer not installed"}
     return {"records": ring.snapshot(n)}
+
+
+# ─────────────────────── per-slot daily dispense schedules ───────────────────
+
+
+class ScheduleBody(BaseModel):
+    slot: int = Field(ge=0, le=9)
+    # "HH:MM" 24h. None / "" clears the schedule.
+    schedule_at: str | None = None
+
+
+@router.get("/schedules")
+async def list_schedules():
+    """List all medications with the slot, name, patient_id, and current
+    schedule_at. Powers the /admin Schedule section.
+    """
+    sb = get_supabase()
+    def _query():
+        return (
+            sb.table("medications")
+            .select("id, slot, name, patient_id, dispenser_id, quantity, schedule_at")
+            .order("slot")
+            .execute()
+        )
+    result = await asyncio.to_thread(_query)
+    return result.data or []
+
+
+@router.post("/schedule")
+async def set_schedule(body: ScheduleBody):
+    """Set or clear the daily dispense time for a slot.
+
+    `schedule_at`: "HH:MM" enables auto-dispense at that time daily.
+    null or "" clears the schedule (slot becomes manual-only).
+    """
+    raw = (body.schedule_at or "").strip()
+    parsed: str | None
+    if raw == "":
+        parsed = None
+    else:
+        try:
+            hh, mm = raw.split(":", 1)
+            h = int(hh)
+            m = int(mm[:2])
+            if not (0 <= h < 24 and 0 <= m < 60):
+                raise ValueError
+            parsed = f"{h:02d}:{m:02d}:00"
+        except (ValueError, IndexError):
+            raise HTTPException(
+                status_code=400,
+                detail="schedule_at must be HH:MM (24h) or null",
+            )
+    sb = get_supabase()
+    def _update():
+        return (
+            sb.table("medications")
+            .update({"schedule_at": parsed})
+            .eq("slot", body.slot)
+            .execute()
+        )
+    result = await asyncio.to_thread(_update)
+    if not result.data:
+        raise HTTPException(status_code=404, detail=f"slot {body.slot} not found")
+    log.info("schedule set: slot=%d at=%s", body.slot, parsed)
+    return {"ok": True, "slot": body.slot, "schedule_at": parsed}
 
 
 @router.get("/intake")

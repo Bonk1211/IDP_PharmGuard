@@ -5,14 +5,17 @@ import { useSWRConfig } from "swr";
 import {
   fetchDeviceStatus,
   fetchPiLogs,
+  fetchSchedules,
   fetchSnapshot,
   isDeviceConfigured,
   manualEject,
   resetDevice,
   setDrawer,
+  setSlotSchedule,
   triggerDispense,
   type DeviceStatus,
   type LogRecord,
+  type ScheduleRow,
 } from "@/lib/device";
 import { refreshBrief, triggerFlagDetection } from "@/lib/agent";
 import { KEYS } from "@/lib/swr";
@@ -50,6 +53,8 @@ export default function AdminPage() {
   const [msg, setMsg] = useState<string | null>(null);
   const [snap, setSnap] = useState<{ cam: 0 | 1; url: string } | null>(null);
   const [logs, setLogs] = useState<LogRecord[]>([]);
+  const [schedules, setSchedules] = useState<ScheduleRow[]>([]);
+  const [scheduleDrafts, setScheduleDrafts] = useState<Record<number, string>>({});
   const prevSnapUrl = useRef<string | null>(null);
   const configured = isDeviceConfigured();
 
@@ -77,6 +82,32 @@ export default function AdminPage() {
     }
     tick();
     const id = setInterval(tick, 2000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [configured]);
+
+  useEffect(() => {
+    if (!configured) return;
+    let alive = true;
+    async function load() {
+      const rows = await fetchSchedules();
+      if (alive) {
+        setSchedules(rows);
+        setScheduleDrafts((prev) => {
+          const next = { ...prev };
+          for (const r of rows) {
+            if (next[r.slot] === undefined) {
+              next[r.slot] = r.schedule_at ? r.schedule_at.slice(0, 5) : "";
+            }
+          }
+          return next;
+        });
+      }
+    }
+    load();
+    const id = setInterval(load, 30000);
     return () => {
       alive = false;
       clearInterval(id);
@@ -168,6 +199,35 @@ export default function AdminPage() {
     mutate(KEYS.logs);
     mutate(KEYS.patients);
     setMsg("Inventory caches refreshed.");
+  }
+
+  async function onScheduleSave(slot: number) {
+    const draft = (scheduleDrafts[slot] ?? "").trim();
+    const value = draft === "" ? null : draft;
+    const r = await withBusy(`sched-${slot}`, () => setSlotSchedule(slot, value));
+    if (r.ok) {
+      setMsg(
+        value === null
+          ? `Slot ${slot} schedule cleared.`
+          : `Slot ${slot} scheduled at ${value}.`,
+      );
+      const rows = await fetchSchedules();
+      setSchedules(rows);
+    } else {
+      setMsg(`Schedule failed: ${r.error ?? r.status}`);
+    }
+  }
+
+  async function onScheduleClear(slot: number) {
+    setScheduleDrafts((prev) => ({ ...prev, [slot]: "" }));
+    const r = await withBusy(`sched-${slot}`, () => setSlotSchedule(slot, null));
+    if (r.ok) {
+      setMsg(`Slot ${slot} schedule cleared.`);
+      const rows = await fetchSchedules();
+      setSchedules(rows);
+    } else {
+      setMsg(`Clear failed: ${r.error ?? r.status}`);
+    }
   }
 
   return (
@@ -333,6 +393,74 @@ export default function AdminPage() {
             Refresh inventory caches
           </ActionButton>
         </div>
+      </SectionCard>
+
+      <SectionCard title="Schedule (per-slot daily auto-dispense)">
+        {schedules.length === 0 ? (
+          <p className="py-2 text-sm text-gray-400">
+            {configured ? "No medications loaded." : "Configure device to manage schedules."}
+          </p>
+        ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-gray-500">
+              Set a daily HH:MM. The cycle will auto-dispense at that time
+              within a 1-minute window. Leave blank for manual-only.
+            </p>
+            <div className="divide-y divide-sand-100 rounded-lg border border-sand-200">
+              {schedules.map((s) => (
+                <div
+                  key={s.id}
+                  className="flex flex-wrap items-center gap-3 px-3 py-2 text-sm"
+                >
+                  <span className="inline-flex h-7 w-7 items-center justify-center rounded-full bg-olive-100 text-xs font-bold text-olive-700">
+                    {s.slot}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-gray-800">
+                    {s.name ?? <span className="text-gray-400">empty</span>}
+                  </span>
+                  <span className="text-[11px] text-gray-400">
+                    qty {s.quantity}
+                  </span>
+                  <input
+                    type="time"
+                    value={scheduleDrafts[s.slot] ?? ""}
+                    onChange={(e) =>
+                      setScheduleDrafts((prev) => ({
+                        ...prev,
+                        [s.slot]: e.target.value,
+                      }))
+                    }
+                    disabled={!configured || busy !== null}
+                    className="rounded-lg border border-sand-200 bg-white px-2 py-1 text-xs text-gray-800 outline-none focus:border-olive-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => onScheduleSave(s.slot)}
+                    disabled={!configured || busy !== null}
+                    className="rounded-full bg-olive-700 px-3 py-1 text-[11px] font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {busy === `sched-${s.slot}` ? "Saving…" : "Save"}
+                  </button>
+                  {s.schedule_at && (
+                    <button
+                      type="button"
+                      onClick={() => onScheduleClear(s.slot)}
+                      disabled={!configured || busy !== null}
+                      className="rounded-full border border-sand-200 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Clear
+                    </button>
+                  )}
+                  {s.schedule_at && (
+                    <span className="rounded-full bg-olive-50 px-2 py-0.5 font-mono text-[10px] text-olive-700">
+                      live: {s.schedule_at.slice(0, 5)}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </SectionCard>
 
       <SectionCard title={`Service logs (${logs.length} records)`}>

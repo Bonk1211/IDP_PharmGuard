@@ -245,3 +245,59 @@ async function safeError(r: Response): Promise<string> {
     return r.statusText || "unknown";
   }
 }
+
+// ─────────────────────────── per-slot daily schedules ────────────────────────
+
+export type ScheduleRow = {
+  id: number;
+  slot: number;
+  name: string | null;
+  patient_id: number | null;
+  dispenser_id: string | null;
+  quantity: number;
+  schedule_at: string | null;
+};
+
+export async function fetchSchedules(): Promise<ScheduleRow[]> {
+  if (!isDeviceConfigured()) return [];
+  try {
+    const r = await fetch(`${baseUrl}/api/device/schedules`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return [];
+    return (await r.json()) as ScheduleRow[];
+  } catch {
+    return [];
+  }
+}
+
+export type SetScheduleResult = {
+  ok: boolean;
+  status: number;
+  schedule_at?: string | null;
+  error?: string;
+};
+
+export async function setSlotSchedule(
+  slot: number,
+  scheduleAt: string | null,
+): Promise<SetScheduleResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/schedule`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ slot, schedule_at: scheduleAt }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      schedule_at: data?.schedule_at ?? null,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
