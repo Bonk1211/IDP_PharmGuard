@@ -1,5 +1,7 @@
 """Adherence log endpoints — record and query intake events."""
 
+import asyncio
+import contextlib
 import hmac
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
@@ -27,26 +29,31 @@ _ws_clients: list[WebSocket] = []
 async def create_log(log: IntakeLog):
     """Record a new intake event from the Raspberry Pi."""
     sb = get_supabase()
-    result = (
-        sb.table("adherence_logs")
-        .insert(log.model_dump())
-        .execute()
+    payload = log.model_dump()
+    result = await asyncio.to_thread(
+        lambda: sb.table("adherence_logs").insert(payload).execute()
     )
     record = result.data[0]
 
-    # Broadcast to connected dashboard clients
+    # Broadcast to connected dashboard clients.
     for ws in _ws_clients[:]:
         try:
             await ws.send_json(record)
         except Exception:
-            _ws_clients.remove(ws)
+            with contextlib.suppress(ValueError):
+                _ws_clients.remove(ws)
 
-    # Decrement medication quantity
-    med = sb.table("medications").select("quantity").eq("slot", log.slot).execute()
+    # Decrement medication quantity. TOCTOU race on concurrent dispense
+    # is still possible here — proper fix is atomic UPDATE … WHERE
+    # quantity > 0 (tracked separately, also affects cycle_runner).
+    med = await asyncio.to_thread(
+        lambda: sb.table("medications").select("quantity").eq("slot", log.slot).execute()
+    )
     if med.data and med.data[0]["quantity"] > 0:
-        sb.table("medications").update(
-            {"quantity": med.data[0]["quantity"] - 1}
-        ).eq("slot", log.slot).execute()
+        new_qty = med.data[0]["quantity"] - 1
+        await asyncio.to_thread(
+            lambda: sb.table("medications").update({"quantity": new_qty}).eq("slot", log.slot).execute()
+        )
 
     return record
 
@@ -55,10 +62,12 @@ async def create_log(log: IntakeLog):
 async def list_logs(patient_id: int | None = None):
     """Query intake logs, optionally filtered by patient."""
     sb = get_supabase()
-    query = sb.table("adherence_logs").select("*").order("timestamp", desc=True)
-    if patient_id is not None:
-        query = query.eq("patient_id", patient_id)
-    result = query.execute()
+    def _query():
+        q = sb.table("adherence_logs").select("*").order("timestamp", desc=True)
+        if patient_id is not None:
+            q = q.eq("patient_id", patient_id)
+        return q.execute()
+    result = await asyncio.to_thread(_query)
     return result.data
 
 

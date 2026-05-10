@@ -144,13 +144,27 @@ async def detect_and_persist_flags() -> dict[str, Any]:
 # ──────────────────────────── heuristic dispatch ────────────────────────────
 
 async def _run_heuristics() -> list[dict[str, Any]]:
-    """Run all sync heuristics off the event loop."""
+    """Run all sync heuristics off the event loop.
+
+    Adherence rows are fetched ONCE here and passed to both adherence-based
+    detectors — previously each called ``query_adherence`` with identical
+    params, doubling Supabase round trips per run.
+    """
+    since_iso = (datetime.now(timezone.utc) - _LOOKBACK).isoformat()
+    adherence_rows: list[dict[str, Any]] = await asyncio.to_thread(
+        agent_tools.query_adherence, since_iso=since_iso, limit=500,
+    )
+
     out: list[dict[str, Any]] = []
     out += await asyncio.to_thread(
-        _detect_missed_streaks, settings.agent_flag_missed_streak_threshold,
+        _detect_missed_streaks,
+        adherence_rows,
+        settings.agent_flag_missed_streak_threshold,
     )
     out += await asyncio.to_thread(
-        _detect_low_confidence, settings.agent_flag_low_confidence_threshold,
+        _detect_low_confidence,
+        adherence_rows,
+        settings.agent_flag_low_confidence_threshold,
     )
     out += await asyncio.to_thread(_detect_trending_empty)
     return out
@@ -158,11 +172,11 @@ async def _run_heuristics() -> list[dict[str, Any]]:
 
 # ──────────────────────────── heuristic 1: missed streak ────────────────────
 
-def _detect_missed_streaks(threshold: int) -> list[dict[str, Any]]:
+def _detect_missed_streaks(
+    rows: list[dict[str, Any]], threshold: int,
+) -> list[dict[str, Any]]:
     if threshold < 1:
         return []
-    since_iso = (datetime.now(timezone.utc) - _LOOKBACK).isoformat()
-    rows = agent_tools.query_adherence(since_iso=since_iso, limit=500)
 
     by_patient: dict[int, list[dict[str, Any]]] = {}
     for r in rows:
@@ -208,11 +222,11 @@ def _detect_missed_streaks(threshold: int) -> list[dict[str, Any]]:
 
 # ──────────────────────────── heuristic 2: low confidence ───────────────────
 
-def _detect_low_confidence(threshold: float) -> list[dict[str, Any]]:
+def _detect_low_confidence(
+    rows: list[dict[str, Any]], threshold: float,
+) -> list[dict[str, Any]]:
     if threshold <= 0.0:
         return []
-    since_iso = (datetime.now(timezone.utc) - _LOOKBACK).isoformat()
-    rows = agent_tools.query_adherence(since_iso=since_iso, limit=500)
 
     candidates: list[dict[str, Any]] = []
     for r in rows:

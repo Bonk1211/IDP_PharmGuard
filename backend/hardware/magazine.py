@@ -18,7 +18,10 @@ PIN_DIR = 27
 PIN_ENABLE = 22
 
 STEPS_PER_SLOT = 200  # Adjust based on gear ratio and micro-stepping
-STEP_DELAY_S = 0.001
+# Step period — wall time between rising edges. Was 2× 1 ms sleeps;
+# new loop does pulse + single sleep, preserving 2 ms motor period
+# while halving sleep syscalls per step.
+STEP_DELAY_S = 0.002
 TOTAL_SLOTS = 10
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
@@ -101,9 +104,11 @@ class Magazine:
             PIN_DIR,
             self.gpio.HIGH if direction == "forward" else self.gpio.LOW,
         )
+        # A4988 needs ~1 µs minimum STEP HIGH; back-to-back GPIO writes
+        # comfortably exceed that on Pi 5 + lgpio. One sleep per step
+        # halves syscall count vs. the old HIGH-sleep-LOW-sleep pattern.
         for _ in range(steps):
             self.gpio.output(PIN_STEP, self.gpio.HIGH)
-            time.sleep(STEP_DELAY_S)
             self.gpio.output(PIN_STEP, self.gpio.LOW)
             time.sleep(STEP_DELAY_S)
 

@@ -52,9 +52,11 @@ class Picamera2Source:
         cam_num: int,
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
+        output_format: str = "bgr",
     ) -> None:
         if not _HAS_PICAMERA2:
             raise RuntimeError("picamera2 not available")
+        self.output_format = output_format
         self._cam = Picamera2(cam_num)
         self._cam.configure(
             self._cam.create_preview_configuration(
@@ -62,13 +64,21 @@ class Picamera2Source:
             )
         )
         self._cam.start()
-        log.info("Picamera2Source opened (cam_num=%d, %dx%d)", cam_num, width, height)
+        log.info(
+            "Picamera2Source opened (cam_num=%d, %dx%d, fmt=%s)",
+            cam_num, width, height, output_format,
+        )
 
     def read_frame(self) -> np.ndarray | None:
         frame = self._cam.capture_array()
         if frame is None:
             return None
-        # picamera2 RGB888 -> BGR for cv2/ultralytics consistency.
+        # Sensor is native RGB888. Skip cvtColor when caller wants RGB
+        # (MediaPipe path) — saves a full-frame channel-swap copy per
+        # frame at 20 fps. BGR consumers (YOLO, cv2 encode) still get
+        # the convert.
+        if self.output_format == "rgb":
+            return frame
         return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
     def close(self) -> None:
@@ -82,18 +92,27 @@ class Picamera2Source:
 class Cv2Source:
     """Wrap an existing cv2.VideoCapture (or open one by index/url)."""
 
-    def __init__(self, source: int | str | cv2.VideoCapture):
+    def __init__(
+        self,
+        source: int | str | cv2.VideoCapture,
+        output_format: str = "bgr",
+    ):
+        self.output_format = output_format
         if isinstance(source, cv2.VideoCapture):
             self._cap = source
         else:
             self._cap = cv2.VideoCapture(source)
         if not self._cap.isOpened():
             raise RuntimeError(f"Cv2Source: cannot open {source!r}")
-        log.info("Cv2Source opened (%r)", source)
+        log.info("Cv2Source opened (%r, fmt=%s)", source, output_format)
 
     def read_frame(self) -> np.ndarray | None:
         ok, frame = self._cap.read()
-        return frame if ok else None
+        if not ok or frame is None:
+            return None
+        if self.output_format == "rgb":
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return frame
 
     def close(self) -> None:
         try:
@@ -125,9 +144,11 @@ class RpicamSource:
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
         framerate: int = 15,
+        output_format: str = "bgr",
     ) -> None:
         if not _has_rpicam():
             raise RuntimeError("rpicam-vid not on PATH")
+        self.output_format = output_format
         self._cam_num = cam_num
         self._port = self.BASE_PORT + cam_num
         cmd = [
@@ -192,11 +213,21 @@ class RpicamSource:
                 time.sleep(0.02)
 
     def read_frame(self) -> np.ndarray | None:
-        """Return a copy of the latest frame (or None until first frame)."""
+        """Return the latest frame (or None until first frame).
+
+        Producer stores cv2-native BGR so latest_frame_jpeg encodes correctly.
+        When output_format='rgb', cvtColor produces a fresh array (no extra
+        copy needed). When 'bgr', explicit copy keeps the consumer safe from
+        producer mutation.
+        """
         with self._frame_lock:
             if self._latest_frame is None:
                 return None
-            return self._latest_frame.copy()
+            frame = self._latest_frame
+            if self.output_format == "rgb":
+                # cvtColor allocates a new array — already isolated from producer.
+                return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            return frame.copy()
 
     def latest_frame_jpeg(self, quality: int = 70) -> bytes | None:
         """Return latest frame encoded as JPEG bytes (None until first frame).
@@ -236,6 +267,7 @@ def open_camera(
     cam_num: int,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
+    output_format: str = "bgr",
 ) -> CameraSource:
     """Open a CSI camera (preferred) with rpicam-vid + cv2 fallback chain.
 
@@ -254,7 +286,7 @@ def open_camera(
     """
     if _HAS_PICAMERA2:
         try:
-            return Picamera2Source(cam_num, width, height)
+            return Picamera2Source(cam_num, width, height, output_format=output_format)
         except Exception as exc:
             if _STUB_ALLOWED:
                 log.warning(
@@ -265,14 +297,14 @@ def open_camera(
                 raise
     if _has_rpicam():
         try:
-            return RpicamSource(cam_num, width, height)
+            return RpicamSource(cam_num, width, height, output_format=output_format)
         except Exception as exc:
             log.warning(
                 "RpicamSource open failed for cam_num=%d (%s); trying direct cv2",
                 cam_num, exc,
             )
     try:
-        return Cv2Source(cam_num)
+        return Cv2Source(cam_num, output_format=output_format)
     except Exception as exc:
         raise RuntimeError(
             f"open_camera: no working backend for cam_num={cam_num}"

@@ -389,14 +389,19 @@ async def stream_camera(
         return jpeg.tobytes() if ok else None
 
     def _annotate_mediapipe(frame):
-        """Cam 1: run FaceMesh + Hands, draw landmarks, encode JPEG."""
+        """Cam 1: run FaceMesh + Hands, draw landmarks, encode JPEG.
+
+        cam_b is opened with output_format='rgb' (see cycle_runner) so
+        ``frame`` is already RGB — pass straight to MediaPipe and convert
+        to BGR once for cv2 drawing/encoding.
+        """
         import cv2
         import mediapipe as mp
 
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        face = monitor._face_mesh.process(rgb)
-        hands = monitor._hands.process(rgb)
-        annotated = frame.copy()
+        face = monitor._face_mesh.process(frame)
+        hands = monitor._hands.process(frame)
+        # cv2 draw + imencode expect BGR — single convert here.
+        annotated = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
         drawing = mp.solutions.drawing_utils
         drawing_styles = mp.solutions.drawing_styles

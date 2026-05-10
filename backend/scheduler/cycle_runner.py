@@ -114,8 +114,10 @@ class CycleState:
         # Open dual cameras (only when hardware is real). Same fail-loud rule.
         if not self.hardware_stubbed:
             try:
-                self.cam_a = await asyncio.to_thread(open_camera, 0)  # tray top-down
-                self.cam_b = await asyncio.to_thread(open_camera, 1)  # patient-facing
+                self.cam_a = await asyncio.to_thread(open_camera, 0)  # tray top-down (BGR for YOLO)
+                self.cam_b = await asyncio.to_thread(  # patient-facing (RGB for MediaPipe)
+                    open_camera, 1, output_format="rgb"
+                )
             except Exception:
                 log.exception("Camera initialization failed")
                 if not settings.pharmguard_stub:

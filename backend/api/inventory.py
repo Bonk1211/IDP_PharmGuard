@@ -1,5 +1,7 @@
 """Inventory endpoints — manage the 10-slot magazine per dispenser."""
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -22,7 +24,9 @@ class SlotUpdate(BaseModel):
 async def list_slots():
     """Return the current state of all 10 magazine slots."""
     sb = get_supabase()
-    result = sb.table("medications").select("*").order("slot").execute()
+    result = await asyncio.to_thread(
+        lambda: sb.table("medications").select("*").order("slot").execute()
+    )
     return result.data
 
 
@@ -37,15 +41,17 @@ async def next_dispense(dispenser_id: str | None = None):
     isolate from production rows. Backwards-compat when omitted.
     """
     sb = get_supabase()
-    query = (
-        sb.table("medications")
-        .select("*")
-        .gt("quantity", 0)
-        .not_.is_("patient_id", "null")
-    )
-    if dispenser_id is not None:
-        query = query.eq("dispenser_id", dispenser_id)
-    result = query.limit(1).execute()
+    def _query():
+        q = (
+            sb.table("medications")
+            .select("*")
+            .gt("quantity", 0)
+            .not_.is_("patient_id", "null")
+        )
+        if dispenser_id is not None:
+            q = q.eq("dispenser_id", dispenser_id)
+        return q.limit(1).execute()
+    result = await asyncio.to_thread(_query)
     if not result.data:
         raise HTTPException(status_code=404, detail="No pending dispenses")
 
@@ -63,7 +69,9 @@ async def next_dispense(dispenser_id: str | None = None):
 @router.get("/{slot}", dependencies=[Depends(verify_device_token)])
 async def get_slot(slot: int):
     sb = get_supabase()
-    result = sb.table("medications").select("*").eq("slot", slot).execute()
+    result = await asyncio.to_thread(
+        lambda: sb.table("medications").select("*").eq("slot", slot).execute()
+    )
     if not result.data:
         raise HTTPException(status_code=404, detail="Slot not found")
     return result.data[0]
@@ -76,9 +84,6 @@ async def update_slot(slot: int, data: SlotUpdate):
         raise HTTPException(status_code=400, detail="Slot must be 0-9")
 
     sb = get_supabase()
-    # Upsert: update if slot exists, insert if not
-    result = sb.table("medications").select("id").eq("slot", slot).execute()
-
     payload = {
         "name": data.medication_name,
         "slot": slot,
@@ -89,14 +94,17 @@ async def update_slot(slot: int, data: SlotUpdate):
         "dispenser_id": data.dispenser_id,
     }
 
+    # Upsert: update if slot exists, insert if not.
+    result = await asyncio.to_thread(
+        lambda: sb.table("medications").select("id").eq("slot", slot).execute()
+    )
     if result.data:
-        resp = (
-            sb.table("medications")
-            .update(payload)
-            .eq("slot", slot)
-            .execute()
+        resp = await asyncio.to_thread(
+            lambda: sb.table("medications").update(payload).eq("slot", slot).execute()
         )
     else:
-        resp = sb.table("medications").insert(payload).execute()
+        resp = await asyncio.to_thread(
+            lambda: sb.table("medications").insert(payload).execute()
+        )
 
     return resp.data[0] if resp.data else payload

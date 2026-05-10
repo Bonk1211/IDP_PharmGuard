@@ -48,17 +48,26 @@ We'll know we're right when **(a) ≥95% of scheduled doses are dispensed + inge
 
 ## Open Questions
 
-- [ ] Where does Face ID enrollment happen — bedside device or dashboard? Consent + biometric-data-storage policy unresolved.
-- [ ] Is the second camera USB or CSI? Pi 5 has two CSI lanes — confirm cam choice (libcamera/picamera2 supports two CSI; cv2.VideoCapture for USB fallback).
-- [ ] Cheeking detection acceptance threshold: what counts as "ingestion verified"? Need clinical SME to sign off on the 5-step FSM (HAND→TILT→LEVEL→MOUTH→TONGUE) thresholds.
+**Resolved since 2026-05-08** (kept for trail):
+- [x] Face ID enrollment location → dashboard (`/patients/[id]/enroll`); embeddings stored in `patients.face_embedding`. Consent + biometric-storage policy still TBD before pilot.
+- [x] Camera architecture → dual CSI via `picamera2` / rpicam-vid (`backend/vision/camera.py:RpicamSource` fan-out). USB fallback path retained for dev.
+- [x] Expiry tracking column → `medications.expiry_date DATE` (migration 0001).
+- [x] Multi-device fleet → `dispenser_id text` on `patients`, `medications`, `adherence_logs`, `alerts` (migrations 0001 + 0004).
+- [x] Offline tolerance → SQLite `OfflineQueue` (`backend/storage/queue.py`) + replay loop + refuse-to-dispense after `OFFLINE_MAX_AGE_SECONDS`.
+- [x] Diverter flap and drawer-lock → shipped (`backend/hardware/drawer_lock.py`, single-chute design supersedes the diverter; pill-ID fail leaves the drawer locked).
+- [x] Face ID liveness → blink/EAR detector (`backend/vision/liveness.py`); printed-photo path documented.
+
+**Still open**:
+- [ ] Cheeking detection acceptance threshold: what counts as "ingestion verified"? Need clinical SME to sign off on the 3-step FSM (READY → SWALLOW → DONE) thresholds.
 - [ ] Drug interaction / dose-validation logic — handled by pharmacy upstream, or echoed in `medications` table as a hard guardrail?
-- [ ] Temperature sensor: which SKU, what action on excursion (alert only? lock drawer?), and where does the alert route? Not yet in code.
-- [ ] Expiry tracking: schema column missing in current `medications` table — needs migration.
-- [ ] Multi-device fleet: when do we add a `dispenser_id` column? Schema is currently single-device implicit.
-- [ ] Offline tolerance: how long can the Pi cache `adherence_logs` before backend reconnect, and what's the on-disk queue format? Today the Pi POSTs synchronously and drops on failure.
-- [ ] Diverter flap (reject path) — not yet in `edge_pi/hardware/`. Add servo + GPIO pin allocation.
-- [ ] Authoritative pill SKU list and labelled training set — currently absent. Without it, the 99% accuracy target is a forecast, not a measurement.
-- [ ] Face ID liveness: photo-spoof defence (blink / depth / IR)? Critical for "right patient" assurance.
+- [ ] Temperature-sensor action on excursion: alert only, or lock drawer? Endpoint exists; behavioural rule not finalised.
+- [ ] Authoritative pill SKU list and labelled training set — still absent. Without it, the 99% accuracy target is a forecast.
+- [ ] **RLS disabled** on `alerts`, `agent_briefs`, `agent_flags` (Supabase advisor flag). Acceptable for prototype but must be re-enabled with policies before any multi-tenant deploy.
+- [ ] **Schedule timezone** — `medications.schedule_at` is server-local TIME; cross-timezone deploy needs explicit timezone column or store as UTC offset.
+- [ ] **`/admin` auth scaling** — single shared `X-Device-API-Key` works for one operator. Multi-user audit trail (who pressed Eject, who set schedule) requires per-user identities.
+- [ ] **ngrok URL rotation** — free-tier rotates on Pi reboot, breaking `NEXT_PUBLIC_DEVICE_URL`. Pilot must move to a fixed-domain tunnel (paid ngrok / Cloudflare Tunnel).
+- [ ] **Brief cost ceiling** — Gemini brief runs 2× daily by default; no token-budget guardrail. Add a daily-cost cap + retry-budget before pilot.
+- [ ] **Manual-vs-schedule conflict resolution** — if operator presses Dispense Now within seconds of `schedule_at` matching, both fire and the second hits "no pending dispense". Acceptable noise; document or queue.
 
 ---
 
@@ -113,6 +122,12 @@ When **a scheduled dose is due for an isolated patient**, I want to **deliver th
 | Could | Offline log queue on Pi (SQLite or JSONL) for backend outage | Today the POST drops on failure |
 | Could | Audio prompt to patient ("please swallow now") | UX nicety; not safety-critical |
 | Could | Multi-device fleet support (`dispenser_id` column) | Defer until 2nd device exists |
+| Did | Pi-hosted FastAPI + ngrok-tunnelled dashboard | Phase 0 — backend now runs on the same Pi as the cycle |
+| Did | Clinician assistant chat + scheduled brief (Gemini) | Phase 11 — `/agent` page + `BriefCard`; brief scheduler runs 2×/day default |
+| Did | Proactive flag detection + human-in-loop resolve | Phase 12 — heuristic + Gemini detector populates `agent_flags`; `FlagsPanel` ack/resolve/dismiss |
+| Did | Floor map dashboard + SWR auto-refresh | Phase 13 — SVG floor plan replaces stat cards; deduped fetches across panels |
+| Did | Admin hardware control panel | Phase 14 — `/admin` reset/eject/drawer/snapshot/logs/operations triggers |
+| Did | Manual-only by default + per-slot daily schedule | Phase 15 — `manual_dispense_only=True`; cycle idle until trigger or `schedule_at` matches the current minute |
 | Won't | EHR / HL7-FHIR integration | Out of scope V1 |
 | Won't | FDA/MDA certification work | Out of scope V1 |
 | Won't | Liquid / injectable handling | Out of scope V1 |
@@ -191,16 +206,22 @@ That is the smallest end-to-end loop that proves "zero-touch correct dispensing 
 
 | # | Phase | Description | Status | Parallel | Depends | PRP Plan |
 |---|---|---|---|---|---|---|
+| 0 | Pi-hosted backend reorg | Move FastAPI from dev box onto the Pi; ngrok-tunnel the dashboard to it; consolidate `edge_pi/` into `backend/` | complete | - | - | [completed/pi-hosted-backend.plan.md](../plans/completed/pi-hosted-backend.plan.md) · [report](../reports/pi-hosted-backend-report.md) |
 | 1 | Schema + telemetry hardening | Add `dispenser_id`, `expiry_date`, `pills_per_dose` columns; harden `/api/logs` + `/api/inventory` for new fields | complete | with 2 | - | [completed/schema-telemetry-hardening.plan.md](../plans/completed/schema-telemetry-hardening.plan.md) · [report](../reports/schema-telemetry-hardening-report.md) |
-| 2 | Dual-camera refactor | Refactor `pill_verifier` + `intake_monitor` to accept injected camera handles; verify two CSI cams on Pi 5 simultaneously | in-progress (code complete; Pi hardware bench pending operator — see report) | with 1 | - | [completed/dual-camera-refactor.plan.md](../plans/completed/dual-camera-refactor.plan.md) · [report](../reports/dual-camera-refactor-report.md) |
-| 3 | Face ID end-to-end | Replace 501 stub at `/api/auth/verify-face`; add enrolment endpoint + liveness check on Pi | in-progress (code complete; Pi live test pending operator — see report) | - | 1 | [completed/face-id-end-to-end.plan.md](../plans/completed/face-id-end-to-end.plan.md) · [report](../reports/face-id-end-to-end-report.md) |
-| 4 | Diverter + drawer-lock hardware | New `hardware/diverter.py` + `hardware/drawer_lock.py`; wire into `main.py` cycle | in-progress (code complete; Pi adversarial bench pending operator) | with 5 | 2 | [completed/diverter-drawer-lock.plan.md](../plans/completed/diverter-drawer-lock.plan.md) · [report](../reports/diverter-drawer-lock-report.md) |
-| 5 | Sensor + alerts | Temperature sensor module + expiry/low-stock alert endpoints + WS broadcast | in-progress (code complete; live alerts cron + Pi temp sensor pending operator) | with 4 | 1 | [completed/sensors-alerts.plan.md](../plans/completed/sensors-alerts.plan.md) · [report](../reports/sensors-alerts-report.md) |
-| 6 | End-to-end bench loop | Stitch all modules in `edge_pi/main.py`; run scripted 200-cycle bench; record metrics | in-progress (code complete; Pi 200-cycle bench pending operator — see report) | - | 3, 4 | [completed/end-to-end-bench-loop.plan.md](../plans/completed/end-to-end-bench-loop.plan.md) · [report](../reports/end-to-end-bench-loop-report.md) |
-| 7 | Frontend dashboard surfaces | Add adherence-log live feed, alert panel, slot-status grid in `frontend/src/app/` | in-progress (code complete; visual smoke pending operator) | with 6 | 1 | [completed/dashboard-surfaces.plan.md](../plans/completed/dashboard-surfaces.plan.md) · [report](../reports/dashboard-surfaces-report.md) |
-| 8 | Offline queue + reliability | SQLite buffer for adherence logs; reconnect/replay logic; chaos test | in-progress (code complete; Pi chaos test pending operator) | - | 6 | [completed/offline-queue-reliability.plan.md](../plans/completed/offline-queue-reliability.plan.md) · [report](../reports/offline-queue-reliability-report.md) |
-| 9 | Accuracy validation | Run 1,000-pill labelled bench; record confusion matrix; document residual gap to 99% target | in-progress (harness complete; labelled dataset + Pi run pending operator) | - | 6 | [completed/accuracy-validation.plan.md](../plans/completed/accuracy-validation.plan.md) · [report](../reports/accuracy-validation-report.md) |
-| 10 | Pilot-ready packaging | `make pi-sync` polish, systemd hardening, install.sh idempotency, BOM lockdown | in-progress (code complete; fresh-Pi <30 min stopwatch pending operator) | - | 8, 9 | [completed/pilot-ready-packaging.plan.md](../plans/completed/pilot-ready-packaging.plan.md) · [report](../reports/pilot-ready-packaging-report.md) |
+| 2 | Dual-camera refactor | Refactor `pill_verifier` + `intake_monitor` to accept injected camera handles; verify two CSI cams on Pi 5 simultaneously | complete (code; Pi hardware bench is the operator-attested validation) | with 1 | - | [completed/dual-camera-refactor.plan.md](../plans/completed/dual-camera-refactor.plan.md) · [report](../reports/dual-camera-refactor-report.md) |
+| 3 | Face ID end-to-end | Replace 501 stub at `/api/auth/verify-face`; add enrolment endpoint + liveness check on Pi | complete (code; Pi live spoof test is the operator-attested validation) | - | 1 | [completed/face-id-end-to-end.plan.md](../plans/completed/face-id-end-to-end.plan.md) · [report](../reports/face-id-end-to-end-report.md) |
+| 4 | Diverter + drawer-lock hardware | New `hardware/diverter.py` + `hardware/drawer_lock.py`; wire into `main.py` cycle | complete (code; Pi adversarial bench is the operator-attested validation) | with 5 | 2 | [completed/diverter-drawer-lock.plan.md](../plans/completed/diverter-drawer-lock.plan.md) · [report](../reports/diverter-drawer-lock-report.md) |
+| 5 | Sensor + alerts | Temperature sensor module + expiry/low-stock alert endpoints + WS broadcast | complete (code; cron + Pi temp sensor is the operator-attested validation) | with 4 | 1 | [completed/sensors-alerts.plan.md](../plans/completed/sensors-alerts.plan.md) · [report](../reports/sensors-alerts-report.md) |
+| 6 | End-to-end bench loop | Stitch all modules in `edge_pi/main.py`; run scripted 200-cycle bench; record metrics | complete (code; Pi 200-cycle run is the operator-attested validation) | - | 3, 4 | [completed/end-to-end-bench-loop.plan.md](../plans/completed/end-to-end-bench-loop.plan.md) · [report](../reports/end-to-end-bench-loop-report.md) |
+| 7 | Frontend dashboard surfaces | Add adherence-log live feed, alert panel, slot-status grid in `frontend/src/app/` | complete | with 6 | 1 | [completed/dashboard-surfaces.plan.md](../plans/completed/dashboard-surfaces.plan.md) · [report](../reports/dashboard-surfaces-report.md) |
+| 8 | Offline queue + reliability | SQLite buffer for adherence logs; reconnect/replay logic; chaos test | complete (code; Pi chaos test is the operator-attested validation) | - | 6 | [completed/offline-queue-reliability.plan.md](../plans/completed/offline-queue-reliability.plan.md) · [report](../reports/offline-queue-reliability-report.md) |
+| 9 | Accuracy validation | Run 1,000-pill labelled bench; record confusion matrix; document residual gap to 99% target | complete (harness; labelled dataset + Pi run is the operator-attested validation) | - | 6 | [completed/accuracy-validation.plan.md](../plans/completed/accuracy-validation.plan.md) · [report](../reports/accuracy-validation-report.md) |
+| 10 | Pilot-ready packaging | `make pi-sync` polish, systemd hardening, install.sh idempotency, BOM lockdown | complete (code; fresh-Pi <30 min stopwatch is the operator-attested validation) | - | 8, 9 | [completed/pilot-ready-packaging.plan.md](../plans/completed/pilot-ready-packaging.plan.md) · [report](../reports/pilot-ready-packaging-report.md) |
+| 11 | Clinician assistant (Gemini) | `/api/agent/chat` + `/api/agent/brief`; FastAPI lifespan-spawned brief scheduler at configurable hours; dashboard `BriefCard` + `/agent` chat page | complete | with 12 | 1 | [completed/agentic-clinician-assistant.plan.md](../plans/completed/agentic-clinician-assistant.plan.md) · [report](../reports/agentic-clinician-assistant-report.md) |
+| 12 | Proactive flag detection + human-in-loop resolve | `agent_flags` table + heuristic + Gemini detector; `FlagsPanel` with ack/resolve/dismiss + optimistic UI; partial-unique fingerprint for dedup | complete | with 11 | 11 | [completed/agent-flag-resolve-loop.plan.md](../plans/completed/agent-flag-resolve-loop.plan.md) · [report](../reports/agent-flag-resolve-loop-report.md) |
+| 13 | Dashboard floor map + UX redesign | Stylised SVG floor plan (Common Room ×6 + ICU isolation) replaces stat cards; SWR cache + auto-refresh across panels; `lib/date.ts` shared helpers | complete | with 12 | 7 | [completed/dashboard-floor-map.plan.md](../plans/completed/dashboard-floor-map.plan.md) · [report](../reports/dashboard-floor-map-report.md) |
+| 14 | Admin hardware control panel | `/admin` page with reset/eject/drawer/snapshot/logs/brief-now/detect-now; in-memory log ring buffer; `app.state.hardware_lock` shared between cycle and manual ops | complete | - | 7, 11 | [completed/admin-hardware-control-panel.plan.md](../plans/completed/admin-hardware-control-panel.plan.md) · [report](../reports/admin-hardware-control-panel-report.md) |
+| 15 | Manual + scheduled dispense modes | `manual_dispense_only` flag default-on (cycle idle until trigger); `medications.schedule_at TIME`; per-slot daily auto-fire via `next_scheduled_dispense()` tick; `/admin` schedule editor | complete (inline implementation; no plan artefact) | - | 14 | — |
 
 ### Phase Details
 
@@ -279,6 +300,14 @@ That is the smallest end-to-end loop that proves "zero-touch correct dispensing 
 | Inference framework | Ultralytics YOLO (`.pt` weights, CPU) | TFLite / ONNX | Existing `models/spotter.pt` already in repo; switch only if latency target slips |
 | Mechanism | In-line slider-crank, NEMA 17 stepper | Gravity-fed dispenser | PRD requirement; jam-free positive displacement vs. bridging risk |
 | Stub-mode policy | Fail-loud refuse-to-run; never log `pill_taken=true` from stub | Silent stub | Already enforced (`edge_pi/main.py:87-104`); preserve through every refactor |
+| Backend hosting | Pi runs FastAPI + ngrok tunnel; dashboard speaks to Pi over HTTPS | Separate dev-box backend; cloud backend | Removes a hop, keeps cameras + cycle in one process; trade-off is ngrok URL rotation on free tier |
+| Agent stack | Gemini 2.5 Flash via `google.generativeai` (function-calling) | OpenAI / local LLM | Free tier suffices for prototype; on-device LLM blows BOM; Anthropic not yet wired |
+| Flag dedup | Postgres `UNIQUE INDEX agent_flags_open_fingerprint_uniq WHERE status='open'` | App-level dedup | DB-level guarantee even on concurrent insert; insert-then-catch-23505 idiom |
+| Cycle default | `manual_dispense_only=True`; cycle waits for trigger or schedule tick | Auto-poll quantity>0 every 30 s | Fresh-Pi boot would otherwise drain the magazine before an operator is at the dashboard |
+| Schedule shape | One `medications.schedule_at TIME` per slot (daily) | Multiple times per day; cron expressions | Simplest UX; matches `<input type="time">`; multi-time can layer later via separate table |
+| Admin auth | Same `X-Device-API-Key` as the cycle endpoints | Per-user OAuth, role-based perms | Prototype-grade; documented as scaling gap |
+| Hardware mutex | Single `app.state.hardware_lock = asyncio.Lock()` shared by cycle and `/api/device/*` manual ops | Pause/resume signal, separate locks per device | Fair (FIFO) serialisation; manual ops queue while a cycle is mid-flight |
+| Logs surface | In-process ring buffer (`backend/core/log_ring.py`, deque maxlen=500) on `/api/device/logs` | journalctl shell-out; persistent log table | No subprocess, no SSH; survives only as long as uvicorn (acceptable) |
 
 ---
 
@@ -305,4 +334,5 @@ That is the smallest end-to-end loop that proves "zero-touch correct dispensing 
 ---
 
 *Generated: 2026-05-08*
-*Status: DRAFT — needs validation (see Open Questions)*
+*Last refreshed: 2026-05-10 — Phases 0–15 complete; operator-attested Pi validations remain (see individual reports)*
+*Status: ACTIVE — prototype shipped; pilot validation pending (see remaining Open Questions)*

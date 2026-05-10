@@ -188,7 +188,10 @@ class IntakeMonitor:
     def _ensure_camera(self) -> None:
         if self._source is not None:
             return
-        self._source = open_camera(self.camera_index)
+        # MediaPipe consumes RGB. Opening the source RGB-native skips the
+        # BGR↔RGB round-trip on every frame (Picamera2Source returns sensor
+        # RGB directly; RpicamSource/Cv2Source convert once on read).
+        self._source = open_camera(self.camera_index, output_format="rgb")
 
     def _read_frame(self) -> np.ndarray | None:
         return self._source.read_frame() if self._source is not None else None
@@ -217,7 +220,13 @@ class IntakeMonitor:
             self._state["updated_at"] = time.time()
 
         h, w = frame.shape[:2]
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Source emits RGB when opened with output_format='rgb' (cycle path
+        # + standalone _ensure_camera). Fall back to convert if a BGR-native
+        # source was injected for tests.
+        if getattr(self._source, "output_format", "rgb") == "rgb":
+            rgb = frame
+        else:
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         face_res = self._face_mesh.process(rgb)
         hand_res = self._hands.process(rgb)
 
