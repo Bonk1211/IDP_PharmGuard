@@ -1,11 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import {
-  fetchLatestBrief,
-  refreshBrief,
-  type AgentBrief,
-} from "@/lib/agent";
+import { useState } from "react";
+import { useSWRConfig } from "swr";
+import { refreshBrief } from "@/lib/agent";
+import { KEYS, useLatestBrief } from "@/lib/swr";
 
 function formatRelative(ts: string | undefined): string {
   if (!ts) return "—";
@@ -42,23 +40,17 @@ function renderMarkdown(md: string): { __html: string } {
 }
 
 export default function BriefCard() {
-  const [brief, setBrief] = useState<AgentBrief | null>(null);
-  const [loading, setLoading] = useState(true);
+  const { data: brief, isLoading } = useLatestBrief();
+  const { mutate } = useSWRConfig();
   const [refreshing, setRefreshing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchLatestBrief()
-      .then(setBrief)
-      .finally(() => setLoading(false));
-  }, []);
 
   async function onRefresh() {
     setRefreshing(true);
     setErr(null);
     try {
       const fresh = await refreshBrief("on_demand");
-      setBrief(fresh);
+      await mutate(KEYS.brief, fresh, { revalidate: false });
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Failed to refresh brief");
     } finally {
@@ -108,7 +100,7 @@ export default function BriefCard() {
         </p>
       )}
 
-      {loading ? (
+      {isLoading && !brief ? (
         <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
       ) : brief ? (
         <article

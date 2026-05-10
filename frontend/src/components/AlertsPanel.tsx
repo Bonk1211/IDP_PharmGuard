@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { fetchAlerts, type Alert, type AlertSeverity } from "@/lib/api";
+import { type Alert, type AlertSeverity } from "@/lib/api";
+import { useAlerts } from "@/lib/swr";
 
 function describe(alert: Alert): string {
   const p = alert.payload ?? {};
@@ -63,15 +63,7 @@ function formatRelative(ts: string): string {
 }
 
 export default function AlertsPanel() {
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    fetchAlerts()
-      .then(setAlerts)
-      .finally(() => setLoading(false));
-  }, []);
-
+  const { data: alerts = [], isLoading } = useAlerts();
   const unacked = alerts;  // Phase 5 schema has no ack flag yet
 
   return (
@@ -100,7 +92,7 @@ export default function AlertsPanel() {
         )}
       </div>
 
-      {loading ? (
+      {isLoading && alerts.length === 0 ? (
         <p className="py-6 text-center text-sm text-gray-400">Loading...</p>
       ) : alerts.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-8 text-center">

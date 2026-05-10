@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import StatCard from "@/components/StatCard";
 import DispenserOverview from "@/components/DispenserOverview";
 import IntakeLog from "@/components/IntakeLog";
@@ -9,35 +9,33 @@ import ActivePatients from "@/components/ActivePatients";
 import AlertsPanel from "@/components/AlertsPanel";
 import BriefCard from "@/components/BriefCard";
 import FlagsPanel from "@/components/FlagsPanel";
-import {
-  fetchAllSlots, fetchLogs, fetchPatients,
-  type SlotInfo, type IntakeRecord, type Patient,
-} from "@/lib/api";
+import { useLogs, usePatients, useSlots } from "@/lib/swr";
 
 export default function Home() {
-  const [slots, setSlots] = useState<SlotInfo[]>([]);
-  const [logs, setLogs] = useState<IntakeRecord[]>([]);
-  const [patients, setPatients] = useState<Patient[]>([]);
+  const { data: slots = [] } = useSlots();
+  const { data: logs = [] } = useLogs();
+  const { data: patients = [] } = usePatients();
 
-  useEffect(() => {
-    fetchAllSlots().then(setSlots).catch(() => {});
-    fetchLogs().then(setLogs).catch(() => {});
-    fetchPatients().then(setPatients).catch(() => {});
-  }, []);
-
-  const dispensedToday = logs.filter((l) => {
+  const stats = useMemo(() => {
     const today = new Date().toDateString();
-    return new Date(l.timestamp).toDateString() === today && l.pill_taken;
-  }).length;
+    let dispensedToday = 0;
+    let missedToday = 0;
+    let takenLogs = 0;
+    for (const l of logs) {
+      if (l.pill_taken) takenLogs++;
+      const isToday = new Date(l.timestamp).toDateString() === today;
+      if (isToday) {
+        if (l.pill_taken) dispensedToday++;
+        else missedToday++;
+      }
+    }
+    const adherenceRate = logs.length > 0
+      ? Math.round((takenLogs / logs.length) * 100)
+      : 0;
+    return { dispensedToday, missedToday, adherenceRate };
+  }, [logs]);
 
-  const totalLogs = logs.length;
-  const takenLogs = logs.filter((l) => l.pill_taken).length;
-  const adherenceRate = totalLogs > 0 ? Math.round((takenLogs / totalLogs) * 100) : 0;
-
-  const missedToday = logs.filter((l) => {
-    const today = new Date().toDateString();
-    return new Date(l.timestamp).toDateString() === today && !l.pill_taken;
-  }).length;
+  const { dispensedToday, missedToday, adherenceRate } = stats;
 
   return (
     <div>

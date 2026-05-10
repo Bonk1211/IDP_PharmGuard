@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import Link from "next/link";
-import { fetchPatients, fetchLogs, type Patient } from "@/lib/api";
+import { type Patient } from "@/lib/api";
+import { useLogs, usePatients } from "@/lib/swr";
 
 function getInitials(name: string) {
   return name.split(" ").map((w) => w[0]).join("").toUpperCase();
@@ -25,29 +26,25 @@ interface PatientWithAdherence extends Patient {
 }
 
 export default function ActivePatients() {
-  const [patients, setPatients] = useState<PatientWithAdherence[]>([]);
+  const { data: allPatients = [] } = usePatients();
+  const { data: allLogs = [] } = useLogs();
 
-  useEffect(() => {
-    async function load() {
-      const [allPatients, allLogs] = await Promise.all([
-        fetchPatients(),
-        fetchLogs(),
-      ]);
-
-      const withAdherence = allPatients.map((p) => {
-        const patientLogs = allLogs.filter((l) => l.patient_id === p.id);
-        const taken = patientLogs.filter((l) => l.pill_taken).length;
-        const total = patientLogs.length;
-        return {
-          ...p,
-          adherence: total > 0 ? Math.round((taken / total) * 100) : 100,
-        };
-      });
-
-      setPatients(withAdherence);
+  const patients: PatientWithAdherence[] = useMemo(() => {
+    const counts = new Map<number, { taken: number; total: number }>();
+    for (const l of allLogs) {
+      const c = counts.get(l.patient_id) ?? { taken: 0, total: 0 };
+      c.total++;
+      if (l.pill_taken) c.taken++;
+      counts.set(l.patient_id, c);
     }
-    load().catch(() => {});
-  }, []);
+    return allPatients.map((p) => {
+      const c = counts.get(p.id);
+      const adherence = c && c.total > 0
+        ? Math.round((c.taken / c.total) * 100)
+        : 100;
+      return { ...p, adherence };
+    });
+  }, [allPatients, allLogs]);
 
   return (
     <div className="rounded-2xl border border-sand-200 bg-white p-6">

@@ -1,14 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import { useSWRConfig } from "swr";
 import {
   ackFlag,
   dismissFlag,
-  fetchOpenFlags,
   resolveFlag,
   type AgentFlag,
   type AgentFlagSeverity,
 } from "@/lib/agent";
+import { KEYS, useOpenFlags } from "@/lib/swr";
 
 function severityDot(sev: AgentFlagSeverity): string {
   switch (sev) {
@@ -46,19 +47,13 @@ function formatRelative(ts: string): string {
 }
 
 export default function FlagsPanel() {
-  const [flags, setFlags] = useState<AgentFlag[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { data: flags = [], isLoading } = useOpenFlags();
+  const { mutate } = useSWRConfig();
   const [pending, setPending] = useState<Set<number>>(new Set());
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [noteDraft, setNoteDraft] = useState("");
   const [resolvedByDraft, setResolvedByDraft] = useState("");
   const [err, setErr] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetchOpenFlags()
-      .then(setFlags)
-      .finally(() => setLoading(false));
-  }, []);
 
   function markPending(id: number, on: boolean) {
     setPending((prev) => {
@@ -69,49 +64,46 @@ export default function FlagsPanel() {
     });
   }
 
-  async function refetch() {
-    const fresh = await fetchOpenFlags();
-    setFlags(fresh);
-  }
-
-  async function onAck(id: number) {
+  async function transition(id: number, fn: () => Promise<unknown>, errMsg: string) {
     setErr(null);
     markPending(id, true);
-    const snapshot = flags;
-    setFlags((prev) => prev.filter((f) => f.id !== id));
     try {
-      await ackFlag(id);
+      await mutate(
+        KEYS.flags,
+        async () => {
+          await fn();
+          return (flags as AgentFlag[]).filter((f) => f.id !== id);
+        },
+        {
+          optimisticData: (current: AgentFlag[] | undefined) =>
+            (current ?? []).filter((f) => f.id !== id),
+          rollbackOnError: true,
+          revalidate: true,
+          populateCache: true,
+        },
+      );
     } catch (e) {
-      setFlags(snapshot);
-      setErr(e instanceof Error ? e.message : "Ack failed");
+      setErr(e instanceof Error ? e.message : errMsg);
     } finally {
       markPending(id, false);
     }
   }
 
+  async function onAck(id: number) {
+    await transition(id, () => ackFlag(id), "Ack failed");
+  }
+
   async function onResolve(id: number, dismiss: boolean) {
-    setErr(null);
-    markPending(id, true);
-    const snapshot = flags;
-    setFlags((prev) => prev.filter((f) => f.id !== id));
     setExpandedId(null);
     const note = noteDraft;
     const by = resolvedByDraft;
     setNoteDraft("");
     setResolvedByDraft("");
-    try {
-      if (dismiss) {
-        await dismissFlag(id, note, by);
-      } else {
-        await resolveFlag(id, note, by);
-      }
-    } catch (e) {
-      setFlags(snapshot);
-      setErr(e instanceof Error ? e.message : "Resolve failed");
-      void refetch();
-    } finally {
-      markPending(id, false);
-    }
+    await transition(
+      id,
+      () => (dismiss ? dismissFlag(id, note, by) : resolveFlag(id, note, by)),
+      "Resolve failed",
+    );
   }
 
   return (
@@ -146,7 +138,7 @@ export default function FlagsPanel() {
         </p>
       )}
 
-      {loading ? (
+      {isLoading && flags.length === 0 ? (
         <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
       ) : flags.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-8 text-center">
