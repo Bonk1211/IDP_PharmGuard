@@ -3,25 +3,8 @@
 import { useState } from "react";
 import { useSWRConfig } from "swr";
 import { refreshBrief } from "@/lib/agent";
+import { formatRelative } from "@/lib/date";
 import { KEYS, useLatestBrief } from "@/lib/swr";
-
-function formatRelative(ts: string | undefined): string {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return "—";
-  const now = new Date();
-  const diff = now.getTime() - d.getTime();
-  if (diff < 60_000) return "Just now";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  if (diff < 2 * 86_400_000) return "Yesterday";
-  return d.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function renderMarkdown(md: string): { __html: string } {
   // Tiny markdown renderer for headings + bullets + bold. Avoids pulling

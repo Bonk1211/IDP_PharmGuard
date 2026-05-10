@@ -3,8 +3,8 @@
  *
  * All dashboard panels go through these hooks so the same fetch is
  * deduped across components on the same page (e.g. logs are read by
- * the dashboard stat cards, IntakeLog, and ActivePatients — one HTTP
- * call serves all three thanks to the SWR cache key).
+ * the dashboard stats, IntakeLog, and FloorMap — one HTTP call serves
+ * all three thanks to the SWR cache key).
  */
 
 import useSWR, { type SWRConfiguration } from "swr";
