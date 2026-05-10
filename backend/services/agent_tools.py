@@ -365,10 +365,26 @@ def build_gemini_tools() -> list[dict]:
 
 def _strip_unsupported_keys(node: Any) -> Any:
     """Gemini's function-call schema validator rejects a few JSON-schema keys
-    that Pydantic emits by default. Recursively strip them."""
+    that Pydantic emits by default. Recursively normalise.
+
+    Pydantic v2 emits ``{"anyOf": [{"type": "X"}, {"type": "null"}]}`` for
+    ``X | None`` fields; the Schema proto has no ``anyOf``. Collapse to the
+    non-null branch (the field is already optional via the parameter list).
+    """
     if isinstance(node, dict):
+        if "anyOf" in node:
+            options = node.pop("anyOf")
+            non_null = [
+                o for o in options
+                if not (isinstance(o, dict) and o.get("type") == "null")
+            ]
+            if non_null and isinstance(non_null[0], dict):
+                for k, v in non_null[0].items():
+                    node.setdefault(k, v)
         for k in ("additionalProperties", "title", "$defs", "$ref"):
             node.pop(k, None)
+        if "default" in node and node["default"] is None:
+            node.pop("default", None)
         return {k: _strip_unsupported_keys(v) for k, v in node.items()}
     if isinstance(node, list):
         return [_strip_unsupported_keys(v) for v in node]
