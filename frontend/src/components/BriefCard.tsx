@@ -6,20 +6,21 @@ import { refreshBrief } from "@/lib/agent";
 import { formatRelative } from "@/lib/date";
 import { KEYS, useLatestBrief } from "@/lib/swr";
 
-function renderMarkdown(md: string): { __html: string } {
-  // Tiny markdown renderer for headings + bullets + bold. Avoids pulling
-  // in a full library for what is a server-curated, trusted payload.
-  const escaped = md
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-  const html = escaped
-    .replace(/^## (.*)$/gm, '<h3 class="mt-3 text-sm font-semibold text-gray-900">$1</h3>')
-    .replace(/^# (.*)$/gm, '<h2 class="mt-3 text-base font-semibold text-gray-900">$1</h2>')
-    .replace(/\*\*(.+?)\*\*/g, '<strong class="font-semibold text-gray-900">$1</strong>')
-    .replace(/^[-*] (.*)$/gm, '<li class="ml-5 list-disc text-sm text-gray-700">$1</li>')
-    .replace(/\n{2,}/g, '<br/><br/>');
-  return { __html: html };
+// Pull a single short headline out of the markdown body so the card has
+// a one-line takeaway without rendering the full document. Strips
+// markdown markers + collapses whitespace.
+function pickHeadline(md: string | undefined): string | null {
+  if (!md) return null;
+  const lines = md.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    const stripped = line
+      .replace(/^#+\s*/, "")
+      .replace(/^[-*]\s*/, "")
+      .replace(/\*\*(.+?)\*\*/g, "$1")
+      .trim();
+    if (stripped.length >= 8) return stripped;
+  }
+  return null;
 }
 
 export default function BriefCard() {
@@ -41,8 +42,10 @@ export default function BriefCard() {
     }
   }
 
+  const headline = pickHeadline(brief?.content);
+
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-6">
+    <div className="flex h-full flex-col rounded-2xl border border-sand-200 bg-white p-6">
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <svg
@@ -83,34 +86,67 @@ export default function BriefCard() {
         </p>
       )}
 
-      {isLoading && !brief ? (
-        <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
-      ) : brief ? (
-        <article
-          className="prose-sm max-w-none space-y-1 text-sm text-gray-700"
-          dangerouslySetInnerHTML={renderMarkdown(brief.content)}
-        />
-      ) : (
-        <div className="flex flex-col items-center justify-center py-8 text-center">
-          <p className="text-sm font-medium text-gray-700">No briefs yet</p>
-          <p className="mt-0.5 text-xs text-gray-400">
-            Click Refresh to generate one. Scheduled briefs run at the hours
-            configured in AGENT_BRIEF_LOCAL_HOURS.
-          </p>
-        </div>
-      )}
+      {/* Body — fills remaining height, scrolls if needed */}
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {isLoading && !brief ? (
+          <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
+        ) : brief ? (
+          <div className="space-y-3">
+            <div className="flex flex-wrap gap-1.5">
+              <CountChip label="Missed" n={brief.metadata.n_missed} tone="danger" />
+              <CountChip label="Alerts" n={brief.metadata.n_alerts} tone="warning" />
+              <CountChip label="Low stock" n={brief.metadata.n_low_stock} tone="warning" />
+            </div>
+            {headline && (
+              <p className="line-clamp-4 text-xs text-gray-600">{headline}</p>
+            )}
+          </div>
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center text-center">
+            <p className="text-sm font-medium text-gray-700">No briefs yet</p>
+            <p className="mt-0.5 text-xs text-gray-400">
+              Click Refresh to generate one. Scheduled briefs run at the hours
+              configured in AGENT_BRIEF_LOCAL_HOURS.
+            </p>
+          </div>
+        )}
+      </div>
 
       {brief && (
-        <div className="mt-4 flex flex-wrap gap-2 border-t border-sand-100 pt-3 text-[11px] text-gray-500">
+        <div className="mt-3 flex flex-wrap gap-2 border-t border-sand-100 pt-2 text-[10px] text-gray-400">
           <span className="rounded-full bg-sand-100 px-2 py-0.5 font-mono">
             {brief.metadata.model}
           </span>
           <span>{brief.metadata.latency_ms} ms</span>
-          <span>missed: {brief.metadata.n_missed}</span>
-          <span>alerts: {brief.metadata.n_alerts}</span>
-          <span>low-stock: {brief.metadata.n_low_stock}</span>
         </div>
       )}
     </div>
+  );
+}
+
+function CountChip({
+  label,
+  n,
+  tone,
+}: {
+  label: string;
+  n: number;
+  tone: "danger" | "warning";
+}) {
+  // Zero counts collapse to the calm "all-clear" colour regardless of
+  // the configured tone — colour reflects current state, not category.
+  const cls =
+    n === 0
+      ? "bg-olive-50 text-olive-700"
+      : tone === "danger"
+      ? "bg-status-danger-bg text-status-danger"
+      : "bg-status-warning-bg text-status-warning";
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium ${cls}`}
+    >
+      <span className="uppercase tracking-wider opacity-75">{label}</span>
+      <span className="font-bold tabular-nums">{n}</span>
+    </span>
   );
 }

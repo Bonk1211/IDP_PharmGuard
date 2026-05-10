@@ -2,10 +2,7 @@
 
 import DispenserOverview from "@/components/DispenserOverview";
 import IntakeLog from "@/components/IntakeLog";
-import NeedsAttention from "@/components/NeedsAttention";
-import AlertsPanel from "@/components/AlertsPanel";
-import BriefCard from "@/components/BriefCard";
-import FlagsPanel from "@/components/FlagsPanel";
+import WhatHappenedLately from "@/components/WhatHappenedLately";
 import FloorMap from "@/components/FloorMap";
 import { useLogs, usePatients, useSlots } from "@/lib/swr";
 
@@ -25,19 +22,8 @@ export default function Home() {
         </p>
       </div>
 
-      <div className="mb-8 grid grid-cols-1 gap-6 sm:grid-cols-2">
-        <div className="animate-fade-up stagger-1">
-          <BriefCard />
-        </div>
-        <div className="animate-fade-up stagger-2">
-          <FlagsPanel />
-        </div>
-        <div className="animate-fade-up stagger-3">
-          <AlertsPanel />
-        </div>
-        <div className="animate-fade-up stagger-4">
-          <NeedsAttention logs={logs} slots={slots} />
-        </div>
+      <div className="animate-fade-up stagger-1">
+        <WhatHappenedLately />
       </div>
 
       <div className="animate-fade-up stagger-2 mb-8">

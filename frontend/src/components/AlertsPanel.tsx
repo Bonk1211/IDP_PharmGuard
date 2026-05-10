@@ -58,7 +58,7 @@ export default function AlertsPanel() {
   const unacked = alerts;  // Phase 5 schema has no ack flag yet
 
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-6">
+    <div className="flex h-full flex-col rounded-2xl border border-sand-200 bg-white p-6">
       <div className="mb-4 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <svg
@@ -83,10 +83,11 @@ export default function AlertsPanel() {
         )}
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto">
       {isLoading && alerts.length === 0 ? (
         <p className="py-6 text-center text-sm text-gray-400">Loading...</p>
       ) : alerts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 text-center">
+        <div className="flex h-full flex-col items-center justify-center py-8 text-center">
           <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-olive-50">
             <svg
               width="20"
@@ -148,6 +149,7 @@ export default function AlertsPanel() {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }

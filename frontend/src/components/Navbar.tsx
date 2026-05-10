@@ -3,13 +3,19 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+// Single-tenant default — the "Dispenser" tab links to a fixed id mirrored
+// from the backend DEFAULT_DISPENSER_ID. Multi-tenant routing isn't wired
+// yet; visiting any other id leaves the tab un-highlighted but the page
+// still renders normally.
+const DEFAULT_DISPENSER_ID =
+  process.env.NEXT_PUBLIC_DEFAULT_DISPENSER_ID ?? "dispenser-001";
+
 const NAV_ITEMS = [
-  { label: "Dashboard", href: "/" },
-  { label: "Patients", href: "/patients" },
-  { label: "Inventory", href: "/inventory" },
-  { label: "Reports", href: "/reports" },
-  { label: "Assistant", href: "/agent" },
-  { label: "Admin", href: "/admin" },
+  { label: "Dashboard",    href: "/" },
+  { label: "Assistant",    href: "/agent" },
+  { label: "Inventory",    href: "/inventory" },
+  { label: "Dispenser",    href: `/dispensers/${DEFAULT_DISPENSER_ID}` },
+  { label: "Patient List", href: "/patients" },
 ];
 
 export default function Navbar() {

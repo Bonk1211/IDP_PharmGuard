@@ -90,7 +90,7 @@ export default function NeedsAttention({ logs, slots }: Props) {
   };
 
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-6">
+    <div className="flex h-full flex-col rounded-2xl border border-sand-200 bg-white p-6">
       <div className="mb-4 flex items-center justify-between">
         <h2 className="text-base font-semibold text-gray-900">Needs Attention</h2>
         {alerts.length > 0 && (
@@ -100,8 +100,9 @@ export default function NeedsAttention({ logs, slots }: Props) {
         )}
       </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto">
       {alerts.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-8 text-center">
+        <div className="flex h-full flex-col items-center justify-center py-8 text-center">
           <div className="mb-2 flex h-10 w-10 items-center justify-center rounded-full bg-status-success-bg">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2d7a3a" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="20 6 9 17 4 12" />
@@ -136,6 +137,7 @@ export default function NeedsAttention({ logs, slots }: Props) {
           ))}
         </div>
       )}
+      </div>
     </div>
   );
 }
