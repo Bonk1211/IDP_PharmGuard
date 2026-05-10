@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 from core.security import verify_device_api_key
 from db.base import get_supabase
 from services.agent import chat, generate_brief
+from services.flag_detector import detect_and_persist_flags
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +95,26 @@ async def brief_endpoint(kind: str = Query(default="on_demand")):
         # Still return the generated brief even if persistence failed.
         row = payload
     return row
+
+
+@router.post("/flags/detect")
+async def trigger_flag_detection():
+    """Run the heuristic + Gemini flag-detection pipeline now.
+
+    Mirrors what the brief scheduler does on its 12 h tick. Manual calls
+    in quick succession will mostly insert zero new flags because the
+    open-fingerprint unique index dedupes — that's correct.
+    """
+    try:
+        result = await asyncio.wait_for(detect_and_persist_flags(), timeout=60.0)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="detection took too long (>60 s)")
+    return {
+        "ok": True,
+        "new_count": result.get("new_count", 0),
+        "by_kind": result.get("by_kind", {}),
+        "gemini_used": result.get("gemini_used", False),
+    }
 
 
 @router.get("/briefs/recent")

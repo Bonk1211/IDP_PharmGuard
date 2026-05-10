@@ -74,6 +74,9 @@ class CycleState:
         self.hardware_stubbed: bool = False
         self.cycle_n: int = 0
         self.last_cycle_summary: dict[str, Any] | None = None  # exposed via /api/device/status
+        # Shared with /api/device/* manual endpoints. Set by HardwareLoop
+        # before run_cycle is dispatched. None during init / in tests.
+        self.hardware_lock: asyncio.Lock | None = None
 
     async def init(self) -> None:
         """Build all hardware resources. Raises RuntimeError on HI-012 violation.
@@ -333,11 +336,19 @@ async def run_cycle(state: CycleState) -> None:
     # so the bench CSV schema (`t_auth_ms` column) stays stable.
     t_auth = t_schedule
 
-    # Magazine + ejector.
-    await asyncio.to_thread(state.magazine.rotate_to, slot)
-    t_rotate = time.perf_counter()
-    await asyncio.to_thread(state.ejector.push)
-    t_eject = time.perf_counter()
+    # Magazine + ejector. Serialized with /api/device/* manual ops via
+    # the shared hardware_lock (set by HardwareLoop before run_cycle).
+    if state.hardware_lock is not None:
+        async with state.hardware_lock:
+            await asyncio.to_thread(state.magazine.rotate_to, slot)
+            t_rotate = time.perf_counter()
+            await asyncio.to_thread(state.ejector.push)
+            t_eject = time.perf_counter()
+    else:
+        await asyncio.to_thread(state.magazine.rotate_to, slot)
+        t_rotate = time.perf_counter()
+        await asyncio.to_thread(state.ejector.push)
+        t_eject = time.perf_counter()
 
     # Pill-ID + drawer-lock (single-chute design — no diverter).
     # Fail-safe: if pill-ID rejects, drawer stays LOCKED. Pill sits in
@@ -361,7 +372,11 @@ async def run_cycle(state: CycleState) -> None:
         )
         t_pillid = time.perf_counter()
         if pill_id_pass:
-            await asyncio.to_thread(state.drawer_lock.hold_unlocked)
+            if state.hardware_lock is not None:
+                async with state.hardware_lock:
+                    await asyncio.to_thread(state.drawer_lock.hold_unlocked)
+            else:
+                await asyncio.to_thread(state.drawer_lock.hold_unlocked)
             t_drawer = time.perf_counter()
             pill_taken_actual = True
             if not settings.bench_mode:

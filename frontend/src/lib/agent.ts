@@ -210,3 +210,26 @@ export function dismissFlag(
     resolved_by: resolvedBy?.trim() ? resolvedBy.trim() : null,
   });
 }
+
+// ─────────────────────────── on-demand flag detection ─────────────────────────
+
+export type FlagDetectionResult = {
+  ok: boolean;
+  new_count: number;
+  by_kind: Record<string, number>;
+  gemini_used: boolean;
+};
+
+export async function triggerFlagDetection(): Promise<FlagDetectionResult | null> {
+  if (!isAgentConfigured()) return null;
+  try {
+    const r = await fetch(`${baseUrl}/api/agent/flags/detect`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as FlagDetectionResult;
+  } catch {
+    return null;
+  }
+}

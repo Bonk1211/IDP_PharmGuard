@@ -31,6 +31,7 @@ export type DeviceStatus = {
   cycle_n: number;
   last_cycle: LastCycleSummary | null;
   task_running: boolean;
+  is_unlocked: boolean;
 };
 
 export type IntakeStepHistoryRow = {
@@ -139,4 +140,108 @@ export function streamUrl(camNum: 0 | 1, opts?: { annotate?: boolean }): string 
   const params = new URLSearchParams({ key: apiKey });
   if (opts?.annotate) params.set("annotate", "1");
   return `${baseUrl}/api/device/stream/${camNum}?${params.toString()}`;
+}
+
+// ──────────────────────────── manual hardware ops ────────────────────────────
+
+export type EjectResult = {
+  ok: boolean;
+  status: number;
+  latency_ms?: number;
+  error?: string;
+};
+
+export type DrawerAction = "lock" | "unlock";
+
+export type DrawerResult = {
+  ok: boolean;
+  status: number;
+  is_unlocked?: boolean;
+  error?: string;
+};
+
+export type LogRecord = {
+  ts: number;
+  level: string;
+  name: string;
+  message: string;
+};
+
+export async function manualEject(slot: number): Promise<EjectResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/eject`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ slot }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      latency_ms: data?.latency_ms,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+export async function setDrawer(action: DrawerAction): Promise<DrawerResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/drawer`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      is_unlocked: data?.is_unlocked,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+export async function fetchSnapshot(cam: 0 | 1): Promise<string | null> {
+  if (!isDeviceConfigured()) return null;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/snapshot?cam=${cam}`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    const blob = await r.blob();
+    return URL.createObjectURL(blob);
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchPiLogs(n: number = 200): Promise<LogRecord[]> {
+  if (!isDeviceConfigured()) return [];
+  try {
+    const r = await fetch(`${baseUrl}/api/device/logs?n=${n}`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return [];
+    const j = (await r.json()) as { records: LogRecord[] };
+    return j.records ?? [];
+  } catch {
+    return [];
+  }
+}
+
+async function safeError(r: Response): Promise<string> {
+  try {
+    const j = await r.json();
+    return typeof j?.detail === "string" ? j.detail : JSON.stringify(j);
+  } catch {
+    return r.statusText || "unknown";
+  }
 }

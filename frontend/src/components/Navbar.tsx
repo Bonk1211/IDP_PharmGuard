@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { label: "Inventory", href: "/inventory" },
   { label: "Reports", href: "/reports" },
   { label: "Assistant", href: "/agent" },
+  { label: "Admin", href: "/admin" },
 ];
 
 export default function Navbar() {

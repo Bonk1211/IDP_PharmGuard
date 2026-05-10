@@ -12,10 +12,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
+from core.log_ring import get_ring
 from core.security import verify_device_api_key
 
 log = logging.getLogger(__name__)
@@ -46,8 +50,13 @@ async def device_status(request: Request):
             "cycle_n": 0,
             "last_cycle": None,
             "task_running": False,
+            "is_unlocked": False,
         }
-    return loop.status()
+    base = loop.status()
+    state = getattr(loop, "_state", None)
+    drawer = getattr(state, "drawer_lock", None) if state else None
+    base["is_unlocked"] = bool(drawer.is_unlocked()) if drawer else False
+    return base
 
 
 @router.post("/dispense_now", status_code=202)
@@ -78,6 +87,95 @@ async def reset(request: Request):
     await loop.start()
     request.app.state.hardware_loop = loop
     return {"reset": True}
+
+
+# ─────────────────── manual hardware ops (X-Device-API-Key) ─────────────────
+
+
+class EjectBody(BaseModel):
+    slot: int = Field(ge=0, le=9, description="Magazine slot to rotate to before eject.")
+
+
+@router.post("/eject")
+async def manual_eject(body: EjectBody, request: Request):
+    """Rotate the magazine to ``slot`` and run one ejector push.
+
+    Raw mechanical test. No DB read or write. Drawer is NOT opened.
+    Serializes with the cycle via ``app.state.hardware_lock`` so two
+    threads never drive the GPIO at once.
+    """
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no hardware loop")
+    state = getattr(loop, "_state", None)
+    if state is None or state.magazine is None or state.ejector is None:
+        raise HTTPException(status_code=503, detail="Hardware not initialised")
+    lock: asyncio.Lock = request.app.state.hardware_lock
+    t0 = time.monotonic()
+    async with lock:
+        await asyncio.to_thread(state.magazine.rotate_to, body.slot)
+        await asyncio.to_thread(state.ejector.push)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    log.info("manual eject: slot=%d latency_ms=%d", body.slot, latency_ms)
+    return {"ok": True, "slot": body.slot, "latency_ms": latency_ms}
+
+
+class DrawerBody(BaseModel):
+    action: Literal["lock", "unlock"]
+
+
+@router.post("/drawer")
+async def manual_drawer(body: DrawerBody, request: Request):
+    """Manual drawer test — bypasses the cycle's auto-relock."""
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no hardware loop")
+    state = getattr(loop, "_state", None)
+    drawer = getattr(state, "drawer_lock", None) if state else None
+    if drawer is None:
+        raise HTTPException(status_code=503, detail="Drawer not initialised")
+    lock: asyncio.Lock = request.app.state.hardware_lock
+    async with lock:
+        if body.action == "unlock":
+            await asyncio.to_thread(drawer.unlock)
+        else:
+            await asyncio.to_thread(drawer.lock)
+    log.info("manual drawer: action=%s", body.action)
+    return {"ok": True, "action": body.action, "is_unlocked": drawer.is_unlocked()}
+
+
+@router.get("/snapshot")
+async def camera_snapshot(
+    request: Request,
+    cam: int = Query(..., ge=0, le=1, description="0=tray, 1=intake"),
+):
+    """Single JPEG frame from the requested camera. No streaming.
+
+    Reuses the cycle's already-open camera (RpicamSource fan-out).
+    Snapshot quality fixed at 80 to keep the payload small.
+    """
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no cameras")
+    state = getattr(loop, "_state", None)
+    cam_obj = getattr(state, "cam_a" if cam == 0 else "cam_b", None) if state else None
+    if cam_obj is None:
+        raise HTTPException(status_code=503, detail=f"cam_{cam} not open")
+    if not hasattr(cam_obj, "latest_frame_jpeg"):
+        raise HTTPException(status_code=501, detail="Camera backend lacks latest_frame_jpeg")
+    jpeg = await asyncio.to_thread(cam_obj.latest_frame_jpeg, 80)
+    if jpeg is None:
+        raise HTTPException(status_code=503, detail="No frame available yet")
+    return Response(content=jpeg, media_type="image/jpeg")
+
+
+@router.get("/logs")
+async def recent_logs(n: int = Query(default=200, ge=1, le=500)):
+    """Last N log records from the in-memory ring buffer (newest first)."""
+    ring = get_ring()
+    if ring is None:
+        return {"records": [], "note": "ring buffer not installed"}
+    return {"records": ring.snapshot(n)}
 
 
 @router.get("/intake")

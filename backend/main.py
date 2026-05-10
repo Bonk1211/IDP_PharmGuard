@@ -33,6 +33,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import agent, alerts, auth, device, flags, inventory, logs
 from config import settings
+from core.log_ring import install_ring_handler
 from scheduler.background import HardwareLoop
 from scheduler.brief_scheduler import brief_scheduler_loop
 
@@ -52,6 +53,9 @@ async def lifespan(app: FastAPI):
     cleanup of GPIO + cameras).
     """
     settings.validate_runtime()
+
+    install_ring_handler(level=logging.INFO)
+    app.state.hardware_lock = asyncio.Lock()
 
     # Brief scheduler runs regardless of headless mode — agent endpoints
     # work without hardware. Spawn it FIRST so a HardwareLoop init failure
@@ -75,7 +79,7 @@ async def lifespan(app: FastAPI):
                 pass
         return
 
-    loop = HardwareLoop()
+    loop = HardwareLoop(hardware_lock=app.state.hardware_lock)
     await loop.start()
     app.state.hardware_loop = loop
     log.info("Hardware loop started")

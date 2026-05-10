@@ -28,11 +28,15 @@ _MAX_BACKOFF_S = 60.0
 
 
 class HardwareLoop:
-    def __init__(self) -> None:
+    def __init__(self, hardware_lock: asyncio.Lock | None = None) -> None:
         self._state: CycleState | None = None
         self._task: asyncio.Task | None = None
         self._dispense_now_event = asyncio.Event()
         self._stop_event = asyncio.Event()
+        # Shared with /api/device/* manual endpoints. When None, cycle
+        # runs unguarded — fine for dev/test, not safe for production
+        # alongside manual ops.
+        self._hardware_lock = hardware_lock
 
     async def start(self) -> None:
         """Build CycleState + launch the supervised loop. May raise from init().
@@ -43,6 +47,7 @@ class HardwareLoop:
         run staring at "GPIO not allocated" until reboot.
         """
         self._state = CycleState()
+        self._state.hardware_lock = self._hardware_lock
         try:
             await self._state.init()  # HI-012 fail-loud lives here
         except Exception:
