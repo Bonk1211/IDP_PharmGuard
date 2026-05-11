@@ -4,9 +4,10 @@
 // AI intake check, twin cams, action bar. All buttons wire to real
 // endpoints in lib/device.ts + lib/api.ts.
 //
-// NOTE: lib/device.ts is single-target; the URL [id] is informational
-// until multi-tenant routing lands. Patient & slot context derive from
-// the current next-dispense row in `medications`.
+// Layout matches the approved mockup: one banner row, two thin inline
+// rows (steps + this-pass), a bare confirm header with state legend, a
+// 7:3 slot-grid / AI panel row, then a full-width 2-col cams row, then
+// the sticky action bar.
 
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -65,6 +66,11 @@ function fmtHHmm(d: Date): string {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function hourLabel(): string {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:00`;
 }
 
 function nextRoundFrom(schedules: ScheduleRow[]): { time: string; in: string } | null {
@@ -128,7 +134,6 @@ export default function DispenserGuidedPage() {
   const dispenserId = String(id);
   const { mutate } = useSWRConfig();
 
-  // Live data
   const { data: slots = [] } = useSlots();
   const [status, setStatus] = useState<DeviceStatus | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -136,7 +141,6 @@ export default function DispenserGuidedPage() {
   const [schedules, setSchedules] = useState<ScheduleRow[]>([]);
   const [activePatient, setActivePatient] = useState<Patient | null>(null);
 
-  // Action state
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
   const [overrideOpen, setOverrideOpen] = useState(false);
@@ -148,13 +152,11 @@ export default function DispenserGuidedPage() {
 
   const configured = isDeviceConfigured();
 
-  // Live clock — drives "Next round in Xm" + "current time" displays.
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  // /status poll
   useEffect(() => {
     if (!configured) return;
     let alive = true;
@@ -176,7 +178,6 @@ export default function DispenserGuidedPage() {
     };
   }, [configured]);
 
-  // /intake poll — drives the AI panel + step state.
   useEffect(() => {
     let alive = true;
     async function tick() {
@@ -191,7 +192,6 @@ export default function DispenserGuidedPage() {
     };
   }, []);
 
-  // /schedules — feeds "next round" + this-pass.
   useEffect(() => {
     if (!configured) return;
     let alive = true;
@@ -207,9 +207,7 @@ export default function DispenserGuidedPage() {
     };
   }, [configured]);
 
-  // Determine the active patient: the patient owning the slot of the
-  // earliest upcoming scheduled dispense, falling back to the first slot
-  // with a quantity > 0.
+  // Active patient = owner of earliest-scheduled assigned slot.
   useEffect(() => {
     let alive = true;
     async function pick() {
@@ -234,7 +232,6 @@ export default function DispenserGuidedPage() {
         })
         .sort((a, b) => {
           if (a.dueMs !== b.dueMs) return a.dueMs - b.dueMs;
-          // Stable fallback: lowest slot index wins.
           return a.slot.slot - b.slot.slot;
         });
       const target = ranked[0]?.slot;
@@ -248,14 +245,13 @@ export default function DispenserGuidedPage() {
     pick();
   }, [slots, schedules]);
 
-  // Cleanup any blob URL we may have created from snapshots.
   useEffect(() => {
     return () => {
       if (prevSnapUrl.current) URL.revokeObjectURL(prevSnapUrl.current);
     };
   }, []);
 
-  // ──────────────────────────── derived data ─────────────────────
+  // ──────────────────────────── derived ─────────────────────
 
   const activeSlots: SlotInfo[] = useMemo(() => {
     if (!activePatient) return [];
@@ -270,26 +266,18 @@ export default function DispenserGuidedPage() {
   }, [activeSlots, confirmedSlots]);
 
   const ejectedSlot: number | null = useMemo(() => {
-    // Treat "currently being dispensed" as the slot at the head of the
-    // queue once the cycle has incremented. Approximation; the backend
-    // doesn't expose the in-flight slot directly.
     if (intake?.running && currentSlot) return currentSlot.slot;
     return null;
   }, [intake?.running, currentSlot]);
 
   const stepIdx = useMemo(() => {
-    // Step inference from intake state + cycle:
-    //   0: Verify patient   → assumed done as soon as patient is identified
-    //   1: Eject pill       → done once intake game is running OR finished
-    //   2: Confirm intake   → current while intake game is running
-    //   3: Sign off         → done after operator confirms
     if (!activePatient) return 0;
     if (intake?.result === "passed" && currentSlot && confirmedSlots.has(currentSlot.slot)) {
-      return 4; // all done
+      return 4;
     }
     if (intake?.running) return 2;
-    if (intake?.result === "passed") return 3; // awaiting sign-off
-    return 1; // verified, ejecting
+    if (intake?.result === "passed") return 3;
+    return 1;
   }, [activePatient, intake, currentSlot, confirmedSlots]);
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
@@ -298,12 +286,23 @@ export default function DispenserGuidedPage() {
 
   const cam0Url = streamUrl(0);
   const cam1Url = streamUrl(1);
-  // Re-snapshot trick: re-key the <img> by appending a counter to force
-  // the browser to reopen the MJPEG connection (snapKey changes).
   const cam0Src = cam0Url ? `${cam0Url}&_=${snapKey}` : null;
   const cam1Src = cam1Url ? `${cam1Url}&_=${snapKey}` : null;
 
-  // ──────────────────────────── handlers ─────────────────────────
+  const cam0Footer =
+    ejectedSlot !== null
+      ? `● Pill released · slot ${ejectedSlot}`
+      : "Idle — awaiting dispense";
+
+  const cam1Footer = intake?.running
+    ? `${intake.instruction} · ${Math.round((intake.hold_progress ?? 0) * 100)}%`
+    : intake?.result === "passed"
+    ? "✓ Intake confirmed"
+    : intake?.result === "timeout"
+    ? "✗ Intake timed out"
+    : "Idle";
+
+  // ──────────────────────────── handlers ─────────────────────
 
   async function withBusy<T>(label: string, fn: () => Promise<T>): Promise<T> {
     setBusy(label);
@@ -392,11 +391,10 @@ export default function DispenserGuidedPage() {
     });
   }
 
-  // ──────────────────────────── render ───────────────────────────
+  // ──────────────────────────── render ───────────────────────
 
   return (
     <div className="space-y-4">
-      {/* ── Patient banner + status pills ─────────────────── */}
       <PatientBanner
         patient={activePatient}
         status={status}
@@ -420,29 +418,16 @@ export default function DispenserGuidedPage() {
         </div>
       )}
 
-      {/* ── Steps + this-pass list ─────────────────────────── */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[3fr_2fr]">
-        <StepsCard stepIdx={stepIdx} cycleN={status?.cycle_n ?? 0} clock={fmtClock(now)} />
-        <ThisPassList
-          slots={activeSlots}
-          currentSlot={currentSlot}
-          confirmed={confirmedSlots}
-        />
-      </div>
-
-      {/* ── Confirm card ──────────────────────────────────── */}
-      <ConfirmCard
-        stepIdx={stepIdx}
-        patient={activePatient}
-        slot={currentSlot}
-        ejectedSlot={ejectedSlot}
-        drawerUnlocked={drawerUnlocked}
-        anyEmpty={slots.some((s) => s.name && s.quantity === 0)}
-        anyLow={slots.some((s) => s.name && s.quantity > 0 && s.quantity <= 3)}
+      <StepsRow stepIdx={stepIdx} cycleN={status?.cycle_n ?? 0} clock={fmtClock(now)} />
+      <ThisPassRow
+        slots={activeSlots}
+        currentSlot={currentSlot}
+        confirmed={confirmedSlots}
       />
 
-      {/* ── Slot grid + AI panel + cams ───────────────────── */}
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[5fr_7fr]">
+      <ConfirmHeader stepIdx={stepIdx} patient={activePatient} slot={currentSlot} />
+
+      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
         <SlotGrid
           slots={slots}
           ejectedSlot={ejectedSlot}
@@ -452,40 +437,14 @@ export default function DispenserGuidedPage() {
           onEject={onEject}
           onUnlockDrawer={onUnlockDrawer}
         />
-
-        <div className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <CameraTile
-              label="Cam 0 · Tray"
-              url={cam0Src}
-              clock={fmtClock(now)}
-              footer={
-                ejectedSlot !== null
-                  ? `● Pill released · slot ${ejectedSlot}`
-                  : "Idle — awaiting dispense"
-              }
-            />
-            <CameraTile
-              label="Cam 1 · Patient"
-              url={cam1Src}
-              clock={fmtClock(now)}
-              footer={
-                intake?.running
-                  ? `${intake.instruction} · ${Math.round((intake.hold_progress ?? 0) * 100)}%`
-                  : intake?.result === "passed"
-                  ? "✓ Intake confirmed"
-                  : intake?.result === "timeout"
-                  ? "✗ Intake timed out"
-                  : "Idle"
-              }
-            />
-          </div>
-
-          <AIIntakeCheck intake={intake} patient={activePatient} />
-        </div>
+        <AIIntakeCheck intake={intake} patient={activePatient} />
       </div>
 
-      {/* ── Action bar ────────────────────────────────────── */}
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <CameraTile label="Cam 0 · Tray" url={cam0Src} clock={fmtClock(now)} footer={cam0Footer} />
+        <CameraTile label="Cam 1 · Patient" url={cam1Src} clock={fmtClock(now)} footer={cam1Footer} />
+      </div>
+
       <ActionBar
         intake={intake}
         currentSlot={currentSlot}
@@ -503,7 +462,7 @@ export default function DispenserGuidedPage() {
   );
 }
 
-// ──────────────────────────── sub-components ────────────────────────────
+// ──────────────────────────── PatientBanner (single row) ────────────────────────────
 
 function PatientBanner({
   patient,
@@ -517,44 +476,43 @@ function PatientBanner({
   clock: string;
 }) {
   return (
-    <div className="grid grid-cols-1 gap-3 lg:grid-cols-[2fr_3fr_2fr]">
-      {/* Patient identity */}
-      <div className="flex items-center gap-3 rounded-2xl border border-sand-200 bg-white p-4">
-        <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-olive-100 text-base font-bold text-olive-700 ring-2 ring-olive-200/60">
+    <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-olive-100 text-sm font-bold text-olive-700 ring-2 ring-olive-200/60">
           {patient ? getInitials(patient.name) : "—"}
         </div>
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <p className="truncate text-base font-semibold text-gray-900">
+          {/* TODO: room/bed columns once schema gains them */}
+          <div className="flex flex-wrap items-baseline gap-x-2">
+            <p className="truncate text-sm font-semibold text-gray-900">
               {patient?.name ?? "No active patient"}
             </p>
             {patient && (
               <span className="text-[11px] text-gray-400">
-                · {patient.age ?? "?"}y{patient.condition ? " · " : ""}
-                {patient.condition ?? ""}
+                · {patient.age ?? "?"}y{patient.condition ? ` · ${patient.condition}` : ""}
               </span>
             )}
           </div>
-          <p className="text-[11px] text-gray-500">
-            MRN {patient ? String(7000000 + patient.id).slice(0, 4) + "-" + String(patient.id).padStart(3, "0") : "—"}
+          <p className="text-[10px] text-gray-400">
+            MRN {patient ? `${String(7000000 + patient.id).slice(0, 4)}-${String(patient.id).padStart(3, "0")}` : "—"}
           </p>
-          {patient && patient.allergies.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {patient.allergies.map((a) => (
-                <span
-                  key={a}
-                  className="inline-flex items-center gap-1 rounded-full bg-status-warning-bg px-2 py-0.5 text-[10px] font-medium text-status-warning"
-                >
-                  ⚠ {a}
-                </span>
-              ))}
-            </div>
-          )}
         </div>
       </div>
 
-      {/* Status pills */}
-      <div className="flex flex-wrap items-center gap-1.5 rounded-2xl border border-sand-200 bg-white p-4 text-[11px]">
+      {patient && patient.allergies.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {patient.allergies.map((a) => (
+            <span
+              key={a}
+              className="inline-flex items-center gap-1 rounded-full bg-status-danger-bg px-2 py-0.5 text-[10px] font-medium text-status-danger"
+            >
+              ⚠ {a}
+            </span>
+          ))}
+        </div>
+      )}
+
+      <div className="ml-auto flex flex-wrap items-center gap-1.5 text-[11px]">
         <Pill label="Cycles" value={status ? String(status.cycle_n) : "—"} />
         <Pill
           label="Loop"
@@ -571,38 +529,37 @@ function PatientBanner({
           value={status?.is_unlocked ? "unlocked" : "locked"}
           tone={status?.is_unlocked ? "warn" : "good"}
         />
-        <span className="ml-auto rounded-full bg-sand-100 px-2 py-0.5 font-mono text-[10px] text-gray-500">
-          {clock}
-        </span>
       </div>
 
-      {/* Next round + chart link */}
-      <div className="flex items-center justify-between gap-3 rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="flex items-center gap-3 border-l border-sand-200 pl-4">
         <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-            Next round
+          <p className="text-[10px] text-gray-400">Next round</p>
+          <p className="font-mono text-sm text-gray-900">
+            <span className="font-semibold">{nextRound?.time ?? "—"}</span>
+            <span className="ml-2 text-[11px] font-normal text-gray-500">
+              {nextRound?.in ?? "no schedule"}
+            </span>
           </p>
-          <p className="font-mono text-base text-gray-900">
-            {nextRound?.time ?? "—"}
-          </p>
-          <p className="text-[11px] text-gray-500">{nextRound?.in ?? "no schedule set"}</p>
         </div>
-        {patient ? (
+        {patient && (
           <Link
             href={`/patients/${patient.id}`}
-            className="inline-flex items-center gap-1 rounded-full border border-olive-300 bg-olive-700 px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:bg-olive-800"
+            className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-700 transition-colors hover:bg-sand-50"
           >
-            View chart →
+            View chart
           </Link>
-        ) : (
-          <span className="text-[11px] text-gray-400">No patient</span>
         )}
       </div>
+      <span className="hidden font-mono text-[10px] text-gray-400 sm:inline">
+        {clock}
+      </span>
     </div>
   );
 }
 
-function StepsCard({
+// ──────────────────────────── StepsRow (inline) ────────────────────────────
+
+function StepsRow({
   stepIdx,
   cycleN,
   clock,
@@ -613,15 +570,15 @@ function StepsCard({
 }) {
   const steps = ["Verify patient", "Eject pill", "Confirm intake", "Sign off"];
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-4">
-      <div className="flex items-center gap-2">
+    <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
+      <div className="flex flex-1 flex-wrap items-center gap-2">
         {steps.map((label, i) => {
           const done = i < stepIdx;
           const current = i === stepIdx;
           return (
-            <div key={label} className="flex flex-1 items-center gap-2">
+            <div key={label} className="flex items-center gap-2">
               <div
-                className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
+                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
                   done
                     ? "bg-status-success-bg text-status-success"
                     : current
@@ -632,7 +589,7 @@ function StepsCard({
                 {done ? "✓" : i + 1}
               </div>
               <span
-                className={`truncate text-xs ${
+                className={`text-xs ${
                   current ? "font-semibold text-gray-900" : "text-gray-500"
                 }`}
               >
@@ -640,23 +597,23 @@ function StepsCard({
               </span>
               {i < steps.length - 1 && (
                 <span
-                  className={`h-px flex-1 ${
-                    done ? "bg-olive-400" : "bg-sand-200"
-                  }`}
+                  className={`h-px w-6 ${done ? "bg-olive-400" : "bg-sand-200"}`}
                 />
               )}
             </div>
           );
         })}
       </div>
-      <p className="mt-2 text-[10px] uppercase tracking-wider text-gray-400">
-        Round · cycle {cycleN} · {clock}
+      <p className="font-mono text-[10px] uppercase tracking-wider text-gray-400">
+        {hourLabel()} round · cycle {cycleN} · {clock}
       </p>
     </div>
   );
 }
 
-function ThisPassList({
+// ──────────────────────────── ThisPassRow (horizontal chips) ────────────────────────────
+
+function ThisPassRow({
   slots,
   currentSlot,
   confirmed,
@@ -672,33 +629,30 @@ function ThisPassList({
   ).length;
 
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-4">
-      <div className="mb-2 flex items-center justify-between">
-        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-          This pass
-        </p>
-        <span className="text-[10px] text-gray-400">
-          {doneCount} / {total} done
-        </span>
-      </div>
-      <div className="space-y-1.5">
+    <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
+      <span className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+        This pass
+      </span>
+      <div className="flex flex-1 flex-wrap items-center gap-2">
         {display.length === 0 && (
-          <p className="text-xs text-gray-400">No medications loaded for this patient.</p>
+          <span className="text-xs text-gray-400">No medications loaded.</span>
         )}
         {display.map((s, i) => {
           const isDone = confirmed.has(s.slot);
           const isCurrent = currentSlot?.slot === s.slot && !isDone;
           return (
-            <div
+            <span
               key={s.id}
-              className={`flex items-center gap-2 rounded-xl px-3 py-1.5 text-xs ${
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs ${
                 isCurrent
                   ? "bg-olive-50 ring-1 ring-olive-300"
+                  : isDone
+                  ? "bg-sand-50 text-gray-400"
                   : "bg-sand-50"
               }`}
             >
               <span
-                className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold ${
                   isDone
                     ? "bg-status-success-bg text-status-success"
                     : isCurrent
@@ -708,36 +662,34 @@ function ThisPassList({
               >
                 {isDone ? "✓" : i + 1}
               </span>
-              <span className={`flex-1 truncate ${isCurrent ? "font-semibold text-gray-900" : "text-gray-700"}`}>
+              <span className={isDone ? "line-through" : ""}>
                 {s.name}
+                {s.pills_per_dose > 1 ? ` ×${s.pills_per_dose}` : ""}
               </span>
-              <span className="rounded-full bg-sand-100 px-2 py-0.5 font-mono text-[10px] text-gray-500">
-                S{String(s.slot).padStart(2, "0")}
+              <span className="rounded-full bg-sand-100 px-1.5 py-0.5 font-mono text-[10px] text-gray-500">
+                S{s.slot}
               </span>
-            </div>
+            </span>
           );
         })}
       </div>
+      <span className="text-[10px] uppercase tracking-wider text-gray-400">
+        {doneCount} / {total} done
+      </span>
     </div>
   );
 }
 
-function ConfirmCard({
+// ──────────────────────────── ConfirmHeader (bare) ────────────────────────────
+
+function ConfirmHeader({
   stepIdx,
   patient,
   slot,
-  ejectedSlot,
-  drawerUnlocked,
-  anyEmpty,
-  anyLow,
 }: {
   stepIdx: number;
   patient: Patient | null;
   slot: SlotInfo | null;
-  ejectedSlot: number | null;
-  drawerUnlocked: boolean;
-  anyEmpty: boolean;
-  anyLow: boolean;
 }) {
   const stepLabels = ["Verify patient", "Eject pill", "Confirm intake", "Sign off"];
   const headline =
@@ -752,39 +704,62 @@ function ConfirmCard({
       : "Round complete.";
 
   return (
-    <div className="rounded-2xl border border-sand-200 bg-white p-5">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-[2fr_1fr]">
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-olive-600">
-            Step {Math.min(stepIdx + 1, 4)} of 4 · {stepLabels[Math.min(stepIdx, 3)]}
-          </p>
-          <h2 className="mt-1 font-[family-name:var(--font-display)] text-xl text-gray-900">
-            {headline}
-          </h2>
-          <p className="mt-1 text-xs text-gray-600">
-            {slot ? (
-              <>
-                <span className="font-semibold text-gray-800">{slot.name}</span>
-                {slot.pills_per_dose > 1 ? ` (×${slot.pills_per_dose})` : ""} from slot{" "}
-                <span className="font-mono">{String(slot.slot).padStart(2, "0")}</span>.
-              </>
-            ) : (
-              "Awaiting active medication."
-            )}{" "}
-            Watch the patient camera and confirm — or override if the AI got it wrong.
-          </p>
-        </div>
-        <div className="flex flex-wrap content-start gap-1.5">
-          <StateChip label="Ready" active={!ejectedSlot && stepIdx <= 1} />
-          <StateChip label="Ejected" active={ejectedSlot !== null} tone="olive" />
-          <StateChip label="Low" active={anyLow} tone="warn" />
-          <StateChip label="Empty" active={anyEmpty} tone="danger" />
-          <StateChip label={drawerUnlocked ? "Unlocked" : "Locked"} active tone={drawerUnlocked ? "warn" : "neutral"} />
-        </div>
+    <div className="flex flex-col gap-3 px-1 pt-2 md:flex-row md:items-end md:justify-between">
+      <div className="min-w-0">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+          Step {Math.min(stepIdx + 1, 4)} of 4 · {stepLabels[Math.min(stepIdx, 3)]}
+        </p>
+        <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl text-gray-900">
+          {headline}
+        </h2>
+        <p className="mt-1 text-xs text-gray-600">
+          {slot ? (
+            <>
+              <span className="font-semibold text-gray-800">
+                {slot.name}
+                {slot.pills_per_dose > 1 ? ` ×${slot.pills_per_dose}` : ""}
+              </span>{" "}
+              from slot{" "}
+              <span className="font-mono">{String(slot.slot).padStart(2, "0")}</span>.
+            </>
+          ) : (
+            "Awaiting active medication."
+          )}{" "}
+          Watch the patient camera and confirm — or override if the AI got it wrong.
+        </p>
       </div>
+      <StateLegend />
     </div>
   );
 }
+
+function StateLegend() {
+  const items: { label: string; cls: string }[] = [
+    { label: "Ready",   cls: "bg-status-success" },
+    { label: "Ejected", cls: "bg-olive-700" },
+    { label: "Low",     cls: "bg-status-warning" },
+    { label: "Empty",   cls: "bg-status-danger" },
+    { label: "Locked",  cls: "bg-sand-300" },
+  ];
+  return (
+    <div className="flex flex-wrap gap-3 md:gap-4">
+      {items.map((it) => (
+        <span
+          key={it.label}
+          className="inline-flex items-center gap-1 text-[10px] uppercase tracking-wider text-gray-500"
+        >
+          <span
+            className={`inline-block h-1.5 w-1.5 rounded-full ${it.cls}`}
+            aria-hidden
+          />
+          {it.label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+// ──────────────────────────── SlotGrid ────────────────────────────
 
 function SlotGrid({
   slots,
@@ -841,7 +816,7 @@ function SlotGrid({
         </span>
       </div>
 
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
         {slotsByIndex.map((s, i) => {
           const slot = i;
           const state = s ? deriveSlotState(s, ejectedSlot) : "locked";
@@ -860,9 +835,7 @@ function SlotGrid({
                 </span>
                 {isBusy && <span className="text-[10px]">…</span>}
               </div>
-              <div className="truncate font-semibold">
-                {s?.name ?? "—"}
-              </div>
+              <div className="truncate font-semibold">{s?.name ?? "—"}</div>
               <div className="flex items-center justify-between">
                 <span className="text-[11px] tabular-nums">
                   {s ? `${s.quantity} pills` : "empty"}
@@ -878,6 +851,8 @@ function SlotGrid({
     </div>
   );
 }
+
+// ──────────────────────────── CameraTile ────────────────────────────
 
 function CameraTile({
   label,
@@ -920,6 +895,8 @@ function CameraTile({
     </div>
   );
 }
+
+// ──────────────────────────── AIIntakeCheck ────────────────────────────
 
 function AIIntakeCheck({
   intake,
@@ -1032,6 +1009,8 @@ function AIIntakeCheck({
     </div>
   );
 }
+
+// ──────────────────────────── ActionBar ────────────────────────────
 
 function ActionBar({
   intake,
@@ -1164,33 +1143,6 @@ function Pill({
     <span className="inline-flex items-center gap-1 rounded-full border border-sand-200 bg-white px-2.5 py-1">
       <span className="text-[10px] uppercase tracking-wider text-gray-400">{label}</span>
       <span className={`font-semibold tabular-nums ${toneCls}`}>{value}</span>
-    </span>
-  );
-}
-
-function StateChip({
-  label,
-  active,
-  tone,
-}: {
-  label: string;
-  active: boolean;
-  tone?: "olive" | "warn" | "danger" | "neutral";
-}) {
-  const cls = !active
-    ? "bg-sand-50 text-gray-400 border-sand-200"
-    : tone === "olive"
-    ? "bg-olive-700 text-white border-olive-700"
-    : tone === "warn"
-    ? "bg-status-warning-bg text-status-warning border-status-warning-bg"
-    : tone === "danger"
-    ? "bg-status-danger-bg text-status-danger border-status-danger-bg"
-    : "bg-sand-100 text-gray-700 border-sand-200";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-1 text-[11px] font-medium ${cls}`}
-    >
-      {label}
     </span>
   );
 }
