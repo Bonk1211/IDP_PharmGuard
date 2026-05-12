@@ -406,6 +406,8 @@ export default function DispenserGuidedPage() {
     ? `${intake.instruction} · ${Math.round((intake.hold_progress ?? 0) * 100)}%`
     : intake?.result === "passed"
     ? "✓ Intake confirmed"
+    : intake?.result === "missing_labels"
+    ? "✗ No bottle / cup / pill seen"
     : intake?.result === "timeout"
     ? "✗ Intake timed out"
     : "Idle";
@@ -728,7 +730,10 @@ export default function DispenserGuidedPage() {
                 expected={currentSlot?.name ?? null}
               />
               <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[3fr_4fr]">
-                <AIIntakeCheck intake={intake} patient={activePatient} />
+                <div className="space-y-4">
+                  <AIIntakeCheck intake={intake} patient={activePatient} />
+                  <Layer2LabelPanel intake={intake} now={now} />
+                </div>
                 <CameraTile
                   label="Cam 1 · Patient"
                   url={cam1Src}
@@ -1226,7 +1231,7 @@ function IntakeReportCard({
 
   return (
     <div className={`rounded-2xl border ${tonePalette.border} ${tonePalette.bg} p-4`}>
-      {/* Headline */}
+      {/* Headline — outcome + meta on the left, proof thumbnail on the right. */}
       <div className="flex items-start gap-3">
         <span
           className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-lg font-bold ${tonePalette.text}`}
@@ -1252,32 +1257,24 @@ function IntakeReportCard({
             </span>
           </p>
         </div>
+        {verify?.snapshot_b64 && (
+          <figure className="hidden sm:block shrink-0">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={`data:image/jpeg;base64,${verify.snapshot_b64}`}
+              alt="Annotated tray snapshot"
+              className="h-16 w-24 rounded-lg border border-sand-200 bg-black object-cover"
+              title={
+                verify.top
+                  ? `${verify.top.class_name} · ${Math.round(
+                      verify.top.confidence * 100,
+                    )}% (cam 0 · pill_detector.pt)`
+                  : "cam 0 · pill_detector.pt"
+              }
+            />
+          </figure>
+        )}
       </div>
-
-      {/* Annotated tray snapshot — proof captured at verify time. */}
-      {verify?.snapshot_b64 && (
-        <figure className="mt-4 overflow-hidden rounded-xl border border-sand-200 bg-black">
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`data:image/jpeg;base64,${verify.snapshot_b64}`}
-            alt="Annotated tray snapshot at dispense"
-            className="max-h-64 w-full object-contain"
-          />
-          <figcaption className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-1.5 text-[11px] text-gray-600">
-            <span>
-              <span className="font-semibold text-gray-900">
-                {verify.top?.class_name ?? "no detection"}
-              </span>
-              {verify.top
-                ? ` · ${Math.round(verify.top.confidence * 100)}% confidence`
-                : ""}
-            </span>
-            <span className="font-mono text-[10px] text-gray-400">
-              proof · cam 0 · pill_detector.pt
-            </span>
-          </figcaption>
-        </figure>
-      )}
 
       {/* KPI tiles */}
       <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
@@ -1919,6 +1916,115 @@ function AIIntakeCheck({
         </span>
         <span>conf: {intake ? (intake.confidence ?? 0).toFixed(2) : "—"}</span>
         <span>step: {intake ? `${(intake.step_index ?? 0) + 1}/${intake.total_steps}` : "—"}</span>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── Layer2LabelPanel ────────────────────────────
+
+// Live readout of AWS Rekognition DetectLabels evidence collected during
+// the swallow window. Hard-gate companion to AIIntakeCheck — intake only
+// confirms when both MediaPipe FSM passes AND at least one required label
+// appears here. Empty `labels_required` => layer disabled server-side.
+function Layer2LabelPanel({
+  intake,
+  now,
+}: {
+  intake: IntakeState | null;
+  now: Date;
+}) {
+  const required = intake?.labels_required ?? [];
+  const seenAt = intake?.labels_seen_at ?? {};
+  const satisfied = intake?.labels_satisfied ?? false;
+  const disabled = required.length === 0;
+  const nowMs = now.getTime();
+
+  if (disabled) {
+    return (
+      <div className="rounded-2xl border border-sand-200 bg-white p-4">
+        <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gray-400">
+          Layer 2 · Object evidence
+        </p>
+        <p className="text-xs text-gray-500">
+          Disabled — set <code>INTAKE_LABEL_ENABLED=1</code> on the Pi to require
+          bottle / cup / pill evidence alongside MediaPipe.
+        </p>
+      </div>
+    );
+  }
+
+  const matchedCount = required.filter((r) => r in seenAt).length;
+
+  return (
+    <div className="rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="flex items-start gap-3">
+        <div
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-base font-bold ${
+            satisfied
+              ? "bg-status-success-bg text-status-success"
+              : "bg-olive-50 text-olive-700"
+          }`}
+        >
+          {satisfied ? "✓" : "…"}
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="mb-0.5 text-[10px] font-medium uppercase tracking-wider text-gray-400">
+            Layer 2 · Object evidence
+          </p>
+          <p className="text-sm font-semibold text-gray-900">
+            {satisfied
+              ? "Required object seen"
+              : intake?.running
+              ? "Watching for bottle / cup / pill…"
+              : "Awaiting cycle"}
+          </p>
+          <p className="text-[11px] text-gray-500">
+            {matchedCount}/1 match{matchedCount === 1 ? "" : "es"} from{" "}
+            {required.length} required label{required.length === 1 ? "" : "s"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 space-y-1.5">
+        {required.map((label) => {
+          const tsMs = seenAt[label] ? seenAt[label] * 1000 : null;
+          const ageS = tsMs != null ? Math.max(0, (nowMs - tsMs) / 1000) : null;
+          const ok = tsMs != null;
+          return (
+            <div
+              key={label}
+              className="flex items-center gap-2 rounded-xl bg-sand-50 px-2.5 py-1.5 text-xs"
+            >
+              <span
+                className={`inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] ${
+                  ok
+                    ? "bg-status-success-bg text-status-success"
+                    : "bg-sand-200 text-gray-400"
+                }`}
+                aria-hidden
+              >
+                {ok ? "✓" : "·"}
+              </span>
+              <span className="flex-1 capitalize text-gray-700">{label}</span>
+              <span className="font-mono text-[11px] text-gray-500">
+                {ageS == null
+                  ? "not seen"
+                  : ageS < 1
+                  ? "just now"
+                  : `${ageS.toFixed(1)}s ago`}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-gray-400">
+        <span className="rounded-full bg-sand-100 px-2 py-0.5 font-mono">
+          model: aws-rekognition-detect-labels
+        </span>
+        <span>seen: {intake?.labels_seen?.length ?? 0} unique</span>
+        <span>mediapipe: {intake?.mediapipe_complete ? "✓" : "—"}</span>
       </div>
     </div>
   );

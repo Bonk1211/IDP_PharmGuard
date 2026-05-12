@@ -418,9 +418,24 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
             else:
                 await asyncio.to_thread(state.drawer_lock.hold_unlocked)
             t_drawer = time.perf_counter()
-            pill_taken_actual = True
-            if not settings.bench_mode:
-                await asyncio.to_thread(state.monitor.watch_for_swallow, 60)
+            if settings.bench_mode:
+                # Bench skips intake verification — keep historic behavior
+                # so accuracy runs aren't blocked on a missing face/bottle.
+                pill_taken_actual = True
+            else:
+                # Layer-2 hard gate: watch_for_swallow returns True only when
+                # MediaPipe FSM completed AND (Layer-2 disabled OR at least
+                # one required label was seen during the window). Anything
+                # else lands as pill_taken=False and the cycle reports it.
+                pill_taken_actual = await asyncio.to_thread(
+                    state.monitor.watch_for_swallow, 60
+                )
+                if not pill_taken_actual:
+                    terminal = state.monitor.get_state().get("result")
+                    log.warning(
+                        "Intake gate failed (result=%s) — pill_taken stays False",
+                        terminal,
+                    )
         else:
             log.warning(
                 "Pill-ID verification failed (slot=%d, conf=%s); drawer stays "

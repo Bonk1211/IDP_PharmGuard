@@ -19,6 +19,9 @@ websockets>=12.0
 # ── Data plane ──
 supabase>=2.0.0
 requests>=2.31.0,<3.0.0
+# AWS Rekognition (CompareFaces + DetectLabels). boto3 wheel works on
+# aarch64 piwheels — no platform_machine gating needed.
+boto3>=1.34.0
 
 # ── ML / vision ──
 ultralytics>=8.0.0,<9.0.0

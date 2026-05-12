@@ -52,10 +52,20 @@ export type IntakeState = {
   face_visible: boolean;
   hands_count: number;
   history: IntakeStepHistoryRow[];
-  result: "passed" | "timeout" | null;
+  // Layer-2 hard gate extends the terminal set with "missing_labels":
+  // MediaPipe FSM completed but no required label (bottle/cup/pill/...)
+  // was seen during the swallow window.
+  result: "passed" | "timeout" | "missing_labels" | null;
   started_at: number | null;
   ended_at: number | null;
   updated_at: number | null;
+  // ── Layer-2 (AWS Rekognition DetectLabels) state ───────────────────
+  // Empty arrays / false flags when label layer is disabled server-side.
+  labels_seen: string[];                  // ordered unique label names
+  labels_seen_at: Record<string, number>; // {label_lower: epoch_seconds}
+  labels_required: string[];              // snapshot of required set (lower)
+  labels_satisfied: boolean;              // any seen ∈ required?
+  mediapipe_complete: boolean;            // all 3 FSM steps done
 };
 
 export function isDeviceConfigured(): boolean {

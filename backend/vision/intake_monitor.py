@@ -36,6 +36,7 @@ import logging
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -88,10 +89,16 @@ def _initial_state() -> dict:
         "face_visible": False,
         "hands_count": 0,
         "history": [],               # completed steps with timestamps
-        "result": None,              # "passed" | "timeout" | None
+        "result": None,              # "passed" | "timeout" | "missing_labels" | None
         "started_at": None,          # epoch seconds
         "ended_at": None,
         "updated_at": time.time(),
+        # ── Layer-2 (DetectLabels) state ───────────────────────────────
+        "labels_seen": [],           # ordered unique label names as detected
+        "labels_seen_at": {},        # {label_lower: epoch_seconds} — recency
+        "labels_required": [],       # snapshot of required set for the UI
+        "labels_satisfied": False,   # any seen label in the required set?
+        "mediapipe_complete": False, # all 3 FSM steps done (regardless of labels)
     }
 
 
@@ -183,6 +190,15 @@ class IntakeMonitor:
         self._state: dict = _initial_state()
         self._smoothed_conf: float = 0.0
         self._timer_started_at: float = 0.0
+
+        # Layer-2 DetectLabels sampler — submits frames every
+        # ``settings.intake_label_poll_interval_s`` to a thread pool while
+        # ``watch_for_swallow`` is running. Workers are fire-and-forget;
+        # results land in ``_state`` under the lock.
+        self._label_pool = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="intake-labels"
+        )
+        self._last_label_submit: float = 0.0
 
     # ---- camera ----
     def _ensure_camera(self) -> None:
@@ -277,11 +293,27 @@ class IntakeMonitor:
                     log.info("Intake game: step %d (%s) PASSED", step_idx + 1, step_def.name)
                     next_idx = step_idx + 1
                     if next_idx >= len(_STEPS):
-                        self._state["result"] = "passed"
+                        # MediaPipe FSM complete — Layer-2 gate decides
+                        # whether to flip ``result`` to "passed". When
+                        # the label layer is disabled OR labels already
+                        # satisfied, advance immediately; otherwise wait
+                        # for ``_run_label_call`` (or watch_for_swallow's
+                        # timeout) to set the terminal state.
+                        from config import settings as _s
+                        self._state["mediapipe_complete"] = True
                         self._state["ended_at"] = time.time()
-                        self._state["running"] = False
                         self._state["hold_progress"] = 1.0
-                        log.info("Intake game: COMPLETE")
+                        if (not _s.intake_label_enabled) or self._state["labels_satisfied"]:
+                            self._state["result"] = "passed"
+                            self._state["running"] = False
+                            log.info("Intake game: COMPLETE (mediapipe%s)",
+                                     "" if not _s.intake_label_enabled else " + labels")
+                        else:
+                            log.info(
+                                "Intake: MediaPipe complete — waiting for "
+                                "Layer-2 labels (seen=%s)",
+                                list(self._state["labels_seen_at"].keys()),
+                            )
                     else:
                         next_def = _STEPS[next_idx]
                         self._state["step_index"] = next_idx
@@ -297,9 +329,92 @@ class IntakeMonitor:
 
             return dict(self._state)
 
+    # ---- Layer-2 (DetectLabels) sampler ----
+    def _maybe_submit_label_call(self, frame: np.ndarray) -> None:
+        """Throttled fire-and-forget DetectLabels submission.
+
+        Called from ``watch_for_swallow``'s tick loop. Submits at most one
+        call per ``settings.intake_label_poll_interval_s`` and only when
+        the label layer is enabled. The frame is copied before submit
+        because some camera backends mutate the returned buffer in place.
+        """
+        from config import settings
+        if not settings.intake_label_enabled:
+            return
+        now = time.time()
+        if now - self._last_label_submit < settings.intake_label_poll_interval_s:
+            return
+        self._last_label_submit = now
+        frame_copy = frame.copy()
+        try:
+            self._label_pool.submit(self._run_label_call, frame_copy)
+        except RuntimeError:
+            # Pool already shut down (close called mid-cycle). Skip silently.
+            pass
+
+    def _run_label_call(self, frame: np.ndarray) -> None:
+        """Worker body: encode JPEG, call DetectLabels, fold results into state.
+
+        Soft-fails on AWS error (missing creds, throttling) — labels just
+        never get recorded, watch_for_swallow eventually marks the run
+        ``missing_labels`` if MediaPipe completed without any match.
+        """
+        from config import settings
+        from services.label_detector import detect_labels, encode_frame_jpeg
+
+        try:
+            jpeg = encode_frame_jpeg(frame)
+        except Exception:
+            log.exception("label encode failed")
+            return
+        resp = detect_labels(
+            jpeg, min_confidence=settings.intake_label_min_confidence
+        )
+        if resp["error"]:
+            return
+
+        required = settings.intake_label_required_set  # lowercased set
+        now = time.time()
+        with self._lock:
+            seen_at: dict = self._state["labels_seen_at"]
+            seen_list: list = self._state["labels_seen"]
+            for lbl in resp["labels"]:
+                nm = (lbl["name"] or "").strip()
+                if not nm:
+                    continue
+                key = nm.lower()
+                if key not in seen_at:
+                    seen_list.append(nm)
+                seen_at[key] = now
+            matched = required & set(seen_at.keys())
+            self._state["labels_satisfied"] = bool(matched)
+            # Hard gate: if MediaPipe FSM already completed and labels
+            # have just satisfied → flip the run to "passed".
+            if (
+                self._state["mediapipe_complete"]
+                and self._state["labels_satisfied"]
+                and self._state["result"] is None
+            ):
+                self._state["result"] = "passed"
+                self._state["running"] = False
+                log.info(
+                    "Intake: PASSED (mediapipe + labels=%s)",
+                    sorted(matched),
+                )
+
     # ---- cycle integration ----
     def watch_for_swallow(self, timeout_s: float = 60.0) -> bool:
-        """Run the FSM until completion or timeout. Returns True on success."""
+        """Run the FSM until completion or timeout. Returns True on success.
+
+        Layer-2 hard gate: success requires BOTH MediaPipe FSM completion
+        AND at least one label from ``settings.intake_label_required_set``
+        observed during the window. Terminal states:
+            "passed"          — both layers OK
+            "missing_labels"  — MediaPipe complete but no required label seen
+            "timeout"         — MediaPipe never completed
+        """
+        from config import settings
+
         try:
             self._ensure_camera()
         except Exception:
@@ -308,9 +423,13 @@ class IntakeMonitor:
 
         # Reset state so /api/device/intake reflects this run from step 1.
         self.reset()
+        required = sorted(settings.intake_label_required_set)
         with self._lock:
             self._state["running"] = True
             self._state["started_at"] = time.time()
+            # Expose required set to the UI even when label layer disabled
+            # (empty list signals "no Layer-2 gate" to the dashboard).
+            self._state["labels_required"] = required if settings.intake_label_enabled else []
 
         deadline = time.time() + timeout_s
         while time.time() < deadline:
@@ -320,21 +439,27 @@ class IntakeMonitor:
                 continue
             frame = cv2.flip(frame, 1)  # mirror for selfie-cam ergonomics
             self.process_frame(frame)
+            self._maybe_submit_label_call(frame)
             with self._lock:
                 if self._state["result"] == "passed":
                     return True
             time.sleep(0.05)  # ~20 fps inner cap
 
-        # Timeout.
+        # Timeout. Pick the most informative terminal state.
         with self._lock:
-            self._state["result"] = "timeout"
+            if self._state["mediapipe_complete"] and not self._state["labels_satisfied"]:
+                self._state["result"] = "missing_labels"
+            else:
+                self._state["result"] = "timeout"
             self._state["ended_at"] = time.time()
             self._state["running"] = False
+            terminal = self._state["result"]
             last_step = self._state["step_index"]
             last_name = self._state["step_name"]
         log.warning(
-            "Intake game timed out after %.1fs at step %d (%s)",
-            timeout_s, last_step + 1, last_name,
+            "Intake ended (%s) after %.1fs at step %d (%s) labels_seen=%s",
+            terminal, timeout_s, last_step + 1, last_name,
+            list(self._state["labels_seen_at"].keys()),
         )
         return False
 
@@ -348,5 +473,11 @@ class IntakeMonitor:
             pass
         try:
             self._hands.close()
+        except Exception:
+            pass
+        try:
+            # Drop in-flight label calls — their results would land in a
+            # dead state dict anyway.
+            self._label_pool.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass

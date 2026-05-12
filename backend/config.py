@@ -78,11 +78,39 @@ class Settings(BaseSettings):
     # (which would also disable chat + brief).
     agent_flag_gemini_enabled: bool = True
 
+    # ── AWS Rekognition (face verify + intake label detection) ───────────
+    # Shared by services/face_verify.py and services/label_detector.py.
+    # Defaults are empty/safe so import-time stays side-effect-free; the
+    # services surface 503 / soft-fail at call time when keys are missing.
+    aws_region: str = "ap-southeast-1"
+    aws_access_key_id: str = ""
+    aws_secret_access_key: str = ""
+
+    # ── Layer-2 intake object detection (AWS Rekognition DetectLabels) ──
+    # Hard gate on top of MediaPipe FSM: intake passes only when MediaPipe
+    # completes AND at least one required label is seen during the window.
+    # Setting intake_label_enabled=False restores MediaPipe-only behavior.
+    intake_label_enabled: bool = True
+    intake_label_required: str = "Bottle,Cup,Mug,Drink,Drinking,Pill"
+    intake_label_min_confidence: float = 70.0
+    intake_label_poll_interval_s: float = 1.5
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
     def device_tokens_set(self) -> set[str]:
         return {t.strip() for t in self.device_tokens.split(",") if t.strip()}
+
+    @property
+    def intake_label_required_set(self) -> set[str]:
+        """Lowercased set of required labels for Layer-2 intake hard gate.
+        Compared (case-insensitive) against label names from DetectLabels.
+        """
+        return {
+            x.strip().lower()
+            for x in self.intake_label_required.split(",")
+            if x.strip()
+        }
 
     def model_post_init(self, _ctx) -> None:
         # Resolve the queue path default at instance time so Path.home() works

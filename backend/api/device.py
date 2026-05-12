@@ -377,7 +377,9 @@ async def intake_state(request: Request):
     state = getattr(loop, "_state", None) if loop else None
     monitor = getattr(state, "monitor", None) if state else None
     if monitor is None:
-        # Headless or cycle not yet started — synthesize idle state.
+        # Headless or cycle not yet started — synthesize idle state. Keep
+        # shape in sync with vision/intake_monitor.py:_initial_state so the
+        # frontend's IntakeState type lines up in headless mode too.
         return {
             "running": False,
             "step_index": 0,
@@ -394,6 +396,12 @@ async def intake_state(request: Request):
             "started_at": None,
             "ended_at": None,
             "updated_at": None,
+            # Layer-2 (DetectLabels) fields — empty/false in headless mode.
+            "labels_seen": [],
+            "labels_seen_at": {},
+            "labels_required": [],
+            "labels_satisfied": False,
+            "mediapipe_complete": False,
         }
     return monitor.get_state()
 
