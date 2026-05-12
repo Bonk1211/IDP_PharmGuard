@@ -752,6 +752,16 @@ export default function DispenserGuidedPage() {
               />
               <ConfirmHeader patient={activePatient} slot={currentSlot} />
               <div className="mt-4">
+                <IntakeReportCard
+                  patient={activePatient}
+                  slot={currentSlot}
+                  verify={verifyResult}
+                  intake={intake}
+                  unauthorized={unauthorized}
+                  overrideNote={overrideOpen ? overrideNote : ""}
+                />
+              </div>
+              <div className="mt-4">
                 <ActionBar
                   intake={intake}
                   currentSlot={currentSlot}
@@ -1117,6 +1127,284 @@ function SlotGrid({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── IntakeReportCard ────────────────────────────
+
+function IntakeReportCard({
+  patient,
+  slot,
+  verify,
+  intake,
+  unauthorized,
+  overrideNote,
+}: {
+  patient: Patient | null;
+  slot: SlotInfo | null;
+  verify: VerifyPillResult | null;
+  intake: IntakeState | null;
+  unauthorized: PillDetection[];
+  overrideNote: string;
+}) {
+  const expected = slot?.name ?? null;
+  const detected = verify?.top?.class_name ?? null;
+  const detConfPct = verify?.top
+    ? Math.round(verify.top.confidence * 100)
+    : null;
+  const pillMatch = verify?.match;
+
+  const fsmResult = intake?.result ?? null;
+  const fsmConfPct = intake ? Math.round(intake.confidence * 100) : 0;
+  const fsmHoldPct = intake ? Math.round(intake.hold_progress * 100) : 0;
+  const startedAt = intake?.started_at ?? null;
+  const endedAt = intake?.ended_at ?? null;
+  const nowS = Date.now() / 1000;
+  const durationS =
+    startedAt !== null ? (endedAt ?? nowS) - startedAt : null;
+
+  // Overall outcome — drives the headline + colour scheme.
+  const overall: {
+    label: string;
+    tone: "ok" | "warn" | "fail" | "pending";
+  } = (() => {
+    if (unauthorized.length > 0) return { label: "Unsafe round", tone: "fail" };
+    if (pillMatch === false) return { label: "Wrong pill on tray", tone: "fail" };
+    if (fsmResult === "passed" && (pillMatch === true || pillMatch === null))
+      return { label: "Intake confirmed", tone: "ok" };
+    if (fsmResult === "timeout")
+      return { label: "Intake timed out", tone: "warn" };
+    if (intake?.running) return { label: "Intake in progress", tone: "pending" };
+    return { label: "Awaiting confirmation", tone: "pending" };
+  })();
+
+  const tonePalette = {
+    ok: {
+      border: "border-status-success",
+      bg: "bg-status-success-bg",
+      text: "text-status-success",
+      icon: "✓",
+    },
+    warn: {
+      border: "border-status-warning",
+      bg: "bg-status-warning-bg",
+      text: "text-status-warning",
+      icon: "!",
+    },
+    fail: {
+      border: "border-status-danger",
+      bg: "bg-status-danger-bg",
+      text: "text-status-danger",
+      icon: "✗",
+    },
+    pending: {
+      border: "border-sand-200",
+      bg: "bg-white",
+      text: "text-olive-700",
+      icon: "…",
+    },
+  }[overall.tone];
+
+  const fmtTime = (s: number | null) =>
+    s === null
+      ? "—"
+      : new Date(s * 1000).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        });
+
+  const fmtDuration = (s: number | null) => {
+    if (s === null) return "—";
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const r = Math.round(s - m * 60);
+    return `${m}m ${r}s`;
+  };
+
+  return (
+    <div className={`rounded-2xl border ${tonePalette.border} ${tonePalette.bg} p-4`}>
+      {/* Headline */}
+      <div className="flex items-start gap-3">
+        <span
+          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-lg font-bold ${tonePalette.text}`}
+          aria-hidden
+        >
+          {tonePalette.icon}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">
+            Intake session report
+          </p>
+          <p className={`text-sm font-semibold ${tonePalette.text}`}>
+            {overall.label}
+          </p>
+          <p className="text-[11px] text-gray-600">
+            {patient?.name ?? "—"} ·{" "}
+            <span className="font-semibold text-gray-800">
+              {expected ?? "no medication"}
+            </span>{" "}
+            from slot{" "}
+            <span className="font-mono">
+              {slot ? String(slot.slot).padStart(2, "0") : "—"}
+            </span>
+          </p>
+        </div>
+      </div>
+
+      {/* KPI tiles */}
+      <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
+        <Kpi
+          label="Pill verify"
+          value={detected ?? "—"}
+          sub={
+            detConfPct !== null
+              ? `${detConfPct}% conf · ${
+                  pillMatch === true
+                    ? "match"
+                    : pillMatch === false
+                    ? "mismatch"
+                    : "no target"
+                }`
+              : "no detection"
+          }
+          tone={
+            pillMatch === true
+              ? "ok"
+              : pillMatch === false
+              ? "fail"
+              : detected
+              ? "pending"
+              : "warn"
+          }
+        />
+        <Kpi
+          label="Swallow FSM"
+          value={
+            fsmResult === "passed"
+              ? "Passed"
+              : fsmResult === "timeout"
+              ? "Timed out"
+              : intake?.running
+              ? "Watching"
+              : "Idle"
+          }
+          sub={`step ${(intake?.step_index ?? 0) + 1}/${
+            intake?.total_steps ?? 3
+          } · ${fsmConfPct}%`}
+          tone={
+            fsmResult === "passed"
+              ? "ok"
+              : fsmResult === "timeout"
+              ? "fail"
+              : "pending"
+          }
+        />
+        <Kpi
+          label="Hold progress"
+          value={`${fsmHoldPct}%`}
+          sub={
+            intake?.face_visible
+              ? `face seen · ${intake.hands_count} hand${
+                  intake.hands_count === 1 ? "" : "s"
+                }`
+              : "no face"
+          }
+          tone="pending"
+        />
+        <Kpi
+          label="Duration"
+          value={fmtDuration(durationS)}
+          sub={`${fmtTime(startedAt)} → ${fmtTime(endedAt)}`}
+          tone="pending"
+        />
+      </div>
+
+      {/* FSM step history */}
+      {intake && intake.history.length > 0 && (
+        <div className="mt-4">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">
+            Step history
+          </p>
+          <ul className="mt-1 space-y-1">
+            {intake.history.map((h, i) => (
+              <li
+                key={`${h.step_index}-${i}`}
+                className="flex items-center gap-2 rounded-xl bg-white px-3 py-1.5 text-xs"
+              >
+                <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-status-success-bg text-[10px] font-bold text-status-success">
+                  ✓
+                </span>
+                <span className="flex-1 text-gray-800">{h.step_name}</span>
+                <span className="font-mono text-[10px] text-gray-500">
+                  {fmtTime(h.passed_at)}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Unauthorized drug warning */}
+      {unauthorized.length > 0 && (
+        <div className="mt-3 rounded-xl border border-status-danger bg-white p-3 text-xs">
+          <p className="font-semibold text-status-danger">
+            ⚠ Unauthorized medication on tray during round
+          </p>
+          <ul className="mt-1 space-y-0.5 text-gray-700">
+            {unauthorized.map((d, i) => (
+              <li key={`${d.class_name}-${i}`}>
+                {d.class_name}{" "}
+                <span className="font-mono text-gray-500">
+                  {Math.round(d.confidence * 100)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Override note */}
+      {overrideNote.trim() && (
+        <div className="mt-3 rounded-xl border border-status-warning bg-white p-3 text-xs">
+          <p className="font-semibold text-status-warning">Operator note</p>
+          <p className="mt-1 text-gray-700">{overrideNote}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Kpi({
+  label,
+  value,
+  sub,
+  tone,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  tone: "ok" | "warn" | "fail" | "pending";
+}) {
+  const valueTone = {
+    ok: "text-status-success",
+    warn: "text-status-warning",
+    fail: "text-status-danger",
+    pending: "text-gray-900",
+  }[tone];
+  return (
+    <div className="rounded-xl bg-white p-3">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+        {label}
+      </p>
+      <p
+        className={`mt-0.5 truncate font-[family-name:var(--font-display)] text-base ${valueTone}`}
+      >
+        {value}
+      </p>
+      {sub && <p className="mt-0.5 text-[10px] text-gray-500">{sub}</p>}
     </div>
   );
 }
