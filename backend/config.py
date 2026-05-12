@@ -86,6 +86,12 @@ class Settings(BaseSettings):
     aws_access_key_id: str = ""
     aws_secret_access_key: str = ""
 
+    # ── Layer-1 face verify (AWS Rekognition CompareFaces) ──────────────
+    # Similarity 0-100; 80 is the AWS default and a reasonable demo
+    # threshold. Tighten (90+) for stricter ID, loosen if lighting on the
+    # demo cabinet is poor.
+    face_similarity_threshold: float = 80.0
+
     # ── Layer-2 intake object detection (AWS Rekognition DetectLabels) ──
     # Hard gate on top of MediaPipe FSM: intake passes only when MediaPipe
     # completes AND at least one required label is seen during the window.

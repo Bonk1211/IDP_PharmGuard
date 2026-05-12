@@ -25,11 +25,13 @@ import {
   startIntakeWatch,
   streamUrl,
   triggerDispense,
+  verifyFace,
   verifyPill,
   type DeviceStatus,
   type IntakeState,
   type PillDetection,
   type ScheduleRow,
+  type VerifyFaceResult,
   type VerifyPillResult,
 } from "@/lib/device";
 import {
@@ -168,6 +170,12 @@ export default function DispenserGuidedPage() {
   const [lastEjected, setLastEjected] = useState<number | null>(null);
   const [verifyResult, setVerifyResult] = useState<VerifyPillResult | null>(null);
   const [verifying, setVerifying] = useState<boolean>(false);
+  // Layer-1 face verify (step 0 gate). faceVerified must be true before
+  // stepIdx advances out of Identify. Resets whenever the active patient
+  // changes (next round may be for a different patient).
+  const [faceResult, setFaceResult] = useState<VerifyFaceResult | null>(null);
+  const [faceVerifying, setFaceVerifying] = useState<boolean>(false);
+  const [faceVerified, setFaceVerified] = useState<boolean>(false);
   const prevSnapUrl = useRef<string | null>(null);
   const lastStepIdxRef = useRef<number>(-1);
 
@@ -272,6 +280,15 @@ export default function DispenserGuidedPage() {
     };
   }, []);
 
+  // Reset Layer-1 face verify whenever the active patient changes — a new
+  // round may belong to a different patient and the prior pass MUST NOT
+  // carry over.
+  useEffect(() => {
+    setFaceVerified(false);
+    setFaceResult(null);
+    setFaceVerifying(false);
+  }, [activePatient?.id]);
+
   const goToStep = (idx: number) => {
     setViewIdx(Math.max(0, Math.min(idx, 4)));
   };
@@ -320,8 +337,10 @@ export default function DispenserGuidedPage() {
   const drawerUnlocked = !!status?.is_unlocked;
 
   // 0=Identify 1=Unlock 2=Dispense 3=Verify 4=Log 5=Done
+  // Layer-1 face verify pins stepIdx at 0 until faceVerified flips true.
   const stepIdx = useMemo(() => {
     if (!activePatient) return 0;
+    if (!faceVerified) return 0;
     if (
       activeSlots.length > 0 &&
       currentSlot &&
@@ -333,7 +352,7 @@ export default function DispenserGuidedPage() {
     if (intake?.running) return 3;
     if (drawerUnlocked) return 2;
     return 1;
-  }, [activePatient, intake, currentSlot, confirmedSlots, drawerUnlocked, activeSlots]);
+  }, [activePatient, faceVerified, intake, currentSlot, confirmedSlots, drawerUnlocked, activeSlots]);
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
 
@@ -586,7 +605,11 @@ export default function DispenserGuidedPage() {
                 index={1}
                 total={5}
                 eyebrow="Identify"
-                title="Confirm patient at the cabinet."
+                title={
+                  faceVerified
+                    ? "Patient identity confirmed."
+                    : "Confirm patient identity at the cabinet."
+                }
               />
               <PatientBanner
                 patient={activePatient}
@@ -594,6 +617,52 @@ export default function DispenserGuidedPage() {
                 nextRound={nextRound}
                 clock={fmtClock(now)}
               />
+              <div className="mt-4">
+                <FaceVerifySection
+                  patient={activePatient}
+                  cam1Url={cam1Src}
+                  clock={fmtClock(now)}
+                  configured={configured}
+                  verifying={faceVerifying}
+                  result={faceResult}
+                  verified={faceVerified}
+                  onVerify={async () => {
+                    if (!activePatient) return;
+                    if (!activePatient.face_reference_url) {
+                      setMsg(
+                        "No reference photo for this patient. Upload one on the patient page first.",
+                      );
+                      return;
+                    }
+                    setFaceVerifying(true);
+                    setMsg(null);
+                    try {
+                      const r = await verifyFace(activePatient.id);
+                      setFaceResult(r);
+                      if (r.ok && r.match) {
+                        setFaceVerified(true);
+                        setMsg(
+                          `Face matched (similarity ${r.similarity?.toFixed(1) ?? "?"}%). Step advanced.`,
+                        );
+                      } else if (r.ok) {
+                        setMsg(
+                          `Face did not match (similarity ${
+                            r.similarity?.toFixed(1) ?? "?"
+                          }% < threshold ${r.threshold ?? "?"}%). Re-position and retry.`,
+                        );
+                      } else {
+                        setMsg(`Face verify failed: ${r.error ?? r.status}`);
+                      }
+                    } finally {
+                      setFaceVerifying(false);
+                    }
+                  }}
+                  onReset={() => {
+                    setFaceVerified(false);
+                    setFaceResult(null);
+                  }}
+                />
+              </div>
             </>
           )}
           {viewIdx === 1 && (
@@ -931,6 +1000,211 @@ function PatientBanner({
       <span className="hidden font-mono text-[10px] text-gray-400 sm:inline">
         {clock}
       </span>
+    </div>
+  );
+}
+
+// ──────────────────────────── FaceVerifySection (step 0 gate) ────────────────────────────
+
+// Side-by-side live cam 1 + reference photo with a Verify CTA. Calls
+// /api/device/verify_face which runs AWS Rekognition CompareFaces and
+// returns similarity 0-100. Hard-gates stepIdx — Unlock card stays
+// hidden until verified=true.
+function FaceVerifySection({
+  patient,
+  cam1Url,
+  clock,
+  configured,
+  verifying,
+  result,
+  verified,
+  onVerify,
+  onReset,
+}: {
+  patient: Patient | null;
+  cam1Url: string | null;
+  clock: string;
+  configured: boolean;
+  verifying: boolean;
+  result: VerifyFaceResult | null;
+  verified: boolean;
+  onVerify: () => void;
+  onReset: () => void;
+}) {
+  const hasReference = !!patient?.face_reference_url;
+  const sim = result?.similarity;
+  const threshold = result?.threshold;
+
+  let statusLabel: string;
+  let statusTone: "ok" | "warn" | "danger" | "idle";
+  if (!patient) {
+    statusLabel = "No active patient";
+    statusTone = "idle";
+  } else if (!hasReference) {
+    statusLabel = "No reference photo uploaded";
+    statusTone = "warn";
+  } else if (verified) {
+    statusLabel = sim != null ? `Verified · ${sim.toFixed(1)}%` : "Verified";
+    statusTone = "ok";
+  } else if (verifying) {
+    statusLabel = "Comparing with AWS Rekognition…";
+    statusTone = "idle";
+  } else if (result?.error) {
+    statusLabel = `Error · ${result.error.slice(0, 60)}`;
+    statusTone = "danger";
+  } else if (result && !result.match && sim != null) {
+    statusLabel = `No match · ${sim.toFixed(1)}% < ${threshold ?? "?"}%`;
+    statusTone = "danger";
+  } else {
+    statusLabel = "Awaiting verification";
+    statusTone = "idle";
+  }
+
+  const toneClasses: Record<typeof statusTone, string> = {
+    ok: "bg-status-success-bg text-status-success",
+    warn: "bg-status-warning-bg text-status-warning",
+    danger: "bg-status-danger-bg text-status-danger",
+    idle: "bg-olive-50 text-olive-700",
+  };
+
+  const canVerify =
+    !!patient && hasReference && configured && !verifying && !verified;
+
+  return (
+    <div className="rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+            Layer 1 · Face verify (AWS Rekognition CompareFaces)
+          </p>
+          <p className="mt-0.5 text-sm font-semibold text-gray-900">
+            {patient ? patient.name : "—"}
+          </p>
+        </div>
+        <span
+          className={`rounded-full px-3 py-1 text-[11px] font-semibold ${toneClasses[statusTone]}`}
+        >
+          {statusLabel}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        {/* Reference photo */}
+        <figure className="overflow-hidden rounded-xl border border-sand-200 bg-sand-50">
+          <div className="flex aspect-[4/3] items-center justify-center bg-sand-100">
+            {hasReference ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={patient!.face_reference_url!}
+                alt={`${patient!.name} reference`}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="px-4 text-center text-[11px] text-gray-500">
+                No reference photo yet.
+                {patient && (
+                  <>
+                    <br />
+                    <Link
+                      href={`/patients/${patient.id}`}
+                      className="font-semibold text-olive-700 underline"
+                    >
+                      Upload on patient page →
+                    </Link>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+          <figcaption className="flex items-center justify-between bg-white px-3 py-1.5 text-[10px] text-gray-500">
+            <span>Reference photo</span>
+            <span className="font-mono">stored</span>
+          </figcaption>
+        </figure>
+
+        {/* Live cam 1 */}
+        <figure className="overflow-hidden rounded-xl border border-sand-200 bg-black">
+          <div className="aspect-[4/3] bg-black">
+            {cam1Url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={cam1Url}
+                alt="Cam 1 live"
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-gray-400">
+                Cam 1 unavailable — check device config.
+              </div>
+            )}
+          </div>
+          <figcaption className="flex items-center justify-between bg-white px-3 py-1.5 text-[10px] text-gray-500">
+            <span>Cam 1 · live</span>
+            <span className="font-mono text-gray-400">{clock}</span>
+          </figcaption>
+        </figure>
+      </div>
+
+      {/* Similarity bar + threshold marker */}
+      {result && sim != null && threshold != null && (
+        <div className="mt-3">
+          <div className="mb-1 flex items-baseline justify-between text-[11px]">
+            <span className="font-mono text-gray-500">similarity</span>
+            <span
+              className={`font-mono font-semibold ${
+                result.match ? "text-status-success" : "text-status-danger"
+              }`}
+            >
+              {sim.toFixed(1)}% / {threshold}%
+            </span>
+          </div>
+          <div className="relative h-2 overflow-hidden rounded-full bg-sand-100">
+            <div
+              className={`h-full ${
+                result.match ? "bg-status-success" : "bg-status-danger"
+              }`}
+              style={{ width: `${Math.min(100, Math.max(0, sim))}%` }}
+            />
+            <div
+              className="absolute top-0 h-full w-px bg-gray-700"
+              style={{ left: `${Math.min(100, Math.max(0, threshold))}%` }}
+              title={`threshold ${threshold}%`}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Action row */}
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
+        {result?.latency_ms != null && (
+          <span className="mr-auto font-mono text-[10px] text-gray-400">
+            {result.latency_ms} ms · rekognition
+          </span>
+        )}
+        {verified ? (
+          <button
+            type="button"
+            onClick={onReset}
+            className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50"
+          >
+            Re-verify
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={onVerify}
+            disabled={!canVerify}
+            className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {verifying ? "Verifying…" : "Verify face"}
+            {!verifying && (
+              <span className="rounded bg-white/20 px-1 font-mono text-[10px]">
+                AWS
+              </span>
+            )}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

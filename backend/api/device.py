@@ -266,6 +266,108 @@ async def verify_pill(body: VerifyPillBody, request: Request):
     }
 
 
+# ─────────────────── Layer-1 face verify (AWS CompareFaces) ────────────
+
+
+class VerifyFaceBody(BaseModel):
+    patient_id: int = Field(ge=1, description="patients.id whose reference photo to compare.")
+
+
+@router.post("/verify_face")
+async def verify_face(body: VerifyFaceBody, request: Request):
+    """Compare one frame from cam_b against the patient's reference photo.
+
+    Flow: load patients.face_reference_url → download bytes → grab a
+    cam_b frame → JPEG encode → Rekognition CompareFaces → return verdict.
+
+    Errors:
+      503 — headless mode or cam_b not open
+      404 — patient_id not found
+      400 — patient has no face_reference_url uploaded yet
+      502 — reference photo URL fetch failed (network / 404 / RLS)
+
+    Soft-fail (200 with ``error`` populated) — AWS-side failure (missing
+    creds, throttling, no face detected). UI shows the error inline and
+    blocks the Next step until a successful compare.
+    """
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no cameras")
+    state = getattr(loop, "_state", None)
+    cam = getattr(state, "cam_b", None) if state else None
+    if cam is None or not hasattr(cam, "read_frame"):
+        raise HTTPException(status_code=503, detail="cam_1 not open")
+
+    sb = get_supabase()
+
+    def _fetch_patient():
+        return (
+            sb.table("patients")
+            .select("id, name, face_reference_url")
+            .eq("id", body.patient_id)
+            .execute()
+        )
+
+    result = await asyncio.to_thread(_fetch_patient)
+    rows = result.data or []
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"patient {body.patient_id} not found")
+    ref_url = rows[0].get("face_reference_url")
+    if not ref_url:
+        raise HTTPException(
+            status_code=400,
+            detail="patient has no face_reference_url — upload a reference photo first",
+        )
+
+    import requests
+
+    def _fetch_ref() -> bytes:
+        r = requests.get(ref_url, timeout=5)
+        r.raise_for_status()
+        return r.content
+
+    try:
+        ref_bytes = await asyncio.to_thread(_fetch_ref)
+    except Exception as exc:
+        log.warning("face reference fetch failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"reference fetch failed: {exc}")
+
+    t0 = time.monotonic()
+    frame = await asyncio.to_thread(cam.read_frame)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No frame available")
+
+    from services.face_verify import compare_faces, encode_frame_jpeg
+
+    live_bytes = await asyncio.to_thread(encode_frame_jpeg, frame)
+    verdict = await asyncio.to_thread(
+        compare_faces,
+        ref_bytes,
+        live_bytes,
+        float(settings.face_similarity_threshold),
+    )
+    latency_ms = int((time.monotonic() - t0) * 1000)
+
+    log.info(
+        "verify_face: patient=%d match=%s similarity=%s latency_ms=%d err=%s",
+        body.patient_id,
+        verdict["match"],
+        verdict["similarity"],
+        latency_ms,
+        verdict["error"],
+    )
+    return {
+        "ok": verdict["error"] is None,
+        "patient_id": body.patient_id,
+        "patient_name": rows[0].get("name"),
+        "match": bool(verdict["match"]),
+        "similarity": verdict["similarity"],
+        "threshold": float(settings.face_similarity_threshold),
+        "error": verdict["error"],
+        "latency_ms": latency_ms,
+    }
+
+
 @router.get("/snapshot")
 async def camera_snapshot(
     request: Request,

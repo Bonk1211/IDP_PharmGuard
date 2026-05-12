@@ -11,6 +11,7 @@ export interface Patient {
   contraindications: string[];
   created_at: string;
   dispenser_id: string | null;        // nullable; null = unassigned
+  face_reference_url: string | null;  // Supabase Storage public URL for face-verify
 }
 
 export interface SlotInfo {
@@ -87,6 +88,7 @@ export type PatientPatch = Partial<{
   allergies: string[];
   contraindications: string[];
   dispenser_id: string | null;
+  face_reference_url: string | null;
 }>;
 
 export async function updatePatient(id: number, patch: PatientPatch): Promise<Patient> {
@@ -98,6 +100,35 @@ export async function updatePatient(id: number, patch: PatientPatch): Promise<Pa
     .single();
   if (error) throw error;
   return data;
+}
+
+/**
+ * Upload a reference photo for the patient face-verify (Layer-1) gate.
+ *
+ * Path layout: `<patient_id>/<epoch_ms>-<filename>` — collision-free across
+ * patients and re-uploads. Bucket `patient-faces` is public (per demo
+ * choice) so the resulting URL feeds directly into Rekognition CompareFaces
+ * server-side without a signed-URL round trip.
+ *
+ * Returns the public URL on success (also persisted on the patient row).
+ * Throws on Supabase Storage / Postgres error so the caller can toast.
+ */
+export async function uploadPatientFaceReference(
+  patientId: number,
+  file: File,
+): Promise<string> {
+  const safeName = file.name.replace(/[^A-Za-z0-9._-]+/g, "_");
+  const path = `${patientId}/${Date.now()}-${safeName}`;
+  const { error: upErr } = await supabase.storage
+    .from("patient-faces")
+    .upload(path, file, {
+      contentType: file.type || "image/jpeg",
+      upsert: false,
+    });
+  if (upErr) throw upErr;
+  const { data } = supabase.storage.from("patient-faces").getPublicUrl(path);
+  await updatePatient(patientId, { face_reference_url: data.publicUrl });
+  return data.publicUrl;
 }
 
 /**

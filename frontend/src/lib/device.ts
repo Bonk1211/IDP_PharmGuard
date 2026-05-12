@@ -276,6 +276,63 @@ export async function startIntakeWatch(
   }
 }
 
+// ─────────────────── Layer-1 face verify (AWS CompareFaces) ──────────────
+
+export type VerifyFaceResult = {
+  ok: boolean;                  // false → AWS error (still 200, but soft-fail)
+  status: number;
+  patient_id: number;
+  patient_name: string | null;
+  match: boolean;               // similarity >= threshold
+  similarity: number | null;    // 0-100, null when AWS errored
+  threshold: number | null;
+  error?: string;
+  latency_ms?: number;
+};
+
+/**
+ * Compare the patient's reference photo (patients.face_reference_url) against
+ * a live cam_b frame via AWS Rekognition. Returns an empty result without
+ * calling the network when device is unconfigured so the UI can grey out
+ * the Verify button.
+ */
+export async function verifyFace(patientId: number): Promise<VerifyFaceResult> {
+  const empty: VerifyFaceResult = {
+    ok: false,
+    status: 0,
+    patient_id: patientId,
+    patient_name: null,
+    match: false,
+    similarity: null,
+    threshold: null,
+  };
+  if (!isDeviceConfigured()) return empty;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/verify_face`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ patient_id: patientId }),
+    });
+    if (!r.ok) {
+      return { ...empty, status: r.status, error: await safeError(r) };
+    }
+    const d = await r.json();
+    return {
+      ok: !!d.ok,
+      status: r.status,
+      patient_id: patientId,
+      patient_name: d.patient_name ?? null,
+      match: !!d.match,
+      similarity: d.similarity ?? null,
+      threshold: d.threshold ?? null,
+      latency_ms: d.latency_ms,
+      error: d.error ?? undefined,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
   const empty: VerifyPillResult = {
     ok: false,

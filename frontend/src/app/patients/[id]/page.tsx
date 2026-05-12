@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import {
   fetchPatient, fetchLogs, fetchSlotsByPatient, updateSlot, deleteSlot,
-  fetchKnownDispensers, updatePatient,
+  fetchKnownDispensers, updatePatient, uploadPatientFaceReference,
   type Patient, type IntakeRecord, type SlotInfo,
 } from "@/lib/api";
 import { isDeviceConfigured, triggerDispense } from "@/lib/device";
@@ -45,6 +45,46 @@ export default function PatientDetailPage() {
   const [knownDispensers, setKnownDispensers] = useState<string[]>([]);
   const [savingDispenser, setSavingDispenser] = useState(false);
   const [dispenserMsg, setDispenserMsg] = useState<string | null>(null);
+
+  // Face reference photo (Layer-1 face verify)
+  const [faceUploading, setFaceUploading] = useState(false);
+  const [faceMsg, setFaceMsg] = useState<string | null>(null);
+
+  async function handleFaceUpload(file: File) {
+    if (!patient) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setFaceMsg("File too large — keep it under 5 MB (Rekognition limit).");
+      return;
+    }
+    setFaceUploading(true);
+    setFaceMsg(null);
+    try {
+      const url = await uploadPatientFaceReference(patient.id, file);
+      setPatient({ ...patient, face_reference_url: url });
+      setFaceMsg("Reference photo uploaded.");
+    } catch (e) {
+      setFaceMsg(`Upload failed: ${(e as Error).message}`);
+    } finally {
+      setFaceUploading(false);
+    }
+  }
+
+  async function handleFaceClear() {
+    if (!patient) return;
+    setFaceUploading(true);
+    setFaceMsg(null);
+    try {
+      const updated = await updatePatient(patient.id, {
+        face_reference_url: null,
+      });
+      setPatient(updated);
+      setFaceMsg("Reference photo cleared.");
+    } catch (e) {
+      setFaceMsg(`Clear failed: ${(e as Error).message}`);
+    } finally {
+      setFaceUploading(false);
+    }
+  }
 
   async function handleSaveDispenser() {
     setSavingDispenser(true);
@@ -144,8 +184,38 @@ export default function PatientDetailPage() {
       {/* Patient Card */}
       <div className="animate-fade-up mb-6 overflow-hidden rounded-2xl border border-sand-200 bg-white">
         <div className="flex flex-col gap-6 p-6 md:flex-row">
-          <div className="flex h-36 w-36 shrink-0 items-center justify-center rounded-2xl bg-olive-100 text-4xl font-bold text-olive-700">
-            {getInitials(patient.name)}
+          <div className="relative h-36 w-36 shrink-0 overflow-hidden rounded-2xl bg-olive-100">
+            {patient.face_reference_url ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={patient.face_reference_url}
+                alt={`${patient.name} reference`}
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-4xl font-bold text-olive-700">
+                {getInitials(patient.name)}
+              </div>
+            )}
+            {/* Inline upload trigger so caregivers can capture/replace the
+                reference without scrolling away from the patient summary. */}
+            <label
+              className="absolute inset-x-0 bottom-0 cursor-pointer bg-black/55 px-2 py-1 text-center text-[10px] font-semibold uppercase tracking-wider text-white transition-colors hover:bg-black/70"
+              title="JPEG / PNG / WebP, max 5 MB"
+            >
+              {faceUploading ? "Uploading…" : patient.face_reference_url ? "Replace photo" : "Upload photo"}
+              <input
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                className="hidden"
+                disabled={faceUploading}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) void handleFaceUpload(f);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </label>
           </div>
 
           <div className="flex-1">
@@ -178,6 +248,21 @@ export default function PatientDetailPage() {
             </div>
             {dispenseMsg && (
               <p className="mt-2 text-xs text-gray-600">{dispenseMsg}</p>
+            )}
+            {faceMsg && (
+              <p className="mt-1 flex items-center gap-2 text-xs text-gray-600">
+                <span>{faceMsg}</span>
+                {patient.face_reference_url && (
+                  <button
+                    type="button"
+                    onClick={handleFaceClear}
+                    disabled={faceUploading}
+                    className="text-[10px] font-semibold uppercase tracking-wider text-status-danger underline hover:opacity-80 disabled:opacity-40"
+                  >
+                    Clear photo
+                  </button>
+                )}
+              </p>
             )}
 
             {/* Dispenser assignment (admin) */}
