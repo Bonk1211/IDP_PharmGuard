@@ -17,13 +17,18 @@ Wiring (SG90 micro servo on hardware PWM0):
     V+     (red)    -> external 5V (NOT Pi 5V — stall ~700 mA)
     GND    (brown)  -> external 5V GND AND Pi GND
 
-50 Hz PWM. SG90 (180-degree version) usable duty range is 5 % (0deg,
-1.0 ms pulse) -> 10 % (180deg, 2.0 ms). Going beyond that range drives
-the arm into the internal end-stop -> stall current -> buzzing /
-"stuck" servo. Keep a small margin off both ends.
+50 Hz PWM. SG90 180-degree clones in practice map their full sweep
+to roughly 0.5 ms -> 2.5 ms pulses (2.5 % -> 12.5 % duty at 50 Hz),
+NOT the textbook 1.0 -> 2.0 ms. Using only 5 %-10 % gives ~90 deg of
+travel.
 
-Latch geometry decides the exact angles. If the servo runs the wrong
-way, swap LOCK_DUTY <-> UNLOCK_DUTY (reversible without rewiring).
+Going past the servo's mechanical end-stop draws stall current -> arm
+buzzes / appears stuck. Tune by stepping UNLOCK_DUTY down from 12.5 in
+0.5 % steps until the buzz stops; do the same with LOCK_DUTY up from
+2.5. The window between LOCK_DUTY and UNLOCK_DUTY is the effective
+swing.
+
+If the servo runs the wrong way, swap LOCK_DUTY <-> UNLOCK_DUTY.
 
 Fail-safe:
   * Boot: PWM starts at 0 (servo unpowered, holds last position) +
@@ -52,11 +57,10 @@ PIN_SERVO = 18
 #   2.0 ms (10.0 %) -> 180 deg
 # Anything outside 5.0–10.0 % drives the gear into the internal end-stop.
 # Leave ~0.5 % margin so unit-to-unit variance doesn't push us past it.
-LOCK_DUTY = 5.0    # 0 deg — latch engaged
-UNLOCK_DUTY = 10.0 # 180 deg — latch released
-# NOTE: these sit on the SG90 end-stops. If the servo buzzes at rest
-# after reaching either position, nudge LOCK_DUTY up to ~5.3 or
-# UNLOCK_DUTY down to ~9.7 (≈ 5 deg margin off the stop).
+LOCK_DUTY = 2.5    # ~0.5 ms pulse — target 0 deg (latch engaged)
+UNLOCK_DUTY = 12.5 # ~2.5 ms pulse — target 180 deg (latch released)
+# If unlock buzzes at end-of-travel, step down to 12.0 / 11.5 / 11.0
+# until it goes silent. Same for lock: nudge up from 2.5 if it buzzes.
 
 # How long the drawer stays unlocked per dispense.
 DRAWER_OPEN_S = 10.0
