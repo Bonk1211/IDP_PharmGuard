@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Navbar from "@/components/Navbar";
+import LayoutShell from "@/components/LayoutShell";
 
 export const metadata: Metadata = {
-  title: "PharmGuard Dashboard",
+  title: "PharmGuard — Right patient. Right pill. Verified swallow.",
   description: "Medical IoT medication dispensing & adherence tracking",
 };
 
@@ -15,10 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body>
-        <Navbar />
-        <main className="mx-auto max-w-[1360px] px-6 pb-12 pt-6">
-          {children}
-        </main>
+        <LayoutShell>{children}</LayoutShell>
       </body>
     </html>
   );

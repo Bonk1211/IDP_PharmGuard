@@ -349,6 +349,11 @@ async def verify_face(body: VerifyFaceBody, request: Request):
     )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
+    # Encode the live frame for the dashboard so the operator sees the
+    # exact image AWS scored (not a fresh frame taken seconds later).
+    import base64
+    snapshot_b64 = base64.b64encode(live_bytes).decode("ascii")
+
     log.info(
         "verify_face: patient=%d match=%s similarity=%s latency_ms=%d err=%s",
         body.patient_id,
@@ -364,6 +369,8 @@ async def verify_face(body: VerifyFaceBody, request: Request):
         "match": bool(verdict["match"]),
         "similarity": verdict["similarity"],
         "threshold": float(settings.face_similarity_threshold),
+        "bbox": verdict.get("bbox"),
+        "snapshot_b64": snapshot_b64,
         "error": verdict["error"],
         "latency_ms": latency_ms,
     }

@@ -73,20 +73,19 @@ def compare_faces(
     """Call Rekognition CompareFaces (source = reference photo, target = live).
 
     Returns:
-        ``{"match": bool, "similarity": float | None, "error": str | None}``
+        ``{
+            "match": bool,
+            "similarity": float | None,
+            "bbox": {"Left", "Top", "Width", "Height"} | None,
+            "error": str | None,
+        }``
 
     - ``match`` is True when at least one face in target meets ``threshold``.
-    - ``similarity`` is the best match's similarity score (0-100), or 0.0
-      when faces are detected on both sides but none reach the threshold,
-      or None on AWS error.
-    - ``error`` carries the AWS exception message on failure (caller
-      shows it to the operator).
-
-    AWS quirks:
-    - InvalidParameterException is returned when no face is detected in
-      either image (e.g. cam_b sees an empty chair). Treated as soft-fail.
-    - ImageTooLargeException at 5 MB+. Caller should keep JPEG quality
-      <= 85 on a 640x480 frame.
+    - ``similarity`` is the best match's score (0-100), 0.0 when faces
+      detected but none meet threshold, None on AWS error.
+    - ``bbox`` is the target-face bounding box for the best match in
+      normalized 0-1 coords (multiply by image width/height to draw).
+    - ``error`` carries the AWS exception message on failure.
     """
     try:
         resp = _get_client().compare_faces(
@@ -97,10 +96,33 @@ def compare_faces(
         )
     except Exception as exc:  # ClientError, EndpointConnectionError, etc.
         log.warning("Rekognition CompareFaces failed: %s", exc)
-        return {"match": False, "similarity": None, "error": str(exc)}
+        return {
+            "match": False,
+            "similarity": None,
+            "bbox": None,
+            "error": str(exc),
+        }
 
     matches = resp.get("FaceMatches") or []
     if not matches:
-        return {"match": False, "similarity": 0.0, "error": None}
-    best = max(float(m.get("Similarity", 0.0)) for m in matches)
-    return {"match": best >= threshold, "similarity": best, "error": None}
+        return {"match": False, "similarity": 0.0, "bbox": None, "error": None}
+
+    best_match = max(matches, key=lambda m: float(m.get("Similarity", 0.0)))
+    best = float(best_match.get("Similarity", 0.0))
+    bb = (best_match.get("Face") or {}).get("BoundingBox") or {}
+    bbox = (
+        {
+            "Left": float(bb.get("Left", 0.0)),
+            "Top": float(bb.get("Top", 0.0)),
+            "Width": float(bb.get("Width", 0.0)),
+            "Height": float(bb.get("Height", 0.0)),
+        }
+        if bb
+        else None
+    )
+    return {
+        "match": best >= threshold,
+        "similarity": best,
+        "bbox": bbox,
+        "error": None,
+    }

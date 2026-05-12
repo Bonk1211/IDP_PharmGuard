@@ -278,14 +278,23 @@ export async function startIntakeWatch(
 
 // ─────────────────── Layer-1 face verify (AWS CompareFaces) ──────────────
 
+export type FaceBoundingBox = {
+  Left: number;    // 0-1, normalized to image width
+  Top: number;     // 0-1, normalized to image height
+  Width: number;   // 0-1
+  Height: number;  // 0-1
+};
+
 export type VerifyFaceResult = {
-  ok: boolean;                  // false → AWS error (still 200, but soft-fail)
+  ok: boolean;                    // false → AWS error (still 200, but soft-fail)
   status: number;
   patient_id: number;
   patient_name: string | null;
-  match: boolean;               // similarity >= threshold
-  similarity: number | null;    // 0-100, null when AWS errored
+  match: boolean;                 // similarity >= threshold
+  similarity: number | null;      // 0-100, null when AWS errored
   threshold: number | null;
+  bbox: FaceBoundingBox | null;   // target-face bbox of best match
+  snapshot_b64: string | null;    // base64 JPEG of the frame AWS scored
   error?: string;
   latency_ms?: number;
 };
@@ -305,6 +314,8 @@ export async function verifyFace(patientId: number): Promise<VerifyFaceResult> {
     match: false,
     similarity: null,
     threshold: null,
+    bbox: null,
+    snapshot_b64: null,
   };
   if (!isDeviceConfigured()) return empty;
   try {
@@ -325,6 +336,8 @@ export async function verifyFace(patientId: number): Promise<VerifyFaceResult> {
       match: !!d.match,
       similarity: d.similarity ?? null,
       threshold: d.threshold ?? null,
+      bbox: d.bbox ?? null,
+      snapshot_b64: d.snapshot_b64 ?? null,
       latency_ms: d.latency_ms,
       error: d.error ?? undefined,
     };

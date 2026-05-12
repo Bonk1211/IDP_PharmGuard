@@ -639,10 +639,11 @@ export default function DispenserGuidedPage() {
                     try {
                       const r = await verifyFace(activePatient.id);
                       setFaceResult(r);
+                      // Do NOT auto-advance — operator reviews the snapshot
+                      // + bounding box and explicitly clicks Continue.
                       if (r.ok && r.match) {
-                        setFaceVerified(true);
                         setMsg(
-                          `Face matched (similarity ${r.similarity?.toFixed(1) ?? "?"}%). Step advanced.`,
+                          `Face matched (similarity ${r.similarity?.toFixed(1) ?? "?"}%). Review the snapshot and tap Continue to proceed.`,
                         );
                       } else if (r.ok) {
                         setMsg(
@@ -656,6 +657,10 @@ export default function DispenserGuidedPage() {
                     } finally {
                       setFaceVerifying(false);
                     }
+                  }}
+                  onContinue={() => {
+                    setFaceVerified(true);
+                    setMsg("Identity confirmed. Step advanced.");
                   }}
                   onReset={() => {
                     setFaceVerified(false);
@@ -1006,10 +1011,11 @@ function PatientBanner({
 
 // ──────────────────────────── FaceVerifySection (step 0 gate) ────────────────────────────
 
-// Side-by-side live cam 1 + reference photo with a Verify CTA. Calls
-// /api/device/verify_face which runs AWS Rekognition CompareFaces and
-// returns similarity 0-100. Hard-gates stepIdx — Unlock card stays
-// hidden until verified=true.
+// Side-by-side reference photo + cam 1 (live OR captured snapshot with
+// bbox overlay after a verify call) and a Verify CTA. Calls
+// /api/device/verify_face → AWS Rekognition CompareFaces. Result panel
+// stays on screen with the framed face after a match; the operator
+// reviews the snapshot and explicitly taps Continue to advance stepIdx.
 function FaceVerifySection({
   patient,
   cam1Url,
@@ -1019,6 +1025,7 @@ function FaceVerifySection({
   result,
   verified,
   onVerify,
+  onContinue,
   onReset,
 }: {
   patient: Patient | null;
@@ -1029,6 +1036,7 @@ function FaceVerifySection({
   result: VerifyFaceResult | null;
   verified: boolean;
   onVerify: () => void;
+  onContinue: () => void;
   onReset: () => void;
 }) {
   const hasReference = !!patient?.face_reference_url;
@@ -1122,10 +1130,44 @@ function FaceVerifySection({
           </figcaption>
         </figure>
 
-        {/* Live cam 1 */}
+        {/* Cam 1 — captured snapshot (with bbox) after verify, else live */}
         <figure className="overflow-hidden rounded-xl border border-sand-200 bg-black">
-          <div className="aspect-[4/3] bg-black">
-            {cam1Url ? (
+          <div className="relative aspect-[4/3] bg-black">
+            {result?.snapshot_b64 ? (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={`data:image/jpeg;base64,${result.snapshot_b64}`}
+                  alt="Captured cam 1 snapshot"
+                  className="h-full w-full object-cover"
+                />
+                {result.bbox && (
+                  <div
+                    className={`pointer-events-none absolute rounded-md border-2 shadow-[0_0_0_1px_rgba(0,0,0,0.4)] ${
+                      result.match
+                        ? "border-status-success"
+                        : "border-status-danger"
+                    }`}
+                    style={{
+                      left: `${result.bbox.Left * 100}%`,
+                      top: `${result.bbox.Top * 100}%`,
+                      width: `${result.bbox.Width * 100}%`,
+                      height: `${result.bbox.Height * 100}%`,
+                    }}
+                  >
+                    <span
+                      className={`absolute -top-5 left-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold text-white ${
+                        result.match ? "bg-status-success" : "bg-status-danger"
+                      }`}
+                    >
+                      {result.match ? "MATCH" : "NO MATCH"}
+                      {result.similarity != null &&
+                        ` · ${result.similarity.toFixed(1)}%`}
+                    </span>
+                  </div>
+                )}
+              </>
+            ) : cam1Url ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={cam1Url}
@@ -1139,7 +1181,10 @@ function FaceVerifySection({
             )}
           </div>
           <figcaption className="flex items-center justify-between bg-white px-3 py-1.5 text-[10px] text-gray-500">
-            <span>Cam 1 · live</span>
+            <span>
+              Cam 1 · {result?.snapshot_b64 ? "captured" : "live"}
+              {result?.bbox ? " · face framed" : ""}
+            </span>
             <span className="font-mono text-gray-400">{clock}</span>
           </figcaption>
         </figure>
@@ -1174,7 +1219,8 @@ function FaceVerifySection({
         </div>
       )}
 
-      {/* Action row */}
+      {/* Action row — explicit Continue gate after match. Operator
+          confirms by tapping Continue, never auto-advanced. */}
       <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
         {result?.latency_ms != null && (
           <span className="mr-auto font-mono text-[10px] text-gray-400">
@@ -1189,6 +1235,44 @@ function FaceVerifySection({
           >
             Re-verify
           </button>
+        ) : result?.ok && result.match ? (
+          <>
+            <button
+              type="button"
+              onClick={onReset}
+              className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50"
+            >
+              Retake
+            </button>
+            <button
+              type="button"
+              onClick={onContinue}
+              className="inline-flex items-center gap-2 rounded-full border border-status-success bg-status-success px-5 py-2 text-xs font-semibold text-white transition-colors hover:opacity-90"
+            >
+              Continue
+              <span className="rounded bg-white/20 px-1 font-mono text-[10px]">
+                →
+              </span>
+            </button>
+          </>
+        ) : result && (!result.ok || !result.match) ? (
+          <>
+            <button
+              type="button"
+              onClick={onReset}
+              className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50"
+            >
+              Discard
+            </button>
+            <button
+              type="button"
+              onClick={onVerify}
+              disabled={!canVerify && !result}
+              className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {verifying ? "Verifying…" : "Retry verify"}
+            </button>
+          </>
         ) : (
           <button
             type="button"
