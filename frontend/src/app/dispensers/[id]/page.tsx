@@ -1254,6 +1254,31 @@ function IntakeReportCard({
         </div>
       </div>
 
+      {/* Annotated tray snapshot — proof captured at verify time. */}
+      {verify?.snapshot_b64 && (
+        <figure className="mt-4 overflow-hidden rounded-xl border border-sand-200 bg-black">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`data:image/jpeg;base64,${verify.snapshot_b64}`}
+            alt="Annotated tray snapshot at dispense"
+            className="max-h-64 w-full object-contain"
+          />
+          <figcaption className="flex flex-wrap items-center justify-between gap-2 bg-white px-3 py-1.5 text-[11px] text-gray-600">
+            <span>
+              <span className="font-semibold text-gray-900">
+                {verify.top?.class_name ?? "no detection"}
+              </span>
+              {verify.top
+                ? ` · ${Math.round(verify.top.confidence * 100)}% confidence`
+                : ""}
+            </span>
+            <span className="font-mono text-[10px] text-gray-400">
+              proof · cam 0 · pill_detector.pt
+            </span>
+          </figcaption>
+        </figure>
+      )}
+
       {/* KPI tiles */}
       <div className="mt-4 grid grid-cols-2 gap-2 md:grid-cols-4">
         <Kpi
