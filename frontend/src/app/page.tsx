@@ -63,7 +63,7 @@ function Hero() {
       id="product"
       className="relative overflow-hidden border-b border-sand-200"
     >
-      <div className="mx-auto grid max-w-[1360px] grid-cols-1 gap-12 px-6 py-20 lg:grid-cols-[1.1fr_1fr] lg:py-28">
+      <div className="mx-auto grid max-w-[1360px] grid-cols-1 gap-12 px-6 pb-20 pt-8 lg:grid-cols-[1.1fr_1fr] lg:pb-28 lg:pt-12">
         <div className="animate-fade-up flex flex-col justify-center">
           <span className="mb-5 inline-flex w-fit items-center gap-2 rounded-full border border-olive-200 bg-olive-50 px-3 py-1 text-xs font-medium uppercase tracking-wider text-olive-700">
             <span className="h-1.5 w-1.5 rounded-full bg-olive-600" />
