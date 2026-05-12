@@ -52,8 +52,11 @@ PIN_SERVO = 18
 #   2.0 ms (10.0 %) -> 180 deg
 # Anything outside 5.0–10.0 % drives the gear into the internal end-stop.
 # Leave ~0.5 % margin so unit-to-unit variance doesn't push us past it.
-LOCK_DUTY = 5.5    # ~10 deg — latch engaged, just off the 0 deg stop
-UNLOCK_DUTY = 9.5  # ~162 deg — latch released, just off the 180 deg stop
+LOCK_DUTY = 5.0    # 0 deg — latch engaged
+UNLOCK_DUTY = 10.0 # 180 deg — latch released
+# NOTE: these sit on the SG90 end-stops. If the servo buzzes at rest
+# after reaching either position, nudge LOCK_DUTY up to ~5.3 or
+# UNLOCK_DUTY down to ~9.7 (≈ 5 deg margin off the stop).
 
 # How long the drawer stays unlocked per dispense.
 DRAWER_OPEN_S = 10.0

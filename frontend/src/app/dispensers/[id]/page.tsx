@@ -341,24 +341,18 @@ export default function DispenserGuidedPage() {
     }
   }
 
-  async function onUnlockDrawer() {
-    const wasUnlocked = drawerUnlocked;
-    const r = await withBusy(
-      wasUnlocked ? "drawer-lock" : "drawer-unlock",
-      () => setDrawer(wasUnlocked ? "lock" : "unlock"),
-    );
+  async function onSetDrawer(action: "lock" | "unlock") {
+    const r = await withBusy(`drawer-${action}`, () => setDrawer(action));
     if (r.ok) {
-      // Reflect the new state immediately instead of waiting for the
-      // next 3 s device-status poll. Prefer the value the device
-      // returned; fall back to the inverted local state.
+      // Reflect new state immediately so the UI doesn't wait for the
+      // 3 s status poll. Prefer device-reported state, else trust the
+      // requested action.
       const nextUnlocked =
-        typeof r.is_unlocked === "boolean" ? r.is_unlocked : !wasUnlocked;
-      setStatus((s) =>
-        s ? { ...s, is_unlocked: nextUnlocked } : s,
-      );
+        typeof r.is_unlocked === "boolean" ? r.is_unlocked : action === "unlock";
+      setStatus((s) => (s ? { ...s, is_unlocked: nextUnlocked } : s));
       setMsg(`Drawer ${nextUnlocked ? "unlocked" : "locked"}.`);
     } else {
-      setMsg(`Drawer toggle failed: ${r.error ?? r.status}`);
+      setMsg(`Drawer ${action} failed: ${r.error ?? r.status}`);
     }
   }
 
@@ -635,7 +629,7 @@ export default function DispenserGuidedPage() {
         status={status}
         clock={fmtClock(now)}
         onEject={onEject}
-        onUnlockDrawer={onUnlockDrawer}
+        onSetDrawer={onSetDrawer}
         onResnapshot={onResnapshot}
       />
     </div>
@@ -1395,7 +1389,7 @@ function AdvancedSheet({
   status,
   clock,
   onEject,
-  onUnlockDrawer,
+  onSetDrawer,
   onResnapshot,
 }: {
   open: boolean;
@@ -1412,7 +1406,7 @@ function AdvancedSheet({
   status: DeviceStatus | null;
   clock: string;
   onEject: (slot: number) => void;
-  onUnlockDrawer: () => void;
+  onSetDrawer: (action: "lock" | "unlock") => void;
   onResnapshot: () => void;
 }) {
   if (!open) return null;
@@ -1479,18 +1473,24 @@ function AdvancedSheet({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onUnlockDrawer}
-                disabled={!configured || busy !== null}
-                className="rounded-full border border-olive-300 bg-olive-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {busy === "drawer-unlock" || busy === "drawer-lock"
-                  ? "…"
-                  : drawerUnlocked
-                  ? "Lock"
-                  : "Unlock"}
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => onSetDrawer("lock")}
+                  disabled={!configured || busy !== null || !drawerUnlocked}
+                  className="rounded-full border border-sand-300 bg-white px-4 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busy === "drawer-lock" ? "…" : "Lock (0°)"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onSetDrawer("unlock")}
+                  disabled={!configured || busy !== null || drawerUnlocked}
+                  className="rounded-full border border-olive-300 bg-olive-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {busy === "drawer-unlock" ? "…" : "Unlock (180°)"}
+                </button>
+              </div>
             </div>
           </div>
 
