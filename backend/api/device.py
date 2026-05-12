@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from config import settings
 from core.log_ring import get_ring
 from core.security import verify_device_api_key
 from db.base import get_supabase
