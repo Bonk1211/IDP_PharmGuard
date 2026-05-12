@@ -100,13 +100,41 @@ function Hero() {
         </div>
 
         <div className="animate-fade-up stagger-2 relative">
-          <div className="absolute -inset-6 rounded-[2rem] bg-gradient-to-br from-olive-100/60 via-sand-100 to-transparent blur-2xl" />
-          <div className="relative aspect-square w-full overflow-hidden rounded-[2rem] border border-sand-200 bg-gradient-to-br from-white to-sand-100 shadow-sm">
+          <div className="pointer-events-none absolute -inset-10 rounded-full bg-[radial-gradient(closest-side,rgba(173,184,136,0.28),transparent_70%)]" />
+          <div className="relative aspect-square w-full">
             <Model3D className="h-full w-full" />
-            <div className="pointer-events-none absolute bottom-4 left-4 right-4 flex items-center justify-between text-[10px] uppercase tracking-[0.18em] text-gray-400">
-              <span>assem1 · v1 bench rig</span>
-              <span>drag to rotate</span>
-            </div>
+
+            {/* Top-right chip — Cam 1 */}
+            <FeatureChip
+              className="absolute right-0 top-8 sm:right-2"
+              dotClass="bg-status-success"
+              title="Face ID matched · Bed 4"
+              body="Drawer unlocked · 0 nurse entry"
+            />
+
+            {/* Mid-left chip — Cam 2 */}
+            <FeatureChip
+              className="absolute left-0 top-1/2 -translate-y-1/2 sm:left-2"
+              dotClass="bg-olive-600"
+              title="YOLO 99.2% · slot 3"
+              body="Pill verified · cycle 6.4 s"
+            />
+
+            {/* Bottom-right chip — Cam 3 */}
+            <FeatureChip
+              className="absolute bottom-10 right-2 sm:right-6"
+              dotClass="bg-status-info"
+              title="Swallow FSM 5/5"
+              body="Tongue clear · logged 14:02"
+            />
+
+            {/* Bottom-left chip — Stream */}
+            <FeatureChip
+              className="absolute bottom-2 left-0 sm:left-4"
+              dotClass="bg-status-warning"
+              title="Ward dashboard · live"
+              body="Cycle streamed in 280 ms"
+            />
           </div>
         </div>
       </div>
@@ -237,6 +265,30 @@ function Footer() {
         <span className="text-xs text-gray-400">© 2025 · Singapore</span>
       </div>
     </footer>
+  );
+}
+
+function FeatureChip({
+  className = "",
+  dotClass,
+  title,
+  body,
+}: {
+  className?: string;
+  dotClass: string;
+  title: string;
+  body: string;
+}) {
+  return (
+    <div
+      className={`pointer-events-none flex items-start gap-2.5 rounded-2xl border border-sand-200 bg-white/95 px-3.5 py-2.5 shadow-[0_8px_24px_-12px_rgba(45,55,30,0.18)] backdrop-blur-sm ${className}`}
+    >
+      <span className={`mt-1 h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+      <div className="leading-tight">
+        <div className="text-[13px] font-semibold text-gray-900">{title}</div>
+        <div className="mt-0.5 text-[11px] text-gray-500">{body}</div>
+      </div>
+    </div>
   );
 }
 
