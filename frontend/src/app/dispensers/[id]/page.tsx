@@ -342,15 +342,24 @@ export default function DispenserGuidedPage() {
   }
 
   async function onUnlockDrawer() {
+    const wasUnlocked = drawerUnlocked;
     const r = await withBusy(
-      drawerUnlocked ? "drawer-lock" : "drawer-unlock",
-      () => setDrawer(drawerUnlocked ? "lock" : "unlock"),
+      wasUnlocked ? "drawer-lock" : "drawer-unlock",
+      () => setDrawer(wasUnlocked ? "lock" : "unlock"),
     );
-    setMsg(
-      r.ok
-        ? `Drawer ${drawerUnlocked ? "locked" : "unlocked"}.`
-        : `Drawer toggle failed: ${r.error ?? r.status}`,
-    );
+    if (r.ok) {
+      // Reflect the new state immediately instead of waiting for the
+      // next 3 s device-status poll. Prefer the value the device
+      // returned; fall back to the inverted local state.
+      const nextUnlocked =
+        typeof r.is_unlocked === "boolean" ? r.is_unlocked : !wasUnlocked;
+      setStatus((s) =>
+        s ? { ...s, is_unlocked: nextUnlocked } : s,
+      );
+      setMsg(`Drawer ${nextUnlocked ? "unlocked" : "locked"}.`);
+    } else {
+      setMsg(`Drawer toggle failed: ${r.error ?? r.status}`);
+    }
   }
 
   async function onEject(slot: number) {
