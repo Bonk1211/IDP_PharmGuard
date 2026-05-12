@@ -69,9 +69,9 @@ async def device_status(request: Request):
         state = getattr(loop, "_state", None)
         drawer = getattr(state, "drawer_lock", None) if state else None
         if drawer is not None:
-            is_unlocked = bool(drawer.is_unlocked())
+            is_unlocked = bool(drawer.is_unlocked)
     except Exception:
-        log.exception("drawer.is_unlocked() probe failed")
+        log.exception("drawer.is_unlocked probe failed")
     base["is_unlocked"] = is_unlocked
     return base
 
@@ -158,7 +158,7 @@ async def manual_drawer(body: DrawerBody, request: Request):
         else:
             await asyncio.to_thread(drawer.lock)
     log.info("manual drawer: action=%s", body.action)
-    return {"ok": True, "action": body.action, "is_unlocked": drawer.is_unlocked()}
+    return {"ok": True, "action": body.action, "is_unlocked": bool(drawer.is_unlocked)}
 
 
 @router.get("/snapshot")
