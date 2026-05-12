@@ -402,6 +402,8 @@ async def intake_state(request: Request):
             "labels_required": [],
             "labels_satisfied": False,
             "mediapipe_complete": False,
+            "labels_inflight": False,
+            "labels_last_call_at": None,
         }
     return monitor.get_state()
 
@@ -537,6 +539,10 @@ async def stream_camera(
 
     state = getattr(loop, "_state", None)
     cam = getattr(state, "cam_a" if cam_num == 0 else "cam_b", None) if state else None
+    # Captured by _annotate_mediapipe (cam 1 HUD). None when cycle hasn't
+    # built the monitor yet — HUD then just shows the MediaPipe row from
+    # the stream-dedicated face/hands instances and skips Layer-2.
+    monitor = getattr(state, "monitor", None) if state else None
     if cam is None:
         raise HTTPException(status_code=503, detail=f"cam_{cam_num} not open")
     if not hasattr(cam, "latest_frame_jpeg"):
@@ -611,14 +617,94 @@ async def stream_camera(
                     drawing_styles.get_default_hand_connections_style(),
                 )
 
-        # Quick-glance status badge: face / hands counts so the operator
-        # can confirm at a glance what the cycle's FSM has to work with.
+        # ── Stacked HUD: L1 MediaPipe row + L2 AWS DetectLabels row ────
+        # Both layers run in parallel during watch_for_swallow (MediaPipe
+        # on the watch thread, DetectLabels on a 2-worker ThreadPoolExecutor).
+        # The HUD makes that parallelism visible on the cam 1 stream so
+        # the operator can see both verdicts converge in real time.
         fcount = len(face.multi_face_landmarks or [])
         hcount = len(hands.multi_hand_landmarks or [])
+        h, w = annotated.shape[:2]
+        snap = monitor.get_state() if monitor is not None else {}
+
+        # Translucent backdrop for legibility over noisy frames.
+        overlay = annotated.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 68), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.45, annotated, 0.55, 0, annotated)
+
+        # ── L1: MediaPipe FSM ──────────────────────────────────────────
+        step_idx = int(snap.get("step_index", 0) or 0)
+        total_steps = int(snap.get("total_steps", 3) or 3)
+        confidence = float(snap.get("confidence", 0.0) or 0.0)
+        mp_complete = bool(snap.get("mediapipe_complete", False))
+        result = snap.get("result")
+        if mp_complete or result == "passed":
+            l1_color = (0, 220, 0)
+            l1_state = "DONE"
+        elif result in ("timeout", "missing_labels"):
+            l1_color = (0, 200, 200)
+            l1_state = "DONE"
+        else:
+            l1_color = (0, 255, 255)
+            l1_state = "live"
         cv2.putText(
-            annotated, f"face={fcount} hands={hcount}",
-            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2, cv2.LINE_AA,
+            annotated,
+            f"L1 mediapipe {l1_state} step={step_idx + 1}/{total_steps} "
+            f"conf={confidence:.2f} face={fcount} hands={hcount}",
+            (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.5, l1_color, 1, cv2.LINE_AA,
         )
+
+        # ── L2: AWS Rekognition DetectLabels ───────────────────────────
+        required = snap.get("labels_required") or []
+        seen_at = snap.get("labels_seen_at") or {}
+        labels_satisfied = bool(snap.get("labels_satisfied", False))
+        inflight = bool(snap.get("labels_inflight", False))
+        last_call_at = snap.get("labels_last_call_at")
+        if not required:
+            l2_text = "L2 aws-labels disabled"
+            l2_color = (160, 160, 160)
+        else:
+            chips = []
+            for req in required:
+                marker = "[+]" if req in seen_at else "[-]"
+                chips.append(f"{marker}{req}")
+            tag = "OK" if labels_satisfied else ("call" if inflight else "wait")
+            age_s = (time.time() - last_call_at) if last_call_at else None
+            age_str = f" +{age_s:.1f}s" if age_s is not None else ""
+            l2_text = f"L2 aws-labels {tag}{age_str} " + " ".join(chips)
+            l2_color = (0, 220, 0) if labels_satisfied else (
+                (0, 255, 255) if inflight else (0, 165, 255)
+            )
+        cv2.putText(
+            annotated, l2_text,
+            (8, 44), cv2.FONT_HERSHEY_SIMPLEX, 0.45, l2_color, 1, cv2.LINE_AA,
+        )
+
+        # Inflight pulse — small filled circle blinks while a DetectLabels
+        # call is mid-flight on the ThreadPoolExecutor. Position on the
+        # top-right so it's easy to spot at a glance.
+        if inflight:
+            cv2.circle(annotated, (w - 16, 16), 6, (0, 255, 255), -1, cv2.LINE_AA)
+
+        # Terminal banner — PASS / MISS / TIMEOUT in the bottom-left so
+        # the operator sees the final verdict without leaving cam 1.
+        terminal_label = None
+        terminal_color = (255, 255, 255)
+        if result == "passed":
+            terminal_label = "PASS  (L1 + L2)"
+            terminal_color = (0, 220, 0)
+        elif result == "missing_labels":
+            terminal_label = "MISS labels (L1 ok, L2 fail)"
+            terminal_color = (0, 165, 255)
+        elif result == "timeout":
+            terminal_label = "TIMEOUT (L1 fail)"
+            terminal_color = (0, 0, 255)
+        if terminal_label is not None:
+            cv2.putText(
+                annotated, terminal_label,
+                (8, h - 14), cv2.FONT_HERSHEY_SIMPLEX, 0.6, terminal_color, 2,
+                cv2.LINE_AA,
+            )
 
         ok, jpeg = cv2.imencode(
             ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), _STREAM_JPEG_QUALITY],

@@ -99,6 +99,8 @@ def _initial_state() -> dict:
         "labels_required": [],       # snapshot of required set for the UI
         "labels_satisfied": False,   # any seen label in the required set?
         "mediapipe_complete": False, # all 3 FSM steps done (regardless of labels)
+        "labels_inflight": False,    # a DetectLabels call is currently in-flight
+        "labels_last_call_at": None, # epoch seconds of the last DetectLabels return
     }
 
 
@@ -350,7 +352,12 @@ class IntakeMonitor:
             self._label_pool.submit(self._run_label_call, frame_copy)
         except RuntimeError:
             # Pool already shut down (close called mid-cycle). Skip silently.
-            pass
+            return
+        with self._lock:
+            # Pulse for the HUD on cam 1 — flipped back to False at the
+            # end of _run_label_call. Multiple in-flight calls collapse
+            # to a single "inflight" pulse; that's fine for the visual.
+            self._state["labels_inflight"] = True
 
     def _run_label_call(self, frame: np.ndarray) -> None:
         """Worker body: encode JPEG, call DetectLabels, fold results into state.
@@ -363,44 +370,51 @@ class IntakeMonitor:
         from services.label_detector import detect_labels, encode_frame_jpeg
 
         try:
-            jpeg = encode_frame_jpeg(frame)
-        except Exception:
-            log.exception("label encode failed")
-            return
-        resp = detect_labels(
-            jpeg, min_confidence=settings.intake_label_min_confidence
-        )
-        if resp["error"]:
-            return
+            try:
+                jpeg = encode_frame_jpeg(frame)
+            except Exception:
+                log.exception("label encode failed")
+                return
+            resp = detect_labels(
+                jpeg, min_confidence=settings.intake_label_min_confidence
+            )
+            if resp["error"]:
+                return
 
-        required = settings.intake_label_required_set  # lowercased set
-        now = time.time()
-        with self._lock:
-            seen_at: dict = self._state["labels_seen_at"]
-            seen_list: list = self._state["labels_seen"]
-            for lbl in resp["labels"]:
-                nm = (lbl["name"] or "").strip()
-                if not nm:
-                    continue
-                key = nm.lower()
-                if key not in seen_at:
-                    seen_list.append(nm)
-                seen_at[key] = now
-            matched = required & set(seen_at.keys())
-            self._state["labels_satisfied"] = bool(matched)
-            # Hard gate: if MediaPipe FSM already completed and labels
-            # have just satisfied → flip the run to "passed".
-            if (
-                self._state["mediapipe_complete"]
-                and self._state["labels_satisfied"]
-                and self._state["result"] is None
-            ):
-                self._state["result"] = "passed"
-                self._state["running"] = False
-                log.info(
-                    "Intake: PASSED (mediapipe + labels=%s)",
-                    sorted(matched),
-                )
+            required = settings.intake_label_required_set  # lowercased set
+            now = time.time()
+            with self._lock:
+                seen_at: dict = self._state["labels_seen_at"]
+                seen_list: list = self._state["labels_seen"]
+                for lbl in resp["labels"]:
+                    nm = (lbl["name"] or "").strip()
+                    if not nm:
+                        continue
+                    key = nm.lower()
+                    if key not in seen_at:
+                        seen_list.append(nm)
+                    seen_at[key] = now
+                matched = required & set(seen_at.keys())
+                self._state["labels_satisfied"] = bool(matched)
+                # Hard gate: if MediaPipe FSM already completed and labels
+                # have just satisfied → flip the run to "passed".
+                if (
+                    self._state["mediapipe_complete"]
+                    and self._state["labels_satisfied"]
+                    and self._state["result"] is None
+                ):
+                    self._state["result"] = "passed"
+                    self._state["running"] = False
+                    log.info(
+                        "Intake: PASSED (mediapipe + labels=%s)",
+                        sorted(matched),
+                    )
+        finally:
+            # Always release the inflight pulse, even on error/early return —
+            # the HUD relies on this to stop blinking.
+            with self._lock:
+                self._state["labels_inflight"] = False
+                self._state["labels_last_call_at"] = time.time()
 
     # ---- cycle integration ----
     def watch_for_swallow(self, timeout_s: float = 60.0) -> bool:

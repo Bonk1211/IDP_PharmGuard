@@ -66,6 +66,8 @@ export type IntakeState = {
   labels_required: string[];              // snapshot of required set (lower)
   labels_satisfied: boolean;              // any seen ∈ required?
   mediapipe_complete: boolean;            // all 3 FSM steps done
+  labels_inflight: boolean;               // a DetectLabels call is mid-flight
+  labels_last_call_at: number | null;     // epoch seconds of last AWS return
 };
 
 export function isDeviceConfigured(): boolean {
