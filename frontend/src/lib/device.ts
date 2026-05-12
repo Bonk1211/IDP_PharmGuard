@@ -233,6 +233,37 @@ export type VerifyPillResult = {
   error?: string;
 };
 
+export type IntakeStartResult = {
+  ok: boolean;
+  status: number;
+  already_running?: boolean;
+  timeout_s?: number;
+  error?: string;
+};
+
+export async function startIntakeWatch(
+  timeoutS: number = 60,
+): Promise<IntakeStartResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/intake/start`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ timeout_s: timeoutS }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      already_running: data?.already_running,
+      timeout_s: data?.timeout_s,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
   const empty: VerifyPillResult = {
     ok: false,

@@ -22,11 +22,13 @@ import {
   isDeviceConfigured,
   manualEject,
   setDrawer,
+  startIntakeWatch,
   streamUrl,
   triggerDispense,
   verifyPill,
   type DeviceStatus,
   type IntakeState,
+  type PillDetection,
   type ScheduleRow,
   type VerifyPillResult,
 } from "@/lib/device";
@@ -68,6 +70,22 @@ function fmtHHmm(d: Date): string {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+// Pill classes detected on the tray that are NOT the medication scheduled
+// for this round. Anything ≥ confidence threshold counts. Used to block
+// step 3 → step 4 when an extra/wrong drug is on the tray.
+function unauthorizedDetections(
+  result: VerifyPillResult | null,
+  expected: string | null | undefined,
+  threshold = 0.5,
+): PillDetection[] {
+  if (!result || !expected) return [];
+  const norm = (s: string) => s.toLowerCase().replace(/[\s_]/g, "");
+  const ne = norm(expected);
+  return result.detections.filter(
+    (d) => d.confidence >= threshold && norm(d.class_name) !== ne,
+  );
 }
 
 function nextRoundFrom(schedules: ScheduleRow[]): { time: string; in: string } | null {
@@ -258,6 +276,20 @@ export default function DispenserGuidedPage() {
     setViewIdx(Math.max(0, Math.min(idx, 4)));
   };
 
+  // Confirm + Override on step 3 funnel through here so the backend
+  // intake monitor actually starts running. Without this the AI INTAKE
+  // CHECK panel stays "Idle" because nothing is feeding cam_b frames
+  // into the FSM (the cycle runner is the only other caller).
+  const confirmAndVerify = async () => {
+    setViewIdx(3);
+    const r = await startIntakeWatch(60);
+    if (!r.ok) {
+      setMsg(`Intake watch failed to start: ${r.error ?? r.status}`);
+    } else if (!r.already_running) {
+      setMsg("Intake watch started — show the patient on cam 1.");
+    }
+  };
+
   // ──────────────────────────── derived ─────────────────────
 
   const activeSlots: SlotInfo[] = useMemo(() => {
@@ -305,6 +337,11 @@ export default function DispenserGuidedPage() {
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
 
+  const unauthorized = useMemo(
+    () => unauthorizedDetections(verifyResult, currentSlot?.name),
+    [verifyResult, currentSlot?.name],
+  );
+
   // When stepIdx advances, swap the visible card to follow.
   // User can still click a different step to preview — we only auto-swap on
   // a real stepIdx change, not on every render.
@@ -324,8 +361,39 @@ export default function DispenserGuidedPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [advancedOpen]);
 
+  // While the Verify card is on screen, keep re-running the pill
+  // detector so the tray-status strip reflects whether the pill is
+  // still on the tray (taken vs. forgotten). Skipped if no expected
+  // medication is known yet, if a verify call is already in flight,
+  // or if hardware isn't configured.
+  useEffect(() => {
+    if (viewIdx !== 3) return;
+    if (!configured) return;
+    const expected = currentSlot?.name ?? undefined;
+    let alive = true;
+    let inFlight = false;
+    async function tick() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const vr = await verifyPill(expected);
+        if (alive) setVerifyResult(vr);
+      } finally {
+        inFlight = false;
+      }
+    }
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [viewIdx, configured, currentSlot?.name]);
+
   const cam0Url = streamUrl(0);
-  const cam1Url = streamUrl(1);
+  // Cam 1 streams with FaceMesh + Hands overlay so judges can see the
+  // MediaPipe FSM tracking the patient in real time.
+  const cam1Url = streamUrl(1, { annotate: true });
   const cam0Src = cam0Url ? `${cam0Url}&_=${snapKey}` : null;
   const cam1Src = cam1Url ? `${cam1Url}&_=${snapKey}` : null;
 
@@ -586,12 +654,63 @@ export default function DispenserGuidedPage() {
               </div>
 
               {(verifying || verifyResult) && (
-                <div className="mt-4">
+                <div className="mt-4 space-y-3">
+                  {verifyResult && unauthorized.length > 0 && (
+                    <UnsafePillAlert
+                      unauthorized={unauthorized}
+                      expected={currentSlot?.name ?? null}
+                    />
+                  )}
                   <VerifyResultCard
                     result={verifyResult}
                     verifying={verifying}
                     expected={currentSlot?.name ?? null}
                   />
+                </div>
+              )}
+
+              {verifyResult && !verifying && verifyResult.top && (
+                <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                  {unauthorized.length > 0 ? (
+                    <>
+                      <span className="mr-auto text-xs font-medium text-status-danger">
+                        Clear the tray and re-eject before proceeding.
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          currentSlot && onEject(currentSlot.slot)
+                        }
+                        disabled={
+                          !currentSlot || !drawerUnlocked || busy !== null
+                        }
+                        className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Re-eject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={confirmAndVerify}
+                        className="inline-flex items-center gap-2 rounded-full border border-status-danger bg-white px-4 py-2 text-xs font-semibold text-status-danger transition-colors hover:bg-status-danger-bg"
+                      >
+                        Override — proceed anyway
+                        <span className="rounded bg-status-danger/10 px-1 font-mono text-[10px]">
+                          ⚠
+                        </span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={confirmAndVerify}
+                      className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800"
+                    >
+                      Confirm & verify intake
+                      <span className="rounded bg-white/20 px-1 font-mono text-[10px]">
+                        →
+                      </span>
+                    </button>
+                  )}
                 </div>
               )}
             </>
@@ -604,7 +723,11 @@ export default function DispenserGuidedPage() {
                 eyebrow="Verify"
                 title="AI is watching the patient take the pill."
               />
-              <div className="grid grid-cols-1 gap-4 md:grid-cols-[3fr_4fr]">
+              <TrayStatusStrip
+                result={verifyResult}
+                expected={currentSlot?.name ?? null}
+              />
+              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[3fr_4fr]">
                 <AIIntakeCheck intake={intake} patient={activePatient} />
                 <CameraTile
                   label="Cam 1 · Patient"
@@ -994,6 +1117,134 @@ function SlotGrid({
           );
         })}
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── UnsafePillAlert ────────────────────────────
+
+function UnsafePillAlert({
+  unauthorized,
+  expected,
+}: {
+  unauthorized: PillDetection[];
+  expected: string | null;
+}) {
+  return (
+    <div
+      role="alert"
+      className="rounded-2xl border-2 border-status-danger bg-status-danger-bg p-4"
+    >
+      <div className="flex items-start gap-3">
+        <span
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white text-lg font-bold text-status-danger"
+          aria-hidden
+        >
+          ⚠
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[10px] font-medium uppercase tracking-wider text-status-danger">
+            Unauthorized medication detected
+          </p>
+          <p className="mt-0.5 text-sm font-semibold text-status-danger">
+            {unauthorized.length === 1
+              ? "1 pill on the tray is not on this round's schedule."
+              : `${unauthorized.length} pills on the tray are not on this round's schedule.`}
+          </p>
+          <p className="mt-1 text-xs text-gray-700">
+            {expected
+              ? `Only ${expected} should be dispensed at this slot. Clear the tray and re-eject before letting the patient take anything.`
+              : "Clear the tray and re-eject the correct medication."}
+          </p>
+          <ul className="mt-3 space-y-1">
+            {unauthorized.map((d, i) => (
+              <li
+                key={`${d.class_name}-${i}`}
+                className="flex items-center gap-2 rounded-xl bg-white px-3 py-1.5 text-xs"
+              >
+                <span className="inline-block h-1.5 w-1.5 rounded-full bg-status-danger" />
+                <span className="font-semibold text-gray-900">
+                  {d.class_name}
+                </span>
+                <span className="ml-auto font-mono text-gray-500">
+                  {Math.round(d.confidence * 100)}%
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── TrayStatusStrip ────────────────────────────
+
+function TrayStatusStrip({
+  result,
+  expected,
+}: {
+  result: VerifyPillResult | null;
+  expected: string | null;
+}) {
+  if (!result) {
+    return (
+      <div className="flex items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5 text-xs text-gray-500">
+        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-olive-400" />
+        Probing tray with pill_detector…
+      </div>
+    );
+  }
+
+  const top = result.top;
+  const hasPill = !!top;
+  const confPct = top ? Math.round(top.confidence * 100) : null;
+  const matchTone =
+    !hasPill
+      ? { dot: "bg-status-warning", label: "TRAY EMPTY", text: "text-status-warning" }
+      : result.match === false
+      ? { dot: "bg-status-danger", label: "WRONG PILL", text: "text-status-danger" }
+      : { dot: "bg-status-success", label: "ON TRAY", text: "text-status-success" };
+
+  return (
+    <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-sand-200 bg-white px-4 py-2.5 text-xs">
+      <div className="flex items-center gap-2">
+        <span
+          className={`inline-block h-1.5 w-1.5 animate-pulse rounded-full ${matchTone.dot}`}
+        />
+        <span
+          className={`font-semibold uppercase tracking-wider ${matchTone.text}`}
+        >
+          {matchTone.label}
+        </span>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span className="text-gray-500">
+          Detected:{" "}
+          <span className="font-semibold text-gray-900">
+            {top?.class_name ?? "none"}
+          </span>
+        </span>
+        <span className="text-gray-500">
+          Confidence:{" "}
+          <span className="font-mono text-gray-900">
+            {confPct !== null ? `${confPct}%` : "—"}
+          </span>
+        </span>
+        {expected && (
+          <span className="text-gray-500">
+            Expected: <span className="text-gray-900">{expected}</span>
+          </span>
+        )}
+        {typeof result.latency_ms === "number" && (
+          <span className="text-gray-400">
+            <span className="font-mono">{result.latency_ms}ms</span>
+          </span>
+        )}
+      </div>
+      <span className="ml-auto text-[10px] uppercase tracking-wider text-gray-400">
+        auto-refresh · 4s
+      </span>
     </div>
   );
 }

@@ -398,6 +398,55 @@ async def intake_state(request: Request):
     return monitor.get_state()
 
 
+class IntakeStartBody(BaseModel):
+    # How long the FSM may run before timing out (seconds). Matches the
+    # default the cycle uses in cycle_runner.
+    timeout_s: float = Field(default=60.0, gt=0, le=300)
+
+
+@router.post("/intake/start", status_code=202)
+async def start_intake(body: IntakeStartBody, request: Request):
+    """Kick the IntakeMonitor's swallow-watch loop in a background task.
+
+    Mirrors what the cycle runner does at the swallow phase, but exposes
+    it to the dashboard so a manual eject flow can still drive the
+    intake FSM without queuing a full new dispense cycle.
+
+    Idempotent-on-running: if a watch is already in flight (either from
+    the cycle or a previous call), returns ``already_running: True``
+    instead of starting a second loop on the same monitor.
+    """
+    loop = _get_loop(request)
+    state = getattr(loop, "_state", None) if loop else None
+    monitor = getattr(state, "monitor", None) if state else None
+    if monitor is None:
+        raise HTTPException(
+            status_code=503,
+            detail="IntakeMonitor not initialised (cycle hasn't started)",
+        )
+
+    snapshot = monitor.get_state()
+    if snapshot.get("running"):
+        return {"ok": True, "already_running": True, "timeout_s": body.timeout_s}
+
+    existing: asyncio.Task | None = getattr(
+        request.app.state, "intake_watch_task", None
+    )
+    if existing is not None and not existing.done():
+        return {"ok": True, "already_running": True, "timeout_s": body.timeout_s}
+
+    async def _run() -> None:
+        try:
+            await asyncio.to_thread(monitor.watch_for_swallow, body.timeout_s)
+        except Exception:
+            log.exception("intake/start: watch_for_swallow raised")
+
+    task = asyncio.create_task(_run(), name="intake-watch")
+    request.app.state.intake_watch_task = task
+    log.info("intake/start: launched watch_for_swallow(timeout_s=%.1f)", body.timeout_s)
+    return {"ok": True, "already_running": False, "timeout_s": body.timeout_s}
+
+
 _PILL_DETECTOR_PATH = "models/pill_detector.pt"
 
 
