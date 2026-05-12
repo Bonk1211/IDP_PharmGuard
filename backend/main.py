@@ -28,8 +28,9 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from api import agent, alerts, auth, device, flags, inventory, logs
 from config import settings
@@ -105,11 +106,34 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    # Localhost dev (any port), local IP variants, and Vercel preview
+    # URLs. The dashboard hits the Pi through a cloudflare/ngrok tunnel
+    # from these origins, so the tunnel domain itself is NOT the request
+    # origin — localhost:3000 (or :3001 etc.) is.
+    allow_origin_regex=(
+        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
+        r"|^https://[^/]+\.vercel\.app$"
+    ),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def _all_unhandled(request: Request, exc: Exception):
+    """Catch-all so unhandled exceptions still flow through middleware
+    (CORS headers, gzip, etc.) instead of bypassing it via uvicorn's bare
+    ASGI 500. Without this, a crash inside an endpoint produces a CORS
+    failure in the browser on top of the actual error — masking the root
+    cause from the dashboard logs.
+    """
+    log.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
+
 
 app.include_router(agent.router, prefix="/api/agent", tags=["agent"])
 app.include_router(flags.router, prefix="/api/agent/flags", tags=["agent-flags"])
