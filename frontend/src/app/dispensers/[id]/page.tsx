@@ -24,9 +24,11 @@ import {
   setDrawer,
   streamUrl,
   triggerDispense,
+  verifyPill,
   type DeviceStatus,
   type IntakeState,
   type ScheduleRow,
+  type VerifyPillResult,
 } from "@/lib/device";
 import {
   createIntakeLog,
@@ -145,6 +147,9 @@ export default function DispenserGuidedPage() {
   const [now, setNow] = useState<Date>(new Date());
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [viewIdx, setViewIdx] = useState<number>(0);
+  const [lastEjected, setLastEjected] = useState<number | null>(null);
+  const [verifyResult, setVerifyResult] = useState<VerifyPillResult | null>(null);
+  const [verifying, setVerifying] = useState<boolean>(false);
   const prevSnapUrl = useRef<string | null>(null);
   const lastStepIdxRef = useRef<number>(-1);
 
@@ -269,8 +274,16 @@ export default function DispenserGuidedPage() {
 
   const ejectedSlot: number | null = useMemo(() => {
     if (intake?.running && currentSlot) return currentSlot.slot;
-    return null;
-  }, [intake?.running, currentSlot]);
+    return lastEjected;
+  }, [intake?.running, currentSlot, lastEjected]);
+
+  // Clear the "just ejected" indicator after 5 s so the slot grid stops
+  // pulsing once the operator has had a chance to read it.
+  useEffect(() => {
+    if (lastEjected === null) return;
+    const t = setTimeout(() => setLastEjected(null), 5000);
+    return () => clearTimeout(t);
+  }, [lastEjected]);
 
   const drawerUnlocked = !!status?.is_unlocked;
 
@@ -358,11 +371,36 @@ export default function DispenserGuidedPage() {
 
   async function onEject(slot: number) {
     const r = await withBusy(`eject-${slot}`, () => manualEject(slot));
-    setMsg(
-      r.ok
-        ? `Slot ${slot} ejected (${r.latency_ms} ms).`
-        : `Eject failed: ${r.error ?? r.status}`,
-    );
+    if (r.ok) {
+      setLastEjected(slot);
+      setMsg(`Slot ${slot} ejected (${r.latency_ms} ms). Verifying…`);
+      // Kick off pill verification in the background so the eject
+      // handler returns immediately. YOLO inference takes ~150-200 ms
+      // on the Pi; give the pill a moment to settle on the tray first.
+      const expected = slots.find((s) => s.slot === slot)?.name ?? undefined;
+      setVerifyResult(null);
+      setVerifying(true);
+      setTimeout(() => {
+        verifyPill(expected)
+          .then((vr) => {
+            setVerifyResult(vr);
+            if (vr.ok && vr.top) {
+              setMsg(
+                vr.match === true
+                  ? `Verified: ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}% confidence).`
+                  : vr.match === false
+                  ? `Mismatch: detected ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}%), expected ${expected}.`
+                  : `Detected: ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}%).`,
+              );
+            } else {
+              setMsg(`Verification failed: ${vr.error ?? "no detection"}.`);
+            }
+          })
+          .finally(() => setVerifying(false));
+      }, 600);
+    } else {
+      setMsg(`Eject failed: ${r.error ?? r.status}`);
+    }
   }
 
   async function onResnapshot() {
@@ -503,7 +541,8 @@ export default function DispenserGuidedPage() {
               <UnlockSection
                 drawerUnlocked={drawerUnlocked}
                 configured={configured}
-                onOpenAdvanced={() => setAdvancedOpen(true)}
+                busy={busy}
+                onSetDrawer={onSetDrawer}
               />
             </>
           )}
@@ -519,8 +558,25 @@ export default function DispenserGuidedPage() {
                     : "Waiting for active medication."
                 }
               />
-              <div className="grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
-                <SlotGrid slots={slots} ejectedSlot={ejectedSlot} />
+
+              <DispenseCTA
+                currentSlot={currentSlot}
+                drawerUnlocked={drawerUnlocked}
+                busy={busy}
+                configured={configured}
+                onEject={onEject}
+                onOpenAdvanced={() => setAdvancedOpen(true)}
+              />
+
+              <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
+                <SlotGrid
+                  slots={slots}
+                  ejectedSlot={ejectedSlot}
+                  drawerUnlocked={drawerUnlocked}
+                  busy={busy}
+                  configured={configured}
+                  onEject={onEject}
+                />
                 <CameraTile
                   label="Cam 0 · Tray"
                   url={cam0Src}
@@ -528,6 +584,16 @@ export default function DispenserGuidedPage() {
                   footer={cam0Footer}
                 />
               </div>
+
+              {(verifying || verifyResult) && (
+                <div className="mt-4">
+                  <VerifyResultCard
+                    result={verifyResult}
+                    verifying={verifying}
+                    expected={currentSlot?.name ?? null}
+                  />
+                </div>
+              )}
             </>
           )}
           {viewIdx === 3 && (
@@ -865,9 +931,17 @@ function StateLegend() {
 function SlotGrid({
   slots,
   ejectedSlot,
+  drawerUnlocked,
+  busy,
+  configured,
+  onEject,
 }: {
   slots: SlotInfo[];
   ejectedSlot: number | null;
+  drawerUnlocked: boolean;
+  busy: string | null;
+  configured: boolean;
+  onEject: (slot: number) => void;
 }) {
   const slotsByIndex = SLOT_NUMBERS.map((i) => slots.find((s) => s.slot === i) ?? null);
   const ejectedCount = ejectedSlot !== null ? 1 : 0;
@@ -876,7 +950,7 @@ function SlotGrid({
     <div className="rounded-2xl border border-sand-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
         <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-          Magazine
+          Magazine — click a loaded slot to eject
         </p>
         <span className="text-[10px] text-gray-400">
           {TOTAL_SLOTS} slots · {ejectedCount} ejected
@@ -888,10 +962,16 @@ function SlotGrid({
           const slot = i;
           const state = s ? deriveSlotState(s, ejectedSlot) : "locked";
           const isEjected = state === "ejected";
+          const isBusy = busy === `eject-${slot}`;
+          const canEject =
+            !!s?.name && configured && drawerUnlocked && busy === null;
           return (
-            <div
+            <button
               key={slot}
-              className={`flex flex-col gap-1 rounded-xl border p-2.5 text-left text-xs ${slotStateClasses(state)} ${
+              type="button"
+              onClick={() => canEject && onEject(slot)}
+              disabled={!canEject}
+              className={`flex flex-col gap-1 rounded-xl border p-2.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${slotStateClasses(state)} ${
                 isEjected ? "animate-pulse-soft ring-2 ring-olive-400" : ""
               }`}
             >
@@ -899,6 +979,7 @@ function SlotGrid({
                 <span className="font-mono text-[10px] uppercase tracking-wider opacity-70">
                   Slot {String(slot).padStart(2, "0")}
                 </span>
+                {isBusy && <span className="text-[10px]">…</span>}
               </div>
               <div className="truncate font-semibold">{s?.name ?? "—"}</div>
               <div className="flex items-center justify-between">
@@ -909,9 +990,213 @@ function SlotGrid({
                   {state === "ejected" ? "● Ejected" : state}
                 </span>
               </div>
-            </div>
+            </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── VerifyResultCard ────────────────────────────
+
+function VerifyResultCard({
+  result,
+  verifying,
+  expected,
+}: {
+  result: VerifyPillResult | null;
+  verifying: boolean;
+  expected: string | null;
+}) {
+  if (verifying && !result) {
+    return (
+      <div className="flex items-center gap-3 rounded-2xl border border-sand-200 bg-white p-4">
+        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-olive-500" />
+        <p className="text-xs text-gray-700">
+          Running pill identifier on the tray frame…
+        </p>
+      </div>
+    );
+  }
+
+  if (!result) return null;
+
+  const top = result.top;
+  const match = result.match;
+  const tone =
+    match === true
+      ? {
+          bg: "bg-status-success-bg",
+          border: "border-status-success",
+          text: "text-status-success",
+          icon: "✓",
+          headline: "Verified — correct medication",
+        }
+      : match === false
+      ? {
+          bg: "bg-status-danger-bg",
+          border: "border-status-danger",
+          text: "text-status-danger",
+          icon: "✗",
+          headline: "Mismatch — pill does not match expected",
+        }
+      : top
+      ? {
+          bg: "bg-olive-50",
+          border: "border-olive-300",
+          text: "text-olive-700",
+          icon: "·",
+          headline: "Detection complete",
+        }
+      : {
+          bg: "bg-status-warning-bg",
+          border: "border-status-warning",
+          text: "text-status-warning",
+          icon: "?",
+          headline: "No pill detected on tray",
+        };
+
+  const confPct = top ? Math.round(top.confidence * 100) : null;
+
+  return (
+    <div className={`rounded-2xl border ${tone.border} ${tone.bg} p-4`}>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr_3fr]">
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-3">
+            <span
+              className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-lg font-bold ${tone.text}`}
+            >
+              {tone.icon}
+            </span>
+            <div>
+              <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">
+                Pill verification
+              </p>
+              <p className={`text-sm font-semibold ${tone.text}`}>
+                {tone.headline}
+              </p>
+            </div>
+          </div>
+
+          <dl className="grid grid-cols-2 gap-2 text-xs">
+            <dt className="text-gray-500">Detected</dt>
+            <dd className="font-semibold text-gray-900">
+              {top ? top.class_name : "—"}
+            </dd>
+            <dt className="text-gray-500">Confidence</dt>
+            <dd className="font-mono text-gray-900">
+              {confPct !== null ? `${confPct}%` : "—"}
+            </dd>
+            <dt className="text-gray-500">Expected</dt>
+            <dd className="text-gray-900">{expected ?? "—"}</dd>
+            <dt className="text-gray-500">Other candidates</dt>
+            <dd className="text-gray-700">
+              {result.detections.length > 1
+                ? result.detections
+                    .slice(1, 4)
+                    .map(
+                      (d) =>
+                        `${d.class_name} ${Math.round(d.confidence * 100)}%`,
+                    )
+                    .join(", ")
+                : "none"}
+            </dd>
+            {typeof result.latency_ms === "number" && (
+              <>
+                <dt className="text-gray-500">Inference</dt>
+                <dd className="font-mono text-gray-500">
+                  {result.latency_ms} ms
+                </dd>
+              </>
+            )}
+          </dl>
+        </div>
+
+        <div className="overflow-hidden rounded-xl border border-sand-200 bg-black">
+          {result.snapshot_b64 ? (
+            /* eslint-disable-next-line @next/next/no-img-element */
+            <img
+              src={`data:image/jpeg;base64,${result.snapshot_b64}`}
+              alt="Annotated tray snapshot"
+              className="h-full w-full object-contain"
+            />
+          ) : (
+            <div className="flex h-40 w-full items-center justify-center text-xs text-gray-400">
+              No snapshot
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── DispenseCTA ────────────────────────────
+
+function DispenseCTA({
+  currentSlot,
+  drawerUnlocked,
+  busy,
+  configured,
+  onEject,
+  onOpenAdvanced,
+}: {
+  currentSlot: SlotInfo | null;
+  drawerUnlocked: boolean;
+  busy: string | null;
+  configured: boolean;
+  onEject: (slot: number) => void;
+  onOpenAdvanced: () => void;
+}) {
+  const slot = currentSlot?.slot;
+  const slotBusy =
+    typeof slot === "number" && busy === `eject-${slot}`;
+  const canEject =
+    !!currentSlot &&
+    !!currentSlot.name &&
+    configured &&
+    drawerUnlocked &&
+    busy === null;
+
+  return (
+    <div className="flex flex-wrap items-center gap-4 rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="min-w-0 flex-1">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+          Active medication
+        </p>
+        <p className="truncate text-sm font-semibold text-gray-900">
+          {currentSlot
+            ? `${currentSlot.name}${currentSlot.pills_per_dose > 1 ? ` ×${currentSlot.pills_per_dose}` : ""} · slot ${String(currentSlot.slot).padStart(2, "0")}`
+            : "No active slot"}
+        </p>
+        <p className="mt-1 text-[11px] text-gray-500">
+          {drawerUnlocked
+            ? "Press Eject to push the pill onto the tray. Tray camera will show the drop."
+            : "Drawer is locked. Unlock the drawer (step 2) before ejecting."}
+        </p>
+      </div>
+      <div className="flex items-center gap-2">
+        {!drawerUnlocked && (
+          <button
+            type="button"
+            onClick={onOpenAdvanced}
+            className="rounded-full border border-sand-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50"
+          >
+            Open Advanced
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => slot !== undefined && onEject(slot)}
+          disabled={!canEject}
+          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {slotBusy
+            ? "Ejecting…"
+            : `Eject${currentSlot ? ` ${currentSlot.name}` : ""}`}
+          <span className="rounded bg-white/20 px-1 font-mono text-[10px]">↓</span>
+        </button>
       </div>
     </div>
   );
@@ -1324,14 +1609,16 @@ function StepBar({
 function UnlockSection({
   drawerUnlocked,
   configured,
-  onOpenAdvanced,
+  busy,
+  onSetDrawer,
 }: {
   drawerUnlocked: boolean;
   configured: boolean;
-  onOpenAdvanced: () => void;
+  busy: string | null;
+  onSetDrawer: (action: "lock" | "unlock") => void;
 }) {
   return (
-    <div className="flex flex-col items-start gap-4 rounded-2xl border border-sand-200 bg-white p-6">
+    <div className="flex flex-col items-start gap-5 rounded-2xl border border-sand-200 bg-white p-6">
       <div className="flex items-center gap-3">
         <span
           className={`flex h-14 w-14 items-center justify-center rounded-2xl text-2xl ${
@@ -1357,17 +1644,24 @@ function UnlockSection({
           </p>
         </div>
       </div>
-      {!drawerUnlocked && (
+      <div className="flex flex-wrap items-center gap-2">
         <button
           type="button"
-          onClick={onOpenAdvanced}
-          disabled={!configured}
-          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => onSetDrawer("lock")}
+          disabled={!configured || busy !== null || !drawerUnlocked}
+          className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Open Advanced to unlock
-          <span className="text-[10px]">▲</span>
+          {busy === "drawer-lock" ? "Locking…" : "Lock (0°)"}
         </button>
-      )}
+        <button
+          type="button"
+          onClick={() => onSetDrawer("unlock")}
+          disabled={!configured || busy !== null || drawerUnlocked}
+          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {busy === "drawer-unlock" ? "Unlocking…" : "Unlock (180°)"}
+        </button>
+      </div>
     </div>
   );
 }

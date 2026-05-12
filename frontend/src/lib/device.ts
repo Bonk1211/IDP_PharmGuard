@@ -215,6 +215,60 @@ export async function manualEject(slot: number): Promise<EjectResult> {
   }
 }
 
+export type PillDetection = {
+  class_name: string;
+  confidence: number;
+  bbox: [number, number, number, number];
+};
+
+export type VerifyPillResult = {
+  ok: boolean;
+  status: number;
+  expected: string | null;
+  top: PillDetection | null;
+  match: boolean | null;
+  detections: PillDetection[];
+  snapshot_b64: string | null;
+  latency_ms?: number;
+  error?: string;
+};
+
+export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
+  const empty: VerifyPillResult = {
+    ok: false,
+    status: 0,
+    expected: expected ?? null,
+    top: null,
+    match: null,
+    detections: [],
+    snapshot_b64: null,
+  };
+  if (!isDeviceConfigured()) return empty;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/verify_pill`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ expected: expected ?? null }),
+    });
+    if (!r.ok) {
+      return { ...empty, status: r.status, error: await safeError(r) };
+    }
+    const data = await r.json();
+    return {
+      ok: true,
+      status: r.status,
+      expected: data?.expected ?? expected ?? null,
+      top: data?.top ?? null,
+      match: data?.match ?? null,
+      detections: Array.isArray(data?.detections) ? data.detections : [],
+      snapshot_b64: data?.snapshot_b64 ?? null,
+      latency_ms: data?.latency_ms,
+    };
+  } catch {
+    return empty;
+  }
+}
+
 export async function setDrawer(action: DrawerAction): Promise<DrawerResult> {
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {

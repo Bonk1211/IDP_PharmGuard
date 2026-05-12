@@ -161,6 +161,111 @@ async def manual_drawer(body: DrawerBody, request: Request):
     return {"ok": True, "action": body.action, "is_unlocked": bool(drawer.is_unlocked)}
 
 
+# ─────────────────── pill verification (post-eject) ────────────────────
+
+
+class VerifyPillBody(BaseModel):
+    # Caller's expected medication name (matched case/space/underscore
+    # insensitive against the YOLO class label). Optional — without it
+    # the endpoint still returns the top detection but match is null.
+    expected: str | None = None
+
+
+@router.post("/verify_pill")
+async def verify_pill(body: VerifyPillBody, request: Request):
+    """Grab one frame from cam_0, run pill_detector, and return the top
+    detection together with an annotated snapshot the UI can render.
+
+    Used by the Dispense step in the dashboard: after the operator hits
+    Eject, the UI calls this to confirm what landed on the tray and
+    score it against the expected medication.
+    """
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no cameras")
+    state = getattr(loop, "_state", None)
+    cam = getattr(state, "cam_a", None) if state else None
+    if cam is None or not hasattr(cam, "read_frame"):
+        raise HTTPException(status_code=503, detail="cam_0 not open")
+
+    t0 = time.monotonic()
+    frame = await asyncio.to_thread(cam.read_frame)
+    if frame is None:
+        raise HTTPException(status_code=503, detail="No frame available")
+
+    detector = await asyncio.to_thread(_get_pill_detector, request.app)
+
+    def _run():
+        import base64
+        import cv2
+
+        results = detector(frame, verbose=False)
+        r0 = results[0] if results else None
+        detections: list[dict] = []
+        if r0 is not None and getattr(r0, "boxes", None) is not None:
+            names = getattr(r0, "names", {}) or {}
+            for box in r0.boxes:
+                cls_idx = (
+                    int(box.cls.item()) if hasattr(box.cls, "item") else int(box.cls)
+                )
+                conf = (
+                    float(box.conf.item())
+                    if hasattr(box.conf, "item")
+                    else float(box.conf)
+                )
+                xyxy = (
+                    box.xyxy[0].tolist()
+                    if hasattr(box.xyxy, "tolist")
+                    else list(box.xyxy[0])
+                )
+                detections.append(
+                    {
+                        "class_name": names.get(cls_idx, str(cls_idx)),
+                        "confidence": round(conf, 4),
+                        "bbox": [round(float(v), 1) for v in xyxy],
+                    }
+                )
+        annotated = r0.plot() if r0 is not None else frame
+        ok, jpeg = cv2.imencode(
+            ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+        )
+        b64 = base64.b64encode(jpeg.tobytes()).decode("ascii") if ok else None
+        return detections, b64
+
+    detections, snapshot_b64 = await asyncio.to_thread(_run)
+    detections.sort(key=lambda d: d["confidence"], reverse=True)
+    top = detections[0] if detections else None
+
+    expected = (body.expected or "").strip() or None
+    match: bool | None = None
+    if top is not None and expected is not None:
+        # Tolerate case + whitespace + underscores so "Lomide capsule"
+        # matches the YOLO class label "Lomide_capsule".
+        def _norm(s: str) -> str:
+            return s.lower().replace(" ", "").replace("_", "")
+
+        match = _norm(top["class_name"]) == _norm(expected)
+
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    log.info(
+        "verify_pill: top=%s conf=%.2f expected=%s match=%s latency_ms=%d",
+        top["class_name"] if top else None,
+        top["confidence"] if top else 0.0,
+        expected,
+        match,
+        latency_ms,
+    )
+    return {
+        "ok": True,
+        "expected": expected,
+        "top": top,
+        "match": match,
+        "detections": detections,
+        "snapshot_b64": snapshot_b64,
+        "latency_ms": latency_ms,
+    }
+
+
 @router.get("/snapshot")
 async def camera_snapshot(
     request: Request,
