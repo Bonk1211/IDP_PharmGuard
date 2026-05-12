@@ -467,6 +467,33 @@ def _get_pill_detector(app):
     return model
 
 
+def _get_stream_mediapipe(app):
+    """Lazy MediaPipe FaceMesh + Hands instances dedicated to the
+    stream-overlay path.
+
+    Deliberately separate from IntakeMonitor's instances: MediaPipe is
+    not thread-safe, and the cycle's watch_for_swallow holds the
+    monitor's instances on its own thread while the stream is also
+    rendering frames. Sharing instances across the two threads stalls
+    the stream and shows up in the browser as a black/broken cam 1.
+    """
+    cached = getattr(app.state, "stream_mediapipe", None)
+    if cached is not None:
+        return cached
+    import mediapipe as mp
+
+    log.info("Loading stream-overlay MediaPipe instances")
+    face = mp.solutions.face_mesh.FaceMesh(
+        max_num_faces=1, refine_landmarks=True, min_detection_confidence=0.5,
+    )
+    hands = mp.solutions.hands.Hands(
+        max_num_hands=2, min_detection_confidence=0.5,
+    )
+    cached = (face, hands)
+    app.state.stream_mediapipe = cached
+    return cached
+
+
 @router.get("/stream/{cam_num}")
 async def stream_camera(
     cam_num: int,
@@ -513,20 +540,20 @@ async def stream_camera(
     # ── Decide annotation backend per-camera ───────────────────────────
     do_annotate = bool(annotate)
     pill_detector = None
-    monitor = None  # IntakeMonitor — owns _face_mesh + _hands
+    stream_face = None
+    stream_hands = None
 
     if do_annotate and cam_num == 0:
         # Cam 0 → pill_detector.pt (multi-class pill identification).
         pill_detector = await asyncio.to_thread(_get_pill_detector, request.app)
         target_fps = 5
     elif do_annotate and cam_num == 1:
-        # Cam 1 → MediaPipe overlay. Reuse the cycle's already-loaded models.
-        monitor = getattr(state, "monitor", None) if state else None
-        if monitor is None or getattr(monitor, "_face_mesh", None) is None:
-            raise HTTPException(
-                status_code=503,
-                detail="IntakeMonitor not initialised (cycle hasn't started)",
-            )
+        # Cam 1 → MediaPipe overlay using stream-dedicated instances so
+        # we never race the cycle's IntakeMonitor on its own models
+        # (sharing stalls the stream — see _get_stream_mediapipe docstring).
+        stream_face, stream_hands = await asyncio.to_thread(
+            _get_stream_mediapipe, request.app
+        )
         target_fps = 10
     else:
         target_fps = 15
@@ -552,8 +579,8 @@ async def stream_camera(
         import cv2
         import mediapipe as mp
 
-        face = monitor._face_mesh.process(frame)
-        hands = monitor._hands.process(frame)
+        face = stream_face.process(frame)
+        hands = stream_hands.process(frame)
         # cv2 draw + imencode expect BGR — single convert here.
         annotated = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
 
