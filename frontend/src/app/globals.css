@@ -102,3 +102,40 @@ body {
 .stagger-4 { animation-delay: 0.2s; }
 .stagger-5 { animation-delay: 0.25s; }
 .stagger-6 { animation-delay: 0.3s; }
+
+/* Step bar animations */
+@keyframes pulse-soft {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(132, 150, 80, 0.55); }
+  50%      { box-shadow: 0 0 0 8px rgba(132, 150, 80, 0); }
+}
+.animate-pulse-soft {
+  animation: pulse-soft 1.8s ease-in-out infinite;
+}
+
+@keyframes check-draw {
+  from { stroke-dashoffset: 24; }
+  to   { stroke-dashoffset: 0; }
+}
+.check-draw {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: check-draw 0.45s ease-out forwards;
+}
+
+@keyframes connector-fill {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}
+.connector-fill {
+  transform-origin: left center;
+  animation: connector-fill 0.5s ease-out forwards;
+}
+
+/* Bottom sheet slide */
+@keyframes sheet-up {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+.animate-sheet-up {
+  animation: sheet-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}

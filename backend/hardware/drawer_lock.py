@@ -17,9 +17,13 @@ Wiring (SG90 micro servo on hardware PWM0):
     V+     (red)    -> external 5V (NOT Pi 5V — stall ~700 mA)
     GND    (brown)  -> external 5V GND AND Pi GND
 
-50 Hz PWM. Duty cycles tuned for ~0deg (LOCK) and ~90deg (UNLOCK).
-The latch geometry decides the actual angles — adjust LOCK_DUTY /
-UNLOCK_DUTY if the servo doesn't fully engage / disengage the latch.
+50 Hz PWM. SG90 (180-degree version) usable duty range is 5 % (0deg,
+1.0 ms pulse) -> 10 % (180deg, 2.0 ms). Going beyond that range drives
+the arm into the internal end-stop -> stall current -> buzzing /
+"stuck" servo. Keep a small margin off both ends.
+
+Latch geometry decides the exact angles. If the servo runs the wrong
+way, swap LOCK_DUTY <-> UNLOCK_DUTY (reversible without rewiring).
 
 Fail-safe:
   * Boot: PWM starts at 0 (servo unpowered, holds last position) +
@@ -42,16 +46,22 @@ log = logging.getLogger(__name__)
 # Hardware PWM0 on Pi 5. Free now that the diverter is gone (was on PWM1).
 PIN_SERVO = 18
 
-# 50 Hz PWM. SG90: 1.0 ms (~5 % duty) -> 0deg, 1.5 ms (~7.5 %) -> 90deg,
-# 2.0 ms (~10 %) -> 180deg. Tune to match the physical latch angle.
-LOCK_DUTY = 7.5    # rest position — latch engaged
-UNLOCK_DUTY = 12.5 # rotated — latch disengaged
+# 50 Hz PWM. SG90 180-deg pulse map:
+#   1.0 ms ( 5.0 %) ->   0 deg
+#   1.5 ms ( 7.5 %) ->  90 deg
+#   2.0 ms (10.0 %) -> 180 deg
+# Anything outside 5.0–10.0 % drives the gear into the internal end-stop.
+# Leave ~0.5 % margin so unit-to-unit variance doesn't push us past it.
+LOCK_DUTY = 5.5    # ~10 deg — latch engaged, just off the 0 deg stop
+UNLOCK_DUTY = 9.5  # ~162 deg — latch released, just off the 180 deg stop
 
 # How long the drawer stays unlocked per dispense.
 DRAWER_OPEN_S = 10.0
 # Settle time after a duty change so the servo reaches the target angle
-# before we drive duty=0 (which de-energises the coils).
-SERVO_SETTLE_S = 0.4
+# before we drive duty=0 (which de-energises the coils). SG90 sweeps
+# ~60 deg in 0.1 s unloaded, so a full ~150 deg swing needs ~0.3 s; add
+# margin for load + end-of-travel deceleration.
+SERVO_SETTLE_S = 0.8
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
 STUB_ALLOWED: bool = os.environ.get("PHARMGUARD_STUB", "0") == "1"

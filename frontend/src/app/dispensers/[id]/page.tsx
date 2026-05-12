@@ -68,11 +68,6 @@ function fmtHHmm(d: Date): string {
   });
 }
 
-function hourLabel(): string {
-  const d = new Date();
-  return `${String(d.getHours()).padStart(2, "0")}:00`;
-}
-
 function nextRoundFrom(schedules: ScheduleRow[]): { time: string; in: string } | null {
   const now = new Date();
   const today = now.toISOString().slice(0, 10);
@@ -148,7 +143,10 @@ export default function DispenserGuidedPage() {
   const [snapKey, setSnapKey] = useState(0);
   const [confirmedSlots, setConfirmedSlots] = useState<Set<number>>(new Set());
   const [now, setNow] = useState<Date>(new Date());
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [viewIdx, setViewIdx] = useState<number>(0);
   const prevSnapUrl = useRef<string | null>(null);
+  const lastStepIdxRef = useRef<number>(-1);
 
   const configured = isDeviceConfigured();
 
@@ -251,6 +249,10 @@ export default function DispenserGuidedPage() {
     };
   }, []);
 
+  const goToStep = (idx: number) => {
+    setViewIdx(Math.max(0, Math.min(idx, 4)));
+  };
+
   // ──────────────────────────── derived ─────────────────────
 
   const activeSlots: SlotInfo[] = useMemo(() => {
@@ -270,19 +272,44 @@ export default function DispenserGuidedPage() {
     return null;
   }, [intake?.running, currentSlot]);
 
+  const drawerUnlocked = !!status?.is_unlocked;
+
+  // 0=Identify 1=Unlock 2=Dispense 3=Verify 4=Log 5=Done
   const stepIdx = useMemo(() => {
     if (!activePatient) return 0;
-    if (intake?.result === "passed" && currentSlot && confirmedSlots.has(currentSlot.slot)) {
-      return 4;
+    if (
+      activeSlots.length > 0 &&
+      currentSlot &&
+      confirmedSlots.has(currentSlot.slot)
+    ) {
+      return 5;
     }
-    if (intake?.running) return 2;
-    if (intake?.result === "passed") return 3;
+    if (intake?.result === "passed") return 4;
+    if (intake?.running) return 3;
+    if (drawerUnlocked) return 2;
     return 1;
-  }, [activePatient, intake, currentSlot, confirmedSlots]);
+  }, [activePatient, intake, currentSlot, confirmedSlots, drawerUnlocked, activeSlots]);
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
 
-  const drawerUnlocked = !!status?.is_unlocked;
+  // When stepIdx advances, swap the visible card to follow.
+  // User can still click a different step to preview — we only auto-swap on
+  // a real stepIdx change, not on every render.
+  useEffect(() => {
+    if (lastStepIdxRef.current === stepIdx) return;
+    lastStepIdxRef.current = stepIdx;
+    setViewIdx(Math.min(stepIdx, 4));
+  }, [stepIdx]);
+
+  // Esc closes the advanced sheet.
+  useEffect(() => {
+    if (!advancedOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setAdvancedOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [advancedOpen]);
 
   const cam0Url = streamUrl(0);
   const cam1Url = streamUrl(1);
@@ -393,70 +420,214 @@ export default function DispenserGuidedPage() {
 
   // ──────────────────────────── render ───────────────────────
 
+  const canPrev = viewIdx > 0;
+  const canNext = viewIdx < 4 && viewIdx < Math.min(stepIdx, 4);
+
   return (
-    <div className="space-y-4">
-      <PatientBanner
-        patient={activePatient}
-        status={status}
-        nextRound={nextRound}
-        clock={fmtClock(now)}
-      />
-
-      {!configured && (
-        <div className="rounded-2xl border border-status-warning-bg bg-status-warning-bg p-3 text-xs text-status-warning">
-          Set <code>NEXT_PUBLIC_DEVICE_URL</code> + <code>NEXT_PUBLIC_DEVICE_API_KEY</code> in <code>frontend/.env.local</code> to enable hardware control.
-        </div>
-      )}
-      {statusError && configured && (
-        <div className="rounded-2xl border border-status-danger-bg bg-status-danger-bg p-3 text-xs text-status-danger">
-          {statusError}
-        </div>
-      )}
-      {msg && (
-        <div className="rounded-2xl border border-sand-200 bg-sand-50 px-3 py-2 text-xs text-gray-700">
-          {msg}
-        </div>
-      )}
-
-      <StepsRow stepIdx={stepIdx} cycleN={status?.cycle_n ?? 0} clock={fmtClock(now)} />
-      <ThisPassRow
-        slots={activeSlots}
-        currentSlot={currentSlot}
-        confirmed={confirmedSlots}
-      />
-
-      <ConfirmHeader stepIdx={stepIdx} patient={activePatient} slot={currentSlot} />
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
-        <SlotGrid
-          slots={slots}
-          ejectedSlot={ejectedSlot}
-          drawerUnlocked={drawerUnlocked}
-          busy={busy}
-          configured={configured}
-          onEject={onEject}
-          onUnlockDrawer={onUnlockDrawer}
+    <div className="-mx-6 px-6">
+      {/* Sticky header: step bar + this-pass strip */}
+      <div className="sticky top-0 z-30 -mx-6 border-b border-sand-200 bg-sand-50/85 px-6 pb-2 pt-2 backdrop-blur">
+        <StepBar
+          stepIdx={stepIdx}
+          clock={fmtClock(now)}
+          cycleN={status?.cycle_n ?? 0}
+          onJump={goToStep}
+          viewIdx={viewIdx}
         />
-        <AIIntakeCheck intake={intake} patient={activePatient} />
+        <div className="mt-2">
+          <ThisPassRow
+            slots={activeSlots}
+            currentSlot={currentSlot}
+            confirmed={confirmedSlots}
+          />
+        </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <CameraTile label="Cam 0 · Tray" url={cam0Src} clock={fmtClock(now)} footer={cam0Footer} />
-        <CameraTile label="Cam 1 · Patient" url={cam1Src} clock={fmtClock(now)} footer={cam1Footer} />
+      {/* Toasts */}
+      <div className="mt-3 space-y-2">
+        {!configured && (
+          <div className="rounded-2xl border border-status-warning-bg bg-status-warning-bg p-3 text-xs text-status-warning">
+            Set <code>NEXT_PUBLIC_DEVICE_URL</code> + <code>NEXT_PUBLIC_DEVICE_API_KEY</code> in <code>frontend/.env.local</code> to enable hardware control.
+          </div>
+        )}
+        {statusError && configured && (
+          <div className="rounded-2xl border border-status-danger-bg bg-status-danger-bg p-3 text-xs text-status-danger">
+            {statusError}
+          </div>
+        )}
+        {msg && (
+          <div className="rounded-2xl border border-sand-200 bg-sand-50 px-3 py-2 text-xs text-gray-700">
+            {msg}
+          </div>
+        )}
       </div>
 
-      <ActionBar
-        intake={intake}
-        currentSlot={currentSlot}
+      {/* Single-card stage area. Each step renders one card; key={viewIdx}
+          forces a remount so the slide-in animation replays on switch. */}
+      <div className="relative mt-4 overflow-hidden">
+        <div
+          key={viewIdx}
+          className="animate-slide-in-right flex min-h-[calc(100vh-14rem)] flex-col"
+        >
+          {viewIdx === 0 && (
+            <>
+              <SectionHeading
+                index={1}
+                total={5}
+                eyebrow="Identify"
+                title="Confirm patient at the cabinet."
+              />
+              <PatientBanner
+                patient={activePatient}
+                status={status}
+                nextRound={nextRound}
+                clock={fmtClock(now)}
+              />
+            </>
+          )}
+          {viewIdx === 1 && (
+            <>
+              <SectionHeading
+                index={2}
+                total={5}
+                eyebrow="Unlock"
+                title={
+                  drawerUnlocked
+                    ? "Drawer is unlocked."
+                    : "Unlock the drawer to begin."
+                }
+              />
+              <UnlockSection
+                drawerUnlocked={drawerUnlocked}
+                configured={configured}
+                onOpenAdvanced={() => setAdvancedOpen(true)}
+              />
+            </>
+          )}
+          {viewIdx === 2 && (
+            <>
+              <SectionHeading
+                index={3}
+                total={5}
+                eyebrow="Dispense"
+                title={
+                  currentSlot
+                    ? `Ejecting ${currentSlot.name} from slot ${currentSlot.slot}.`
+                    : "Waiting for active medication."
+                }
+              />
+              <div className="grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
+                <SlotGrid slots={slots} ejectedSlot={ejectedSlot} />
+                <CameraTile
+                  label="Cam 0 · Tray"
+                  url={cam0Src}
+                  clock={fmtClock(now)}
+                  footer={cam0Footer}
+                />
+              </div>
+            </>
+          )}
+          {viewIdx === 3 && (
+            <>
+              <SectionHeading
+                index={4}
+                total={5}
+                eyebrow="Verify"
+                title="AI is watching the patient take the pill."
+              />
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-[3fr_4fr]">
+                <AIIntakeCheck intake={intake} patient={activePatient} />
+                <CameraTile
+                  label="Cam 1 · Patient"
+                  url={cam1Src}
+                  clock={fmtClock(now)}
+                  footer={cam1Footer}
+                />
+              </div>
+            </>
+          )}
+          {viewIdx === 4 && (
+            <>
+              <SectionHeading
+                index={5}
+                total={5}
+                eyebrow="Log"
+                title={
+                  stepIdx === 5
+                    ? "Round complete."
+                    : `Confirm ${activePatient?.name?.split(" ")[0] ?? "the patient"} took the pill.`
+                }
+              />
+              <ConfirmHeader patient={activePatient} slot={currentSlot} />
+              <div className="mt-4">
+                <ActionBar
+                  intake={intake}
+                  currentSlot={currentSlot}
+                  busy={busy}
+                  overrideOpen={overrideOpen}
+                  overrideNote={overrideNote}
+                  setOverrideOpen={setOverrideOpen}
+                  setOverrideNote={setOverrideNote}
+                  onConfirm={() => logIntake(true)}
+                  onOverride={() => logIntake(false)}
+                />
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Prev / Next card nav */}
+      <div className="mt-4 flex items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => goToStep(viewIdx - 1)}
+          disabled={!canPrev}
+          className="inline-flex items-center gap-2 rounded-full border border-sand-200 bg-white px-4 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          ← {viewIdx > 0 ? STEP_LABELS[viewIdx - 1] : "Back"}
+        </button>
+        <p className="text-[11px] text-gray-400">
+          Card {viewIdx + 1} of 5 · Live step {Math.min(stepIdx, 4) + 1}
+        </p>
+        <button
+          type="button"
+          onClick={() => goToStep(viewIdx + 1)}
+          disabled={!canNext}
+          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {viewIdx < 4 ? STEP_LABELS[viewIdx + 1] : "Done"} →
+        </button>
+      </div>
+
+      {/* Floating Advanced trigger */}
+      <button
+        type="button"
+        onClick={() => setAdvancedOpen((v) => !v)}
+        className="fixed bottom-4 right-4 z-40 inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 shadow-lg transition-colors hover:bg-sand-50"
+      >
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-olive-500" aria-hidden />
+        Advanced
+        <span className="text-gray-400">{advancedOpen ? "▼" : "▲"}</span>
+      </button>
+
+      <AdvancedSheet
+        open={advancedOpen}
+        onClose={() => setAdvancedOpen(false)}
+        slots={slots}
+        ejectedSlot={ejectedSlot}
+        drawerUnlocked={drawerUnlocked}
         busy={busy}
         configured={configured}
-        overrideOpen={overrideOpen}
-        overrideNote={overrideNote}
-        setOverrideOpen={setOverrideOpen}
-        setOverrideNote={setOverrideNote}
+        cam0Src={cam0Src}
+        cam1Src={cam1Src}
+        cam0Url={cam0Url}
+        cam1Url={cam1Url}
+        status={status}
+        clock={fmtClock(now)}
+        onEject={onEject}
+        onUnlockDrawer={onUnlockDrawer}
         onResnapshot={onResnapshot}
-        onConfirm={() => logIntake(true)}
-        onOverride={() => logIntake(false)}
       />
     </div>
   );
@@ -557,60 +728,6 @@ function PatientBanner({
   );
 }
 
-// ──────────────────────────── StepsRow (inline) ────────────────────────────
-
-function StepsRow({
-  stepIdx,
-  cycleN,
-  clock,
-}: {
-  stepIdx: number;
-  cycleN: number;
-  clock: string;
-}) {
-  const steps = ["Verify patient", "Eject pill", "Confirm intake", "Sign off"];
-  return (
-    <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
-      <div className="flex flex-1 flex-wrap items-center gap-2">
-        {steps.map((label, i) => {
-          const done = i < stepIdx;
-          const current = i === stepIdx;
-          return (
-            <div key={label} className="flex items-center gap-2">
-              <div
-                className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                  done
-                    ? "bg-status-success-bg text-status-success"
-                    : current
-                    ? "bg-olive-700 text-white ring-2 ring-olive-300"
-                    : "bg-sand-100 text-gray-400"
-                }`}
-              >
-                {done ? "✓" : i + 1}
-              </div>
-              <span
-                className={`text-xs ${
-                  current ? "font-semibold text-gray-900" : "text-gray-500"
-                }`}
-              >
-                {label}
-              </span>
-              {i < steps.length - 1 && (
-                <span
-                  className={`h-px w-6 ${done ? "bg-olive-400" : "bg-sand-200"}`}
-                />
-              )}
-            </div>
-          );
-        })}
-      </div>
-      <p className="font-mono text-[10px] uppercase tracking-wider text-gray-400">
-        {hourLabel()} round · cycle {cycleN} · {clock}
-      </p>
-    </div>
-  );
-}
-
 // ──────────────────────────── ThisPassRow (horizontal chips) ────────────────────────────
 
 function ThisPassRow({
@@ -683,36 +800,16 @@ function ThisPassRow({
 // ──────────────────────────── ConfirmHeader (bare) ────────────────────────────
 
 function ConfirmHeader({
-  stepIdx,
   patient,
   slot,
 }: {
-  stepIdx: number;
   patient: Patient | null;
   slot: SlotInfo | null;
 }) {
-  const stepLabels = ["Verify patient", "Eject pill", "Confirm intake", "Sign off"];
-  const headline =
-    stepIdx === 0
-      ? "Verify the patient at the cabinet."
-      : stepIdx === 1
-      ? `Ejecting ${slot?.name ?? "medication"} from slot ${slot?.slot ?? "?"}.`
-      : stepIdx === 2
-      ? `Confirm ${patient?.name?.split(" ")[0] ?? "the patient"} took the pill.`
-      : stepIdx === 3
-      ? "Sign off this round."
-      : "Round complete.";
-
   return (
     <div className="flex flex-col gap-3 px-1 pt-2 md:flex-row md:items-end md:justify-between">
       <div className="min-w-0">
-        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-          Step {Math.min(stepIdx + 1, 4)} of 4 · {stepLabels[Math.min(stepIdx, 3)]}
-        </p>
-        <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl text-gray-900">
-          {headline}
-        </h2>
-        <p className="mt-1 text-xs text-gray-600">
+        <p className="text-xs text-gray-600">
           {slot ? (
             <>
               <span className="font-semibold text-gray-800">
@@ -720,7 +817,8 @@ function ConfirmHeader({
                 {slot.pills_per_dose > 1 ? ` ×${slot.pills_per_dose}` : ""}
               </span>{" "}
               from slot{" "}
-              <span className="font-mono">{String(slot.slot).padStart(2, "0")}</span>.
+              <span className="font-mono">{String(slot.slot).padStart(2, "0")}</span>
+              {patient ? ` for ${patient.name}` : ""}.
             </>
           ) : (
             "Awaiting active medication."
@@ -764,19 +862,9 @@ function StateLegend() {
 function SlotGrid({
   slots,
   ejectedSlot,
-  drawerUnlocked,
-  busy,
-  configured,
-  onEject,
-  onUnlockDrawer,
 }: {
   slots: SlotInfo[];
   ejectedSlot: number | null;
-  drawerUnlocked: boolean;
-  busy: string | null;
-  configured: boolean;
-  onEject: (slot: number) => void;
-  onUnlockDrawer: () => void;
 }) {
   const slotsByIndex = SLOT_NUMBERS.map((i) => slots.find((s) => s.slot === i) ?? null);
   const ejectedCount = ejectedSlot !== null ? 1 : 0;
@@ -784,33 +872,9 @@ function SlotGrid({
   return (
     <div className="rounded-2xl border border-sand-200 bg-white p-4">
       <div className="mb-3 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span
-            className={`flex h-7 w-7 items-center justify-center rounded-full text-xs ${
-              drawerUnlocked
-                ? "bg-status-warning-bg text-status-warning"
-                : "bg-olive-50 text-olive-700"
-            }`}
-            aria-hidden
-          >
-            {drawerUnlocked ? "🔓" : "🔒"}
-          </span>
-          <span className="text-xs font-semibold text-gray-800">
-            Drawer {drawerUnlocked ? "unlocked" : "locked"}
-          </span>
-          <button
-            type="button"
-            onClick={onUnlockDrawer}
-            disabled={!configured || busy !== null}
-            className="ml-2 rounded-full border border-olive-300 bg-olive-700 px-3 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy === "drawer-unlock" || busy === "drawer-lock"
-              ? "…"
-              : drawerUnlocked
-              ? "Lock"
-              : "Unlock"}
-          </button>
-        </div>
+        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+          Magazine
+        </p>
         <span className="text-[10px] text-gray-400">
           {TOTAL_SLOTS} slots · {ejectedCount} ejected
         </span>
@@ -820,20 +884,18 @@ function SlotGrid({
         {slotsByIndex.map((s, i) => {
           const slot = i;
           const state = s ? deriveSlotState(s, ejectedSlot) : "locked";
-          const isBusy = busy === `eject-${slot}`;
+          const isEjected = state === "ejected";
           return (
-            <button
+            <div
               key={slot}
-              type="button"
-              onClick={() => s?.name && onEject(slot)}
-              disabled={!s?.name || !configured || busy !== null}
-              className={`flex flex-col gap-1 rounded-xl border p-2.5 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${slotStateClasses(state)}`}
+              className={`flex flex-col gap-1 rounded-xl border p-2.5 text-left text-xs ${slotStateClasses(state)} ${
+                isEjected ? "animate-pulse-soft ring-2 ring-olive-400" : ""
+              }`}
             >
               <div className="flex items-center justify-between">
                 <span className="font-mono text-[10px] uppercase tracking-wider opacity-70">
                   Slot {String(slot).padStart(2, "0")}
                 </span>
-                {isBusy && <span className="text-[10px]">…</span>}
               </div>
               <div className="truncate font-semibold">{s?.name ?? "—"}</div>
               <div className="flex items-center justify-between">
@@ -844,7 +906,7 @@ function SlotGrid({
                   {state === "ejected" ? "● Ejected" : state}
                 </span>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -1016,24 +1078,20 @@ function ActionBar({
   intake,
   currentSlot,
   busy,
-  configured,
   overrideOpen,
   overrideNote,
   setOverrideOpen,
   setOverrideNote,
-  onResnapshot,
   onConfirm,
   onOverride,
 }: {
   intake: IntakeState | null;
   currentSlot: SlotInfo | null;
   busy: string | null;
-  configured: boolean;
   overrideOpen: boolean;
   overrideNote: string;
   setOverrideOpen: (b: boolean) => void;
   setOverrideNote: (s: string) => void;
-  onResnapshot: () => void;
   onConfirm: () => void;
   onOverride: () => void;
 }) {
@@ -1050,7 +1108,7 @@ function ActionBar({
     : "No active slot";
 
   return (
-    <div className="sticky bottom-2 z-10 rounded-2xl border border-sand-200 bg-white/95 p-4 shadow-lg backdrop-blur">
+    <div className="rounded-2xl border border-sand-200 bg-white/95 p-4 shadow-lg backdrop-blur">
       <div className="flex flex-wrap items-center gap-3">
         <div
           className={`flex h-10 w-10 items-center justify-center rounded-2xl text-base ${
@@ -1066,14 +1124,6 @@ function ActionBar({
           <p className="text-[11px] text-gray-500">{sub}</p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={onResnapshot}
-            disabled={!configured || busy !== null}
-            className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {busy === "snap" ? "…" : "Re-snapshot"}
-          </button>
           <button
             type="button"
             onClick={() => setOverrideOpen(!overrideOpen)}
@@ -1144,5 +1194,385 @@ function Pill({
       <span className="text-[10px] uppercase tracking-wider text-gray-400">{label}</span>
       <span className={`font-semibold tabular-nums ${toneCls}`}>{value}</span>
     </span>
+  );
+}
+
+// ──────────────────────────── SectionHeading ────────────────────────────
+
+function SectionHeading({
+  index,
+  total,
+  eyebrow,
+  title,
+}: {
+  index: number;
+  total: number;
+  eyebrow: string;
+  title: string;
+}) {
+  return (
+    <div className="mb-4 px-1">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+        Step {index} of {total} · {eyebrow}
+      </p>
+      <h2 className="mt-1 font-[family-name:var(--font-display)] text-2xl text-gray-900">
+        {title}
+      </h2>
+    </div>
+  );
+}
+
+// ──────────────────────────── StepBar ────────────────────────────
+
+const STEP_LABELS = ["Identify", "Unlock", "Dispense", "Verify", "Log"];
+
+function StepBar({
+  stepIdx,
+  viewIdx,
+  clock,
+  cycleN,
+  onJump,
+}: {
+  stepIdx: number;
+  viewIdx: number;
+  clock: string;
+  cycleN: number;
+  onJump: (i: number) => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
+      <div className="flex flex-1 flex-wrap items-center gap-1.5">
+        {STEP_LABELS.map((label, i) => {
+          const done = i < stepIdx;
+          const liveActive = i === stepIdx;
+          const focused = i === viewIdx;
+          return (
+            <div key={label} className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onJump(i)}
+                className={`flex items-center gap-2 rounded-full px-2.5 py-1 text-xs transition-colors ${
+                  focused
+                    ? "bg-olive-50 ring-1 ring-olive-300"
+                    : "hover:bg-sand-50"
+                }`}
+                aria-current={focused ? "step" : undefined}
+              >
+                <span
+                  className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
+                    done
+                      ? "bg-status-success-bg text-status-success"
+                      : liveActive
+                      ? "bg-olive-700 text-white animate-pulse-soft"
+                      : focused
+                      ? "bg-olive-100 text-olive-700"
+                      : "bg-sand-100 text-gray-400"
+                  }`}
+                >
+                  {done ? (
+                    <svg
+                      key={`done-${i}`}
+                      width="12"
+                      height="12"
+                      viewBox="0 0 12 12"
+                      fill="none"
+                    >
+                      <path
+                        className="check-draw"
+                        d="M2.5 6.5 L5 9 L9.5 3.5"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
+                  ) : (
+                    i + 1
+                  )}
+                </span>
+                <span
+                  className={
+                    focused ? "font-semibold text-gray-900" : "text-gray-600"
+                  }
+                >
+                  {label}
+                </span>
+              </button>
+              {i < STEP_LABELS.length - 1 && (
+                <span
+                  className={`h-px w-5 ${
+                    done ? "bg-olive-400 connector-fill" : "bg-sand-200"
+                  }`}
+                />
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <p className="font-mono text-[10px] uppercase tracking-wider text-gray-400">
+        cycle {cycleN} · {clock}
+      </p>
+    </div>
+  );
+}
+
+// ──────────────────────────── UnlockSection ────────────────────────────
+
+function UnlockSection({
+  drawerUnlocked,
+  configured,
+  onOpenAdvanced,
+}: {
+  drawerUnlocked: boolean;
+  configured: boolean;
+  onOpenAdvanced: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-start gap-4 rounded-2xl border border-sand-200 bg-white p-6">
+      <div className="flex items-center gap-3">
+        <span
+          className={`flex h-14 w-14 items-center justify-center rounded-2xl text-2xl ${
+            drawerUnlocked
+              ? "bg-status-warning-bg text-status-warning"
+              : "bg-olive-50 text-olive-700"
+          }`}
+          aria-hidden
+        >
+          {drawerUnlocked ? "🔓" : "🔒"}
+        </span>
+        <div>
+          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+            Drawer state
+          </p>
+          <p className="font-[family-name:var(--font-display)] text-xl text-gray-900">
+            {drawerUnlocked ? "Unlocked" : "Locked"}
+          </p>
+          <p className="mt-1 text-xs text-gray-600">
+            {drawerUnlocked
+              ? "Cabinet drawer is open. Ready to dispense."
+              : "Drawer must be unlocked before the round can begin."}
+          </p>
+        </div>
+      </div>
+      {!drawerUnlocked && (
+        <button
+          type="button"
+          onClick={onOpenAdvanced}
+          disabled={!configured}
+          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Open Advanced to unlock
+          <span className="text-[10px]">▲</span>
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────── AdvancedSheet ────────────────────────────
+
+function AdvancedSheet({
+  open,
+  onClose,
+  slots,
+  ejectedSlot,
+  drawerUnlocked,
+  busy,
+  configured,
+  cam0Src,
+  cam1Src,
+  cam0Url,
+  cam1Url,
+  status,
+  clock,
+  onEject,
+  onUnlockDrawer,
+  onResnapshot,
+}: {
+  open: boolean;
+  onClose: () => void;
+  slots: SlotInfo[];
+  ejectedSlot: number | null;
+  drawerUnlocked: boolean;
+  busy: string | null;
+  configured: boolean;
+  cam0Src: string | null;
+  cam1Src: string | null;
+  cam0Url: string | null;
+  cam1Url: string | null;
+  status: DeviceStatus | null;
+  clock: string;
+  onEject: (slot: number) => void;
+  onUnlockDrawer: () => void;
+  onResnapshot: () => void;
+}) {
+  if (!open) return null;
+
+  const slotsByIndex = SLOT_NUMBERS.map(
+    (i) => slots.find((s) => s.slot === i) ?? null,
+  );
+
+  return (
+    <div className="fixed inset-0 z-50 flex flex-col justify-end">
+      {/* Backdrop */}
+      <button
+        type="button"
+        aria-label="Close advanced controls"
+        onClick={onClose}
+        className="absolute inset-0 bg-black/30"
+      />
+      {/* Sheet */}
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Advanced controls"
+        className="animate-sheet-up relative max-h-[80vh] overflow-y-auto rounded-t-3xl bg-white shadow-2xl"
+      >
+        <div className="sticky top-0 z-10 flex items-center justify-between border-b border-sand-200 bg-white/95 px-6 py-3 backdrop-blur">
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+              Advanced
+            </p>
+            <p className="text-sm font-semibold text-gray-900">
+              Operator controls
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50"
+          >
+            Close (Esc)
+          </button>
+        </div>
+
+        <div className="space-y-4 p-6">
+          {/* Drawer lock */}
+          <div className="rounded-2xl border border-sand-200 bg-sand-50 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span
+                  className={`flex h-10 w-10 items-center justify-center rounded-2xl text-lg ${
+                    drawerUnlocked
+                      ? "bg-status-warning-bg text-status-warning"
+                      : "bg-olive-50 text-olive-700"
+                  }`}
+                  aria-hidden
+                >
+                  {drawerUnlocked ? "🔓" : "🔒"}
+                </span>
+                <div>
+                  <p className="text-xs font-semibold text-gray-900">
+                    Drawer {drawerUnlocked ? "unlocked" : "locked"}
+                  </p>
+                  <p className="text-[11px] text-gray-500">
+                    Physical lock controlling the cabinet door.
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={onUnlockDrawer}
+                disabled={!configured || busy !== null}
+                className="rounded-full border border-olive-300 bg-olive-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy === "drawer-unlock" || busy === "drawer-lock"
+                  ? "…"
+                  : drawerUnlocked
+                  ? "Lock"
+                  : "Unlock"}
+              </button>
+            </div>
+          </div>
+
+          {/* Manual eject grid */}
+          <div className="rounded-2xl border border-sand-200 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-xs font-semibold text-gray-900">
+                Manual eject
+              </p>
+              <p className="text-[10px] text-gray-400">
+                Requires drawer unlocked.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+              {slotsByIndex.map((s, i) => {
+                const slot = i;
+                const state = s ? deriveSlotState(s, ejectedSlot) : "locked";
+                const isBusy = busy === `eject-${slot}`;
+                return (
+                  <button
+                    key={slot}
+                    type="button"
+                    onClick={() => s?.name && onEject(slot)}
+                    disabled={
+                      !s?.name ||
+                      !configured ||
+                      !drawerUnlocked ||
+                      busy !== null
+                    }
+                    className={`flex flex-col gap-1 rounded-xl border p-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${slotStateClasses(
+                      state,
+                    )}`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-mono text-[10px] uppercase tracking-wider opacity-70">
+                        S{String(slot).padStart(2, "0")}
+                      </span>
+                      {isBusy && <span className="text-[10px]">…</span>}
+                    </div>
+                    <div className="truncate font-semibold">
+                      {s?.name ?? "—"}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wider opacity-80">
+                      {state === "ejected" ? "● Ejected" : state}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Snapshot + cam debug */}
+          <div className="rounded-2xl border border-sand-200 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <p className="text-xs font-semibold text-gray-900">
+                Snapshots & cam debug
+              </p>
+              <button
+                type="button"
+                onClick={onResnapshot}
+                disabled={!configured || busy !== null}
+                className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {busy === "snap" ? "…" : "Re-snapshot"}
+              </button>
+            </div>
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <CameraTile
+                label="Cam 0 · Tray"
+                url={cam0Src}
+                clock={clock}
+                footer={cam0Url ?? "no URL"}
+              />
+              <CameraTile
+                label="Cam 1 · Patient"
+                url={cam1Src}
+                clock={clock}
+                footer={cam1Url ?? "no URL"}
+              />
+            </div>
+            <details className="mt-3 rounded-xl bg-sand-50 p-3 text-[11px] text-gray-700">
+              <summary className="cursor-pointer font-semibold">
+                Raw device status
+              </summary>
+              <pre className="mt-2 overflow-x-auto font-mono text-[10px] text-gray-600">
+                {status ? JSON.stringify(status, null, 2) : "no status"}
+              </pre>
+            </details>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
