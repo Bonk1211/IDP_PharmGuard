@@ -31,7 +31,7 @@ DIR_PIN = 27
 EN_PIN = 22
 
 STEPS_PER_REV = 200
-STEP_DELAY = 800e-6  # seconds; matches the Arduino's 800 us half-period
+STEP_DELAY = 1e-3  # 1 ms half-period -> 2 ms full step, matches magazine.py
 
 
 def step_once() -> None:
@@ -49,9 +49,10 @@ def rotate(direction: int) -> None:
 
 def main() -> None:
     GPIO.setmode(GPIO.BCM)
-    GPIO.setup(STEP_PIN, GPIO.OUT)
-    GPIO.setup(DIR_PIN, GPIO.OUT)
-    GPIO.setup(EN_PIN, GPIO.OUT)
+    # initial= required on Pi 5 + rpi-lgpio 0.6 (see magazine.py:46-48).
+    GPIO.setup(STEP_PIN, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(DIR_PIN, GPIO.OUT, initial=GPIO.LOW)
+    GPIO.setup(EN_PIN, GPIO.OUT, initial=GPIO.HIGH)
     GPIO.output(EN_PIN, GPIO.LOW)  # LOW = driver enabled on A4988
 
     try:

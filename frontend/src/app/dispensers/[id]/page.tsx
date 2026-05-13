@@ -21,6 +21,7 @@ import {
   fetchSnapshot,
   isDeviceConfigured,
   manualEject,
+  rotateMagazine,
   setDrawer,
   startIntakeWatch,
   streamUrl,
@@ -492,6 +493,17 @@ export default function DispenserGuidedPage() {
     }
   }
 
+  async function onRotate(slot: number) {
+    const r = await withBusy(`rotate-${slot}`, () => rotateMagazine(slot));
+    if (r.ok) {
+      setMsg(
+        `Magazine rotated to slot ${r.slot ?? slot} (${r.latency_ms} ms).`,
+      );
+    } else {
+      setMsg(`Rotate failed: ${r.error ?? r.status}`);
+    }
+  }
+
   async function onResnapshot() {
     setBusy("snap");
     setMsg(null);
@@ -728,6 +740,12 @@ export default function DispenserGuidedPage() {
                   footer={cam0Footer}
                 />
               </div>
+
+              <RotateTestBar
+                busy={busy}
+                configured={configured}
+                onRotate={onRotate}
+              />
 
               {(verifying || verifyResult) && (
                 <div className="mt-4 space-y-3">
@@ -1486,6 +1504,46 @@ function SlotGrid({
                   {state === "ejected" ? "● Ejected" : state}
                 </span>
               </div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── RotateTestBar ────────────────────────────
+
+function RotateTestBar({
+  busy,
+  configured,
+  onRotate,
+}: {
+  busy: string | null;
+  configured: boolean;
+  onRotate: (slot: number) => void;
+}) {
+  return (
+    <div className="mt-4 rounded-2xl border border-sand-200 bg-white p-4">
+      <div className="mb-3 flex items-center justify-between">
+        <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+          Rotate test — drive the magazine to any slot (no eject)
+        </p>
+        <span className="text-[10px] text-gray-400">{TOTAL_SLOTS} slots</span>
+      </div>
+      <div className="grid grid-cols-5 gap-2 sm:grid-cols-10">
+        {SLOT_NUMBERS.map((slot) => {
+          const isBusy = busy === `rotate-${slot}`;
+          const disabled = !configured || (busy !== null && !isBusy);
+          return (
+            <button
+              key={slot}
+              type="button"
+              onClick={() => onRotate(slot)}
+              disabled={disabled}
+              className="rounded-xl border border-sand-200 bg-sand-50 px-2 py-2 font-mono text-xs tabular-nums transition-colors hover:bg-sand-100 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {isBusy ? "…" : String(slot).padStart(2, "0")}
             </button>
           );
         })}

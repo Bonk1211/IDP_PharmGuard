@@ -18,10 +18,12 @@ PIN_DIR = 27
 PIN_ENABLE = 22
 
 STEPS_PER_SLOT = 200  # Adjust based on gear ratio and micro-stepping
-# Step period — wall time between rising edges. Was 2× 1 ms sleeps;
-# new loop does pulse + single sleep, preserving 2 ms motor period
-# while halving sleep syscalls per step.
-STEP_DELAY_S = 0.002
+# Half-period between STEP edges. Matches test_magazine.py exactly —
+# HIGH-sleep-LOW-sleep gives a 1 ms HIGH width which the A4988 + Pi 5
+# rpi-lgpio shim reliably latches. The previous HIGH-LOW-sleep pattern
+# left HIGH at sub-µs (back-to-back GPIO writes) and the motor missed
+# steps / didn't move at all on bench.
+STEP_DELAY_S = 1e-3
 TOTAL_SLOTS = 10
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
@@ -104,11 +106,14 @@ class Magazine:
             PIN_DIR,
             self.gpio.HIGH if direction == "forward" else self.gpio.LOW,
         )
-        # A4988 needs ~1 µs minimum STEP HIGH; back-to-back GPIO writes
-        # comfortably exceed that on Pi 5 + lgpio. One sleep per step
-        # halves syscall count vs. the old HIGH-sleep-LOW-sleep pattern.
+        # HIGH-sleep-LOW-sleep matches test_magazine.py — the only pulse
+        # pattern that actually drives the motor on Pi 5 + rpi-lgpio. Do
+        # NOT collapse this back to a single sleep: the back-to-back
+        # HIGH/LOW write left STEP HIGH for too short a window and the
+        # A4988 silently dropped steps.
         for _ in range(steps):
             self.gpio.output(PIN_STEP, self.gpio.HIGH)
+            time.sleep(STEP_DELAY_S)
             self.gpio.output(PIN_STEP, self.gpio.LOW)
             time.sleep(STEP_DELAY_S)
 

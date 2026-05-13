@@ -138,6 +138,39 @@ async def manual_eject(body: EjectBody, request: Request):
     return {"ok": True, "slot": body.slot, "latency_ms": latency_ms}
 
 
+class RotateBody(BaseModel):
+    slot: int = Field(ge=0, le=9, description="Target magazine slot (0-9).")
+
+
+@router.post("/rotate")
+async def manual_rotate(body: RotateBody, request: Request):
+    """Rotate the magazine to ``slot`` without ejecting.
+
+    Bench-test endpoint mirroring hardware/test_magazine.py. Uses the
+    same ``state.magazine.rotate_to`` path the dispense cycle uses, so
+    if this works the cycle's rotation works too. Serialized with the
+    cycle via ``app.state.hardware_lock``.
+    """
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no hardware loop")
+    state = getattr(loop, "_state", None)
+    if state is None or state.magazine is None:
+        raise HTTPException(status_code=503, detail="Magazine not initialised")
+    lock: asyncio.Lock = request.app.state.hardware_lock
+    t0 = time.monotonic()
+    async with lock:
+        await asyncio.to_thread(state.magazine.rotate_to, body.slot)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    log.info("manual rotate: slot=%d latency_ms=%d", body.slot, latency_ms)
+    return {
+        "ok": True,
+        "slot": body.slot,
+        "current_slot": state.magazine.current_slot,
+        "latency_ms": latency_ms,
+    }
+
+
 class DrawerBody(BaseModel):
     action: Literal["lock", "unlock"]
 

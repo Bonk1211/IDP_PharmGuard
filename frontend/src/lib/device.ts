@@ -207,6 +207,41 @@ export type LogRecord = {
   message: string;
 };
 
+export type RotateResult = {
+  ok: boolean;
+  status: number;
+  slot?: number;
+  current_slot?: number;
+  latency_ms?: number;
+  error?: string;
+};
+
+/**
+ * Rotate the magazine to `slot` (0-9) without ejecting. Bench-test
+ * counterpart to manualEject — same hardware path, no ejector push.
+ */
+export async function rotateMagazine(slot: number): Promise<RotateResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/rotate`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ slot }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      slot: data?.slot,
+      current_slot: data?.current_slot,
+      latency_ms: data?.latency_ms,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 export async function manualEject(slot: number): Promise<EjectResult> {
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
