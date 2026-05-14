@@ -46,76 +46,109 @@ Contract between tiers is HTTP + Supabase. No shared library.
 - Google Gemini for pill-ID fallback
 - ngrok tunnel exposes Pi backend to the cloud dashboard
 
-## Architecture
+## Architecture — user journey in the hospital ecosystem
 
-### Software / data flow
-
-```mermaid
-flowchart LR
-  subgraph Edge["Edge — Raspberry Pi 5 (backend/)"]
-    direction TB
-    Cam0["Pi Cam 0<br/>drawer"]
-    Cam1["Pi Cam 1<br/>patient"]
-    Vis["vision/<br/>pill_verifier · intake_monitor · camera"]
-    Mdl["models/<br/>spotter.pt · pill_detector.pt"]
-    HW["hardware/<br/>magazine · ejector · drawer_lock"]
-    Sched["scheduler/<br/>cycle_runner"]
-    Svc["services/<br/>face_verify · gemini_fallback<br/>label_detector · flag_detector · agent"]
-    API["api/<br/>auth · inventory · logs<br/>device · alerts · flags · agent"]
-    Store["storage/<br/>offline queue"]
-
-    Cam0 --> Vis
-    Cam1 --> Vis
-    Vis --> Mdl
-    Sched --> Vis
-    Sched --> HW
-    API --> Sched
-    API --> Svc
-    API --> Store
-    Svc --> Vis
-  end
-
-  subgraph Cloud["Cloud services"]
-    direction TB
-    SB[("Supabase<br/>Postgres + Storage")]
-    Rek["AWS Rekognition<br/>CompareFaces"]
-    Gem["Google Gemini<br/>vision fallback"]
-  end
-
-  subgraph Web["Frontend — Next.js 15 on Vercel (frontend/)"]
-    direction TB
-    Dash["Dashboard · Patients · Inventory<br/>Reports · Dispensers · Agent"]
-    Three["three.js 3D viewer"]
-    Dash --- Three
-  end
-
-  Svc -- HTTPS --> Rek
-  Svc -- HTTPS --> Gem
-  API -- service_role --> SB
-  Store -- replay on reconnect --> SB
-  Dash -- anon-key reads --> SB
-  Dash -- control via ngrok HTTPS --> API
-```
-
-### Hardware I/O
+One diagram, end-to-end. Reads left → right as the journey of a single dose, from a doctor's order in the EHR to the audit trail a compliance officer sees three months later. Hardware (red), edge software (blue), cloud services (purple), and frontend (green) are all on the same canvas so every safeguard PharmGuard adds is traceable to a real hospital actor.
 
 ```mermaid
 flowchart LR
-  PSU5["5 V supply"] --> Pi["Raspberry Pi 5"]
-  PSU12["12 V supply"] --> A4988
-  PSU12 --> Servo
-  PSU12 --> Relay
+  %% --- Actors ---
+  Dr(["👨‍⚕️ Doctor"])
+  Ph(["💊 Pharmacist"])
+  Pt(["🧓 Patient"])
+  Nu(["👩‍⚕️ Nurse"])
+  Cg(["👨‍👩‍👧 Caregiver / family"])
+  Ad(["📋 Admin / compliance"])
 
-  Pi -- CSI-2 --> Cam0["Pi Camera 0<br/>(drawer-facing)"]
-  Pi -- CSI-2 --> Cam1["Pi Camera 1<br/>(patient-facing)"]
-  Pi -- "GPIO STEP / DIR / EN" --> A4988["A4988 driver"]
-  A4988 --> NEMA["NEMA 17 stepper<br/>magazine rotation"]
-  Pi -- "GPIO PWM" --> Servo["Hobby servo<br/>ejector arm"]
-  Pi -- "GPIO" --> Relay["Relay / MOSFET"]
-  Relay --> Sol["Solenoid<br/>drawer lock"]
+  %% --- 1. Order ---
+  Dr -- "e-prescribe" --> EHR[("EHR ↔ Supabase<br/>orders / schedule")]
+
+  %% --- 2. Refill ---
+  Ph -- "scan label,<br/>load magazine" --> Mag
+
+  %% --- PharmGuard device (HW + edge SW together) ---
+  subgraph Device["🟥 PharmGuard device — one per ward corner / bedside"]
+    direction TB
+
+    subgraph DevHW["Hardware (HARDWARE_WIRING.md / BOM.md)"]
+      direction LR
+      Pi["Raspberry Pi 5"]
+      Cam1["📷 Cam 1<br/>patient-facing"]
+      Cam0["📷 Cam 0<br/>drawer-facing"]
+      Mag["⚙️ Magazine<br/>NEMA 17 + A4988"]
+      Ej["🦾 Ejector<br/>servo"]
+      Lk["🔒 Drawer lock<br/>solenoid"]
+      Pi --- Cam1 & Cam0 & Mag & Ej & Lk
+    end
+
+    subgraph DevSW["Edge software (FastAPI on the Pi — backend/)"]
+      direction TB
+      Sched["scheduler/<br/>cycle_runner"]
+      Vis["vision/<br/>spotter · pill_detector · intake FSM"]
+      Svc["services/<br/>face_verify · gemini_fallback · agent"]
+      API["api/<br/>device · inventory · logs · alerts"]
+      Store["storage/<br/>offline queue (SQLite)"]
+      Sched --> Vis
+      API --> Sched & Svc & Store
+    end
+
+    Cam1 -.frame.-> Vis
+    Cam0 -.frame.-> Vis
+    Sched -.command.-> Mag & Ej & Lk
+  end
+
+  EHR --> Sched
+
+  %% --- 3. Identify ---
+  Pt -- "stands at device" --> Cam1
+  Svc -- "CompareFaces<br/>(HTTPS, BAA-eligible)" --> Rek["☁️ AWS Rekognition"]
+  Rek -- "sim ≥ threshold" --> Lk
+
+  %% --- 4. Dispense + pill verify ---
+  Lk -- "unlocks drawer" --> Pt
+  Mag --> Ej
+  Vis -- "spotter / pill_detector" --> Mdl[("models/<br/>spotter.pt · pill_detector.pt")]
+  Vis -- "low confidence" --> Gem["☁️ Google Gemini<br/>multimodal fallback"]
+
+  %% --- 5. Intake confirm ---
+  Pt -- "swallows" --> Cam1
+  Vis -- "5-step FSM:<br/>HAND→TILT→LEVEL→MOUTH→TONGUE" --> Store
+
+  %% --- 6. Audit / cloud ---
+  Store -- "replay on reconnect" --> SB[("☁️ Supabase<br/>Postgres + Storage<br/>logs · snapshots · RLS")]
+  Svc --> SB
+
+  %% --- 7. Caregiver review + control ---
+  SB --> Dash["🟩 Caregiver Dashboard<br/>(Next.js 15 on Vercel)<br/>Patients · Inventory · Reports<br/>3D viewer · Agent chat"]
+  Nu --> Dash
+  Cg --> Dash
+  Ad -- "audit + reports" --> Dash
+  Dash -- "control commands<br/>over ngrok HTTPS" --> API
+
+  %% --- Styling ---
+  classDef hw fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+  classDef sw fill:#dbeafe,stroke:#2563eb,color:#1e3a8a;
+  classDef cloud fill:#ede9fe,stroke:#7c3aed,color:#4c1d95;
+  classDef web fill:#dcfce7,stroke:#16a34a,color:#14532d;
+  classDef store fill:#fef3c7,stroke:#d97706,color:#78350f;
+  class Pi,Cam0,Cam1,Mag,Ej,Lk hw
+  class Sched,Vis,Svc,API,Store sw
+  class Rek,Gem,SB,EHR cloud
+  class Dash web
+  class Mdl store
 ```
 
-Full pin map and wiring photos: `HARDWARE_WIRING.md`. Procurement and unit cost: `BOM.md`.
+### The journey, step by step
+
+1. **Order** — Doctor e-prescribes through the hospital EHR; the schedule lands in Supabase. PharmGuard's `scheduler/cycle_runner` polls for the next due dose.
+2. **Refill** — Pharmacist scans a barcoded label and loads the magazine slots. `label_detector` cross-checks each slot against the active formulary so wrong-slot mistakes are caught at refill time, not dispense time.
+3. **Identify** — Patient stands in front of Cam 1. The face frame is sent to AWS Rekognition `CompareFaces` against the registered reference photo in Supabase Storage. **Drawer stays locked below the similarity threshold** — no override button, no manual unlock.
+4. **Dispense + pill verify** — Magazine rotates the correct slot (NEMA 17 + A4988), servo ejector releases the dose, Cam 0 captures the unit before it leaves the drawer. `spotter.pt` confirms the tray is empty after release; `pill_detector.pt` confirms the right pill was the one dropped. If confidence is low, the frame is forwarded to Google Gemini for a second opinion.
+5. **Intake confirm** — Cam 1's MediaPipe FaceMesh + Hands 5-step FSM (HAND → TILT → LEVEL → MOUTH → TONGUE) confirms the pill was actually swallowed, not pocketed. This is the layer that none of Hero / MedMinder / Livi has.
+6. **Audit** — Every step writes to `storage/` first (SQLite offline queue) and replays to Supabase as soon as the network is back. Snapshots, similarity scores, FSM transitions, and timestamps are all preserved — the audit trail that was missing in the RaDonda Vaught case (see notebook §0).
+7. **Review + control** — Nurses, caregivers, and compliance staff see live state through the Next.js dashboard: 3D dispenser viewer, patient timelines, alert queue, and the natural-language agent (e.g. *"did Mr. Tan take his 8 a.m. dose?"*). Control commands flow back to the Pi over an ngrok HTTPS tunnel.
+
+Full pin map and wiring photos: `HARDWARE_WIRING.md`. Procurement and unit cost: `BOM.md`. Per-corner fleet economics: see notebook §6c.
 
 ## Repo layout
 
