@@ -1,0 +1,12 @@
+# PharmGuard benchmark notebook — dev-workstation only, not deployed.
+# Install: pip install -r ml/notebooks/requirements.txt
+# Run:     make benchmark
+#
+# Live YOLO eval in §5 is OPTIONAL. To enable it, install `ultralytics`
+# from backend/requirements.txt. Without it the notebook prints
+# "Live eval skipped" and continues.
+pandas>=2.0
+matplotlib>=3.8
+numpy>=1.24,<2
+jupyterlab>=4
+nbformat>=5.10

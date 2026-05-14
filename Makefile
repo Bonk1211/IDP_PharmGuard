@@ -1,4 +1,4 @@
-.PHONY: backend frontend dev setup pi-sync pi-bootstrap pi-models clean-ml
+.PHONY: backend frontend dev setup pi-sync pi-bootstrap pi-models clean-ml benchmark
 
 # Run backend (FastAPI). On dev-mac, BACKEND_HEADLESS=1 skips the hardware
 # lifespan (GPIO + cameras unavailable on darwin) but still serves the API.
@@ -50,3 +50,7 @@ pi-models:
 # Print guidance for reclaiming disk used by ML training assets (does not delete)
 clean-ml:
 	@echo "WARNING: ml/datasets/ and ml/**/Medicine_Images/ are gitignored, run 'rm -rf ml/datasets ml/pill_detector/Medicine_Images' to free disk"
+
+# Open the market & workforce benchmark notebook (dev-workstation only)
+benchmark:
+	cd ml/notebooks && jupyter lab benchmark_market_comparison.ipynb

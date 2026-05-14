@@ -1,0 +1,11 @@
+product,role,hourly_wage_usd,minutes_per_event,events_per_day,automation_factor,source_url
+Manual,RN,47.32,11,3,0.0,https://www.nurse.com/nursing-resources/salary-guides/rn/
+Manual,CNA,17.19,11,3,0.0,https://www.payscale.com/research/US/Job=Certified_Nurse_Assistant_(CNA)/Hourly_Rate/db914100/Medication-Administration
+Hero Health,RN,47.32,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+Hero Health,CNA,17.19,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+MedMinder,RN,47.32,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+MedMinder,CNA,17.19,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+Livi,RN,47.32,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+Livi,CNA,17.19,11,3,0.5,https://pmc.ncbi.nlm.nih.gov/articles/PMC3037121/
+PharmGuard,RN,47.32,11,3,0.9,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/
+PharmGuard,CNA,17.19,11,3,0.9,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/

@@ -28,6 +28,10 @@ out/
 *.swp
 *.swo
 
+# Jupyter
+ml/notebooks/.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+
 # OS
 .DS_Store
 Thumbs.db

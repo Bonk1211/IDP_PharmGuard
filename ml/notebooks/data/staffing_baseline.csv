@@ -1,0 +1,5 @@
+hospital_size_label,total_beds,med_admin_minutes_per_patient_per_day,nurse_hourly_wage,nurse_burden_multiplier,hospital_pharmacist_annual_salary,pharmacists_per_100_beds,events_per_day,source_url
+Small community (100 beds),100,33,47.32,1.4,151200,1.5,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/
+Standard community (250 beds),250,33,47.32,1.4,151200,1.5,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/
+Regional (500 beds),500,33,47.32,1.4,151200,1.5,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/
+Academic medical centre (1000 beds),1000,33,47.32,1.4,151200,1.5,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC12685314/

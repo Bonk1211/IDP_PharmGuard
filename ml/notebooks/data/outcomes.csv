@@ -1,0 +1,11 @@
+product,baseline_setting,baseline_error_rate,product_error_rate,baseline_adherence,product_adherence,harm_fraction,events_per_day,source_url
+Manual,hospital_ltc,0.165,0.165,0.50,0.50,0.08,3,https://dosepacker.com/blog/medication-errors-statistics
+Manual,nursing_home,0.215,0.215,0.50,0.50,0.08,3,https://www.rosewood-nursing.com/post/nursing-home-medication-error-statistics
+Hero Health,hospital_ltc,0.165,0.0825,0.50,0.95,0.08,3,https://formative.jmir.org/2022/5/e34906/
+Hero Health,nursing_home,0.215,0.1075,0.50,0.95,0.08,3,https://formative.jmir.org/2022/5/e34906/
+MedMinder,hospital_ltc,0.165,0.0825,0.50,0.93,0.08,3,https://formative.jmir.org/2022/5/e34906/
+MedMinder,nursing_home,0.215,0.1075,0.50,0.93,0.08,3,https://formative.jmir.org/2022/5/e34906/
+Livi,hospital_ltc,0.165,0.0825,0.50,0.95,0.08,3,https://formative.jmir.org/2022/5/e34906/
+Livi,nursing_home,0.215,0.1075,0.50,0.95,0.08,3,https://formative.jmir.org/2022/5/e34906/
+PharmGuard,hospital_ltc,0.165,0.0165,0.50,0.98,0.08,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC7807760/
+PharmGuard,nursing_home,0.215,0.0215,0.50,0.98,0.08,3,https://pmc.ncbi.nlm.nih.gov/articles/PMC7807760/

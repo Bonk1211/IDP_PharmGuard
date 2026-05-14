@@ -1,0 +1,21 @@
+product,standard,status,source_url
+Hero Health,IEC 62304,unknown,https://www.iso.org/standard/38421.html
+Hero Health,FDA Class II,unknown,https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfstandards/detail.cfm?standard__identification_no=38829
+Hero Health,HIPAA,partial,https://herohealth.com/our-product/
+Hero Health,ISO 13485,unknown,https://www.iso.org/standard/59752.html
+MedMinder,IEC 62304,unknown,https://www.iso.org/standard/38421.html
+MedMinder,FDA Class II,unknown,https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfstandards/detail.cfm?standard__identification_no=38829
+MedMinder,HIPAA,partial,https://www.theseniorlist.com/medication/dispensers/
+MedMinder,ISO 13485,unknown,https://www.iso.org/standard/59752.html
+Livi,IEC 62304,unknown,https://www.iso.org/standard/38421.html
+Livi,FDA Class II,unknown,https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfstandards/detail.cfm?standard__identification_no=38829
+Livi,HIPAA,partial,https://www.theseniorlist.com/medication/dispensers/
+Livi,ISO 13485,unknown,https://www.iso.org/standard/59752.html
+Pillo,IEC 62304,unknown,https://www.iso.org/standard/38421.html
+Pillo,FDA Class II,unknown,https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfstandards/detail.cfm?standard__identification_no=38829
+Pillo,HIPAA,unknown,https://mobileidworld.com/archive/medication-robot-face-recognition-107063/
+Pillo,ISO 13485,unknown,https://www.iso.org/standard/59752.html
+PharmGuard,IEC 62304,designed-toward,https://www.iso.org/standard/38421.html
+PharmGuard,FDA Class II,designed-toward,https://www.accessdata.fda.gov/scripts/cdrh/cfdocs/cfstandards/detail.cfm?standard__identification_no=38829
+PharmGuard,HIPAA,designed-toward,https://github.com/limjiale/IDP_PharmGuard
+PharmGuard,ISO 13485,partial,https://www.iso.org/standard/59752.html

@@ -1,0 +1,5 @@
+hospital_size_label,total_beds,num_corners,beds_per_corner,dispensers_per_corner,total_dispensers,hardware_unit_cost,subscription_monthly,source_url
+Small community (100 beds),100,6,17,4,25,150,5,https://www.quora.com/How-many-employees-does-a-250-bed-hospital-have-on-average
+Standard community (250 beds),250,10,25,6,63,150,5,https://www.quora.com/How-many-employees-does-a-250-bed-hospital-have-on-average
+Regional (500 beds),500,16,31,8,125,150,5,https://www.quora.com/How-many-employees-does-a-250-bed-hospital-have-on-average
+Academic medical centre (1000 beds),1000,28,36,9,250,150,5,https://www.quora.com/How-many-employees-does-a-250-bed-hospital-have-on-average

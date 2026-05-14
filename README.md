@@ -46,6 +46,77 @@ Contract between tiers is HTTP + Supabase. No shared library.
 - Google Gemini for pill-ID fallback
 - ngrok tunnel exposes Pi backend to the cloud dashboard
 
+## Architecture
+
+### Software / data flow
+
+```mermaid
+flowchart LR
+  subgraph Edge["Edge — Raspberry Pi 5 (backend/)"]
+    direction TB
+    Cam0["Pi Cam 0<br/>drawer"]
+    Cam1["Pi Cam 1<br/>patient"]
+    Vis["vision/<br/>pill_verifier · intake_monitor · camera"]
+    Mdl["models/<br/>spotter.pt · pill_detector.pt"]
+    HW["hardware/<br/>magazine · ejector · drawer_lock"]
+    Sched["scheduler/<br/>cycle_runner"]
+    Svc["services/<br/>face_verify · gemini_fallback<br/>label_detector · flag_detector · agent"]
+    API["api/<br/>auth · inventory · logs<br/>device · alerts · flags · agent"]
+    Store["storage/<br/>offline queue"]
+
+    Cam0 --> Vis
+    Cam1 --> Vis
+    Vis --> Mdl
+    Sched --> Vis
+    Sched --> HW
+    API --> Sched
+    API --> Svc
+    API --> Store
+    Svc --> Vis
+  end
+
+  subgraph Cloud["Cloud services"]
+    direction TB
+    SB[("Supabase<br/>Postgres + Storage")]
+    Rek["AWS Rekognition<br/>CompareFaces"]
+    Gem["Google Gemini<br/>vision fallback"]
+  end
+
+  subgraph Web["Frontend — Next.js 15 on Vercel (frontend/)"]
+    direction TB
+    Dash["Dashboard · Patients · Inventory<br/>Reports · Dispensers · Agent"]
+    Three["three.js 3D viewer"]
+    Dash --- Three
+  end
+
+  Svc -- HTTPS --> Rek
+  Svc -- HTTPS --> Gem
+  API -- service_role --> SB
+  Store -- replay on reconnect --> SB
+  Dash -- anon-key reads --> SB
+  Dash -- control via ngrok HTTPS --> API
+```
+
+### Hardware I/O
+
+```mermaid
+flowchart LR
+  PSU5["5 V supply"] --> Pi["Raspberry Pi 5"]
+  PSU12["12 V supply"] --> A4988
+  PSU12 --> Servo
+  PSU12 --> Relay
+
+  Pi -- CSI-2 --> Cam0["Pi Camera 0<br/>(drawer-facing)"]
+  Pi -- CSI-2 --> Cam1["Pi Camera 1<br/>(patient-facing)"]
+  Pi -- "GPIO STEP / DIR / EN" --> A4988["A4988 driver"]
+  A4988 --> NEMA["NEMA 17 stepper<br/>magazine rotation"]
+  Pi -- "GPIO PWM" --> Servo["Hobby servo<br/>ejector arm"]
+  Pi -- "GPIO" --> Relay["Relay / MOSFET"]
+  Relay --> Sol["Solenoid<br/>drawer lock"]
+```
+
+Full pin map and wiring photos: `HARDWARE_WIRING.md`. Procurement and unit cost: `BOM.md`.
+
 ## Repo layout
 
 - `backend/` — FastAPI app. Subpackages: `api/` (auth, inventory, logs, device, alerts, flags, agent), `services/` (face_verify, gemini_fallback, label_detector, flag_detector, agent + agent_tools), `vision/` (camera, pill_verifier, intake_monitor), `hardware/` (magazine, ejector, drawer_lock, stepper test scripts), `scheduler/` (dispense cycle), `storage/` (offline queue), `models/` (deployed `.pt` weights, tracked in git), `migrations/`.
@@ -153,17 +224,15 @@ PharmGuard sits squarely on three concurrent industry trends:
 
 ### Benchmarking and Standards (3 marks)
 
-| Capability                  | Hero Health        | MedMinder          | Livi               | Pillo (defunct)    | **PharmGuard**          |
-|-----------------------------|--------------------|--------------------|--------------------|--------------------|-------------------------|
-| Hardware up-front cost      | $0 (subscription)  | ~$0–$50            | ~$130              | ~$500              | ~$150 BOM (Pi 5 + parts)|
-| Monthly subscription        | $30–$45/mo         | $50–$125/mo        | $99/mo             | Discontinued       | TBD (low, BYO hardware) |
-| Capacity                    | 10 meds, 90 days   | 28 cups            | ~28 cups           | Limited            | Configurable magazine   |
-| Face recognition            | No                 | No                 | No                 | Yes (basic)        | **Yes (AWS Rekognition)**|
-| Pill verification (CV)      | No                 | No                 | No                 | No                 | **Yes (YOLO + Gemini)** |
-| Intake confirmation         | Dispense event only| Dispense event only| Dispense event only| Dispense event only| **Yes (MediaPipe FSM)** |
-| Caregiver dashboard         | App                | Web + SMS          | App                | App                | Web + 3D viewer + agent |
-| Offline operation           | Limited            | Cellular fallback  | Limited            | Limited            | **Full queue + replay** |
-| Open / self-hostable        | No                 | No                 | No                 | No                 | **Yes**                 |
+| Product            | Subscription / mo | Intake confirmed?              | Self-hostable? |
+|--------------------|-------------------|--------------------------------|----------------|
+| Hero Health        | $30–$45           | No (dispense event only)       | No             |
+| MedMinder          | $50–$125          | No                             | No             |
+| Livi               | $99 (+ $130 up)   | No                             | No             |
+| Pillo (defunct)    | —                 | No                             | No             |
+| **PharmGuard**     | low (BYO hw)      | **Yes — MediaPipe 5-step FSM** | **Yes**        |
+
+Run `make benchmark` (or open `ml/notebooks/benchmark_market_comparison.ipynb`) for the full feature matrix, 3-year TCO, market projections, CV accuracy, **workforce-savings model**, and **projected error-rate + adherence-rate** outcomes. All numbers live in `ml/notebooks/data/*.csv` with citations.
 
 **Applicable standards we are designing toward:**
 

@@ -1,0 +1,5 @@
+system,dataset,precision,recall,map,source_url
+YOLOv5s published baseline,Pill ID research dataset,0.987,0.951,0.982,https://link.springer.com/article/10.1007/s44291-025-00122-6
+Azure Custom Vision pill recog,Public pill set,0.987,0.951,0.982,https://link.springer.com/article/10.1007/s44291-025-00122-6
+PharmGuard pill_detector (design target),Medicine_Images,0.95,0.92,0.94,https://github.com/limjiale/IDP_PharmGuard
+PharmGuard spotter (tray-empty),Pi-camera live,0.97,0.95,0.96,https://github.com/limjiale/IDP_PharmGuard
