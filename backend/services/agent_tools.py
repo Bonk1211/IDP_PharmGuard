@@ -381,7 +381,12 @@ def _strip_unsupported_keys(node: Any) -> Any:
             if non_null and isinstance(non_null[0], dict):
                 for k, v in non_null[0].items():
                     node.setdefault(k, v)
-        for k in ("additionalProperties", "title", "$defs", "$ref", "default"):
+        for k in (
+            "additionalProperties", "title", "$defs", "$ref", "default",
+            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
+            "multipleOf", "minLength", "maxLength", "pattern",
+            "minItems", "maxItems", "uniqueItems",
+        ):
             node.pop(k, None)
         return {k: _strip_unsupported_keys(v) for k, v in node.items()}
     if isinstance(node, list):
