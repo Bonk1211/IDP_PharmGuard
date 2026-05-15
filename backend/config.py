@@ -65,8 +65,10 @@ class Settings(BaseSettings):
     # latency on schedule firing. Lower = tighter, higher = more idle.
     schedule_check_interval_s: float = 60.0
 
-    # ── Clinician assistant (read-only Gemini agent) ──────────────────────
-    agent_model_name: str = "gemini-2.5-flash"
+    # ── Clinician assistant (read-only ILMU agent) ────────────────────────
+    ilmu_api_key: str = ""
+    ilmu_base_url: str = "https://api.ilmu.ai/v1"
+    ilmu_model: str = "nemo-super"
     # CSV of LOCAL hours (24h) when the brief scheduler fires.
     # Empty string -> scheduler still runs but never fires (manual-only briefs).
     agent_brief_local_hours: str = "7,19"
@@ -74,9 +76,9 @@ class Settings(BaseSettings):
     # ── Flag detection thresholds ────────────────────────────────────────
     agent_flag_missed_streak_threshold: int = 3
     agent_flag_low_confidence_threshold: float = 0.55
-    # Flip off the Gemini soft-pattern pass without unsetting GEMINI_API_KEY
+    # Flip off the LLM soft-pattern pass without unsetting ILMU_API_KEY
     # (which would also disable chat + brief).
-    agent_flag_gemini_enabled: bool = True
+    agent_flag_llm_enabled: bool = True
 
     # ── AWS Rekognition (face verify + intake label detection) ───────────
     # Shared by services/face_verify.py and services/label_detector.py.

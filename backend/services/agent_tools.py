@@ -341,35 +341,36 @@ def dispatch(name: str, raw_args: dict[str, Any]) -> Any:
     return tool.fn(**validated.model_dump())
 
 
-def build_gemini_tools() -> list[dict]:
-    """Convert TOOLS into the Gemini function-declaration payload.
+def build_openai_tools() -> list[dict]:
+    """Convert TOOLS into the OpenAI/ILMU tool-call payload.
 
     Format:
-        [{"function_declarations": [
-            {"name": ..., "description": ..., "parameters": <JSON schema>},
-            ...
-        ]}]
-    Pass directly as `tools=` to GenerativeModel().
+        [
+          {"type": "function",
+           "function": {"name": ..., "description": ..., "parameters": <JSON schema>}},
+          ...
+        ]
+    Pass directly as `tools=` to `client.chat.completions.create(...)`.
     """
     decls: list[dict] = []
     for t in TOOLS:
         schema = t.args_schema.model_json_schema()
-        schema = _strip_unsupported_keys(schema)
+        schema = _normalise_schema(schema)
         decls.append({
-            "name": t.name,
-            "description": t.description,
-            "parameters": schema,
+            "type": "function",
+            "function": {
+                "name": t.name,
+                "description": t.description,
+                "parameters": schema,
+            },
         })
-    return [{"function_declarations": decls}]
+    return decls
 
 
-def _strip_unsupported_keys(node: Any) -> Any:
-    """Gemini's function-call schema validator rejects a few JSON-schema keys
-    that Pydantic emits by default. Recursively normalise.
-
-    Pydantic v2 emits ``{"anyOf": [{"type": "X"}, {"type": "null"}]}`` for
-    ``X | None`` fields; the Schema proto has no ``anyOf``. Collapse to the
-    non-null branch (the field is already optional via the parameter list).
+def _normalise_schema(node: Any) -> Any:
+    """Collapse Pydantic's `anyOf: [T, null]` (optional fields) into the
+    non-null branch and drop noisy `title` keys. OpenAI accepts full JSON
+    Schema otherwise — no constraint-key stripping needed.
     """
     if isinstance(node, dict):
         if "anyOf" in node:
@@ -381,14 +382,8 @@ def _strip_unsupported_keys(node: Any) -> Any:
             if non_null and isinstance(non_null[0], dict):
                 for k, v in non_null[0].items():
                     node.setdefault(k, v)
-        for k in (
-            "additionalProperties", "title", "$defs", "$ref", "default",
-            "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum",
-            "multipleOf", "minLength", "maxLength", "pattern",
-            "minItems", "maxItems", "uniqueItems",
-        ):
-            node.pop(k, None)
-        return {k: _strip_unsupported_keys(v) for k, v in node.items()}
+        node.pop("title", None)
+        return {k: _normalise_schema(v) for k, v in node.items()}
     if isinstance(node, list):
-        return [_strip_unsupported_keys(v) for v in node]
+        return [_normalise_schema(v) for v in node]
     return node

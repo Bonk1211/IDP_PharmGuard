@@ -4,9 +4,9 @@ Two passes per run:
 
 1. **Heuristic** — deterministic Python rules over Supabase rows. Cheap,
    predictable, free. Always runs.
-2. **Gemini soft pass** — single LLM call asking for "notable patterns NOT
-   covered by the heuristics". Skipped when GEMINI_API_KEY missing OR when
-   ``settings.agent_flag_gemini_enabled`` is False.
+2. **LLM soft pass** — single ILMU call asking for "notable patterns NOT
+   covered by the heuristics". Skipped when ILMU_API_KEY missing OR when
+   ``settings.agent_flag_llm_enabled`` is False.
 
 Persistence is INSERT-only into ``public.agent_flags``. Cross-run dedup is
 handled by the partial unique index on ``(fingerprint) WHERE status='open'``
@@ -49,14 +49,14 @@ _VALID_KINDS = {
 _VALID_SEVERITIES = {"info", "warning", "critical"}
 
 
-# Cap on how many flags a single Gemini call can introduce per run.
-_GEMINI_MAX_FLAGS = 3
+# Cap on how many flags a single LLM call can introduce per run.
+_LLM_MAX_FLAGS = 3
 
 # Lookback for missed-streak detection. Mirrors agent_briefs lookback.
 _LOOKBACK = timedelta(hours=24)
 
 
-_GEMINI_PROMPT = """\
+_LLM_PROMPT = """\
 You are a clinical anomaly spotter for the PharmGuard pill dispenser.
 Inspect the JSON payload below and return a JSON ARRAY (and nothing else)
 of "notable patterns" that need a human's attention BUT are NOT already
@@ -107,18 +107,18 @@ async def detect_and_persist_flags() -> dict[str, Any]:
     # persisted yet — Gemini sees the union.
     existing_open_kinds.update(c["kind"] for c in heuristic_candidates)
 
-    # 3) Gemini soft pass.
-    gemini_used = False
-    gemini_candidates: list[dict[str, Any]] = []
-    if settings.gemini_api_key and settings.agent_flag_gemini_enabled:
+    # 3) LLM soft pass.
+    llm_used = False
+    llm_candidates: list[dict[str, Any]] = []
+    if settings.ilmu_api_key and settings.agent_flag_llm_enabled:
         try:
-            gemini_candidates = await _detect_via_gemini(existing_open_kinds)
-            gemini_used = True
+            llm_candidates = await _detect_via_llm(existing_open_kinds)
+            llm_used = True
         except Exception:
-            log.exception("flag_detector: gemini pass failed, continuing without")
+            log.exception("flag_detector: LLM pass failed, continuing without")
 
     # 4) Persist.
-    all_candidates = heuristic_candidates + gemini_candidates
+    all_candidates = heuristic_candidates + llm_candidates
     by_kind: dict[str, int] = {}
     new_flags = 0
     for cand in all_candidates:
@@ -128,16 +128,16 @@ async def detect_and_persist_flags() -> dict[str, Any]:
             by_kind[cand["kind"]] = by_kind.get(cand["kind"], 0) + 1
 
     log.info(
-        "flag_detector: done — new=%d by_kind=%s gemini=%s",
+        "flag_detector: done — new=%d by_kind=%s llm=%s",
         new_flags,
         by_kind,
-        gemini_used,
+        llm_used,
     )
     return {
         "new_flags": new_flags,
         "by_kind": by_kind,
         "checked_at_iso": checked_at.isoformat(),
-        "gemini_used": gemini_used,
+        "gemini_used": llm_used,  # kept for frontend compat (FlagDetectionResult.gemini_used)
     }
 
 
@@ -344,10 +344,10 @@ def _detect_trending_empty() -> list[dict[str, Any]]:
     return candidates
 
 
-# ──────────────────────────── gemini soft pass ──────────────────────────────
+# ──────────────────────────── LLM soft pass ─────────────────────────────────
 
-async def _detect_via_gemini(existing_open_kinds: set[str]) -> list[dict[str, Any]]:
-    """Single Gemini call. Returns at most _GEMINI_MAX_FLAGS validated flag dicts."""
+async def _detect_via_llm(existing_open_kinds: set[str]) -> list[dict[str, Any]]:
+    """Single ILMU call. Returns at most _LLM_MAX_FLAGS validated flag dicts."""
     today_summary = await asyncio.to_thread(agent_tools.today_summary)
     since_iso = (datetime.now(timezone.utc) - _LOOKBACK).isoformat()
     missed = await asyncio.to_thread(
@@ -365,28 +365,34 @@ async def _detect_via_gemini(existing_open_kinds: set[str]) -> list[dict[str, An
         "existing_open_kinds": sorted(existing_open_kinds),
     }
 
-    import google.generativeai as genai
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(
-        model_name=settings.agent_model_name,
-        system_instruction=_GEMINI_PROMPT,
+    from openai import OpenAI
+    client = OpenAI(
+        api_key=settings.ilmu_api_key,
+        base_url=settings.ilmu_base_url,
     )
     user_prompt = (
         "Inspect this payload and return notable patterns as a JSON array.\n\n"
         f"```json\n{json.dumps(payload, default=str, indent=2)}\n```"
     )
-    resp = await asyncio.to_thread(model.generate_content, user_prompt)
-    text = (getattr(resp, "text", "") or "").strip()
+    resp = await asyncio.to_thread(
+        client.chat.completions.create,
+        model=settings.ilmu_model,
+        messages=[
+            {"role": "system", "content": _LLM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    text = (resp.choices[0].message.content or "").strip()
     if not text:
         return []
 
     items = _safe_parse_json_array(text)
     if not items:
-        log.info("flag_detector: gemini returned no parseable items (raw=%r)", text[:200])
+        log.info("flag_detector: LLM returned no parseable items (raw=%r)", text[:200])
         return []
 
     out: list[dict[str, Any]] = []
-    for raw in items[:_GEMINI_MAX_FLAGS]:
+    for raw in items[:_LLM_MAX_FLAGS]:
         if not isinstance(raw, dict):
             continue
         title = (raw.get("title") or "").strip()
@@ -406,7 +412,7 @@ async def _detect_via_gemini(existing_open_kinds: set[str]) -> list[dict[str, An
             "slot": raw.get("slot") if isinstance(raw.get("slot"), int) else None,
             "fingerprint": fp[:200],
             "payload": {"raw": raw},
-            "detected_by": "gemini",
+            "detected_by": "gemini",  # kept for DB enum + frontend compat
         })
     return out
 
