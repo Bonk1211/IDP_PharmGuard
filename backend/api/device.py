@@ -35,6 +35,12 @@ router = APIRouter(dependencies=[Depends(verify_device_api_key)])
 _RPICAM_TCP_BASE_PORT = 8888
 _STREAM_JPEG_QUALITY = 70
 
+# Dummy drawer state for the demo lock/unlock button. The SG90 servo was
+# pulled out of the dispense control flow (scheduler/cycle_runner.py); the
+# /api/device/drawer endpoint now just flips this in-memory flag and the
+# frontend renders it. No GPIO is touched. Process-local, resets on restart.
+_dummy_drawer_unlocked = False
+
 
 def _get_loop(request: Request):
     """Return the HardwareLoop instance, or None when in headless mode."""
@@ -65,15 +71,8 @@ async def device_status(request: Request):
             "last_cycle": None,
             "task_running": False,
         }
-    is_unlocked = False
-    try:
-        state = getattr(loop, "_state", None)
-        drawer = getattr(state, "drawer_lock", None) if state else None
-        if drawer is not None:
-            is_unlocked = bool(drawer.is_unlocked)
-    except Exception:
-        log.exception("drawer.is_unlocked probe failed")
-    base["is_unlocked"] = is_unlocked
+    # Drawer SG90 removed from the control flow — report the demo flag.
+    base["is_unlocked"] = _dummy_drawer_unlocked
     return base
 
 
@@ -176,23 +175,17 @@ class DrawerBody(BaseModel):
 
 
 @router.post("/drawer")
-async def manual_drawer(body: DrawerBody, request: Request):
-    """Manual drawer test — bypasses the cycle's auto-relock."""
-    loop = _get_loop(request)
-    if loop is None:
-        raise HTTPException(status_code=503, detail="Headless mode — no hardware loop")
-    state = getattr(loop, "_state", None)
-    drawer = getattr(state, "drawer_lock", None) if state else None
-    if drawer is None:
-        raise HTTPException(status_code=503, detail="Drawer not initialised")
-    lock: asyncio.Lock = request.app.state.hardware_lock
-    async with lock:
-        if body.action == "unlock":
-            await asyncio.to_thread(drawer.unlock)
-        else:
-            await asyncio.to_thread(drawer.lock)
-    log.info("manual drawer: action=%s", body.action)
-    return {"ok": True, "action": body.action, "is_unlocked": bool(drawer.is_unlocked)}
+async def manual_drawer(body: DrawerBody):
+    """Demo drawer toggle — flips an in-memory flag, no SG90 servo.
+
+    The drawer lock was removed from the dispense control flow. This
+    endpoint exists only so the dashboard's lock/unlock button has
+    something to call; it touches no GPIO and works in headless mode.
+    """
+    global _dummy_drawer_unlocked
+    _dummy_drawer_unlocked = body.action == "unlock"
+    log.info("demo drawer: action=%s (no servo)", body.action)
+    return {"ok": True, "action": body.action, "is_unlocked": _dummy_drawer_unlocked}
 
 
 # ─────────────────── pill verification (post-eject) ────────────────────

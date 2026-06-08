@@ -28,7 +28,6 @@ from typing import Any
 
 from config import settings
 from db.base import get_supabase
-from hardware.drawer_lock import DrawerLock
 from hardware.ejector import Ejector
 from hardware.magazine import Magazine
 from storage.queue import OfflineQueue
@@ -63,7 +62,6 @@ class CycleState:
     def __init__(self) -> None:
         self.magazine: Magazine | None = None
         self.ejector: Ejector | None = None
-        self.drawer_lock: DrawerLock | None = None
         self.cam_a: CameraSource | None = None
         self.cam_b: CameraSource | None = None
         self.verifier: PillVerifier | None = None
@@ -87,22 +85,21 @@ class CycleState:
         # Wrap blocking GPIO init in to_thread so we don't block the loop.
         self.magazine = await asyncio.to_thread(Magazine)
         self.ejector = await asyncio.to_thread(Ejector)
-        self.drawer_lock = await asyncio.to_thread(DrawerLock)
 
         # HI-012: refuse to run as if hardware were real when it isn't.
         # Mirror of edge_pi/main.py:295-316 — sys.exit(1) becomes RuntimeError.
+        # Drawer lock (SG90) removed from the control flow — the drawer is a
+        # manual demo toggle via /api/device/drawer, not part of dispense.
         self.hardware_stubbed = (
             self.magazine.is_stub
             or self.ejector.is_stub
-            or self.drawer_lock.is_stub
         )
         if self.hardware_stubbed:
             if not settings.pharmguard_stub:
                 raise RuntimeError(
                     "Hardware initialization degraded "
                     f"(magazine.is_stub={self.magazine.is_stub}, "
-                    f"ejector.is_stub={self.ejector.is_stub}, "
-                    f"drawer_lock.is_stub={self.drawer_lock.is_stub}) "
+                    f"ejector.is_stub={self.ejector.is_stub}) "
                     "but PHARMGUARD_STUB is not set. "
                     "Refusing to run — telemetry would be falsified."
                 )
@@ -153,7 +150,7 @@ class CycleState:
 
     async def cleanup(self) -> None:
         """Best-effort resource release. Idempotent."""
-        for h in (self.magazine, self.ejector, self.drawer_lock):
+        for h in (self.magazine, self.ejector):
             if h is not None:
                 try:
                     await asyncio.to_thread(h.cleanup)
@@ -390,16 +387,19 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
         await asyncio.to_thread(state.ejector.push)
         t_eject = time.perf_counter()
 
-    # Pill-ID + drawer-lock (single-chute design — no diverter).
-    # Fail-safe: if pill-ID rejects, drawer stays LOCKED. Pill sits in
-    # the chute for the operator to remove. Adherence log records
-    # pill_taken=false. Patient never gets a wrong-pill delivery.
+    # Pill-ID (single-chute design — no diverter, no drawer lock).
+    # Fail-safe: if pill-ID rejects, the pill sits in the chute for the
+    # operator to remove. Adherence log records pill_taken=false. The
+    # patient never gets a wrong-pill delivery. The drawer SG90 servo is
+    # no longer in the control flow — it is a manual demo toggle exposed
+    # at /api/device/drawer. t_drawer is pinned to t_pillid so the bench
+    # CSV schema (t_drawer_ms column) stays stable (reads ~0).
     if state.hardware_stubbed:
         pill_taken_actual = False
         pill_conf: float | None = None
         t_pillid = t_drawer = t_eject
         log.info(
-            "Stub mode: skipping vision verify, drawer_lock, swallow watch"
+            "Stub mode: skipping vision verify, swallow watch"
         )
     else:
         # confirm_tray_empty(timeout_s=5.0, *, return_confidence=False).
@@ -412,12 +412,9 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
         )
         t_pillid = time.perf_counter()
         if pill_id_pass:
-            if state.hardware_lock is not None:
-                async with state.hardware_lock:
-                    await asyncio.to_thread(state.drawer_lock.hold_unlocked)
-            else:
-                await asyncio.to_thread(state.drawer_lock.hold_unlocked)
-            t_drawer = time.perf_counter()
+            # Drawer SG90 removed from control flow — go straight to the
+            # swallow watch. t_drawer pinned to t_pillid for schema stability.
+            t_drawer = t_pillid
             if settings.bench_mode:
                 # Bench skips intake verification — keep historic behavior
                 # so accuracy runs aren't blocked on a missing face/bottle.
@@ -438,8 +435,8 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
                     )
         else:
             log.warning(
-                "Pill-ID verification failed (slot=%d, conf=%s); drawer stays "
-                "LOCKED. Operator must remove the rejected pill from the chute.",
+                "Pill-ID verification failed (slot=%d, conf=%s); pill rejected. "
+                "Operator must remove the rejected pill from the chute.",
                 slot, pill_conf,
             )
             t_drawer = t_pillid
