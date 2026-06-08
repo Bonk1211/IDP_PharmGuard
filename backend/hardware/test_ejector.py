@@ -33,7 +33,7 @@ from hardware.ejector import Ejector  # noqa: E402
 
 def main() -> int:
     if os.environ.get("PHARMGUARD_STUB") == "1":
-        print("WARNING: PHARMGUARD_STUB=1 — servo will not move in stub mode.")
+        print("WARNING: PHARMGUARD_STUB=1 — motor will not move in stub mode.")
         print()
 
     cycles = int(sys.argv[1]) if len(sys.argv) > 1 else 3
@@ -48,7 +48,7 @@ def main() -> int:
         ej.cleanup()
 
     print()
-    print("RESULT: clean swings on every cycle? PASS.")
+    print("RESULT: clean rotations on every cycle? PASS.")
     return 0
 
 
