@@ -47,6 +47,7 @@ import {
 import {
   createIntakeLog,
   fetchPatient,
+  fetchPatients,
   type Patient,
   type SlotInfo,
 } from "@/lib/api";
@@ -225,6 +226,10 @@ export default function DispenserGuidedPage() {
   const [intake, setIntake] = useState<IntakeState | null>(null);
   const [schedules, setSchedules] = useState<ScheduleRow[]>([]);
   const [activePatient, setActivePatient] = useState<Patient | null>(null);
+  // All patients (for the manual picker). Loaded once.
+  const [allPatients, setAllPatients] = useState<Patient[]>([]);
+  // Operator override for the active patient. null = auto (next-due slot).
+  const [selectedPatientId, setSelectedPatientId] = useState<number | null>(null);
 
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
@@ -337,10 +342,28 @@ export default function DispenserGuidedPage() {
     };
   }, [configured]);
 
-  // Active patient = owner of earliest-scheduled assigned slot.
+  // Load every patient once so the manual picker can list names.
+  useEffect(() => {
+    let alive = true;
+    fetchPatients().then((ps) => {
+      if (alive) setAllPatients(ps);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Active patient = the operator's manual pick if set, else the owner of
+  // the earliest-scheduled assigned slot (auto mode).
   useEffect(() => {
     let alive = true;
     async function pick() {
+      // Manual override wins over the schedule-based auto-pick.
+      if (selectedPatientId != null) {
+        const p = await fetchPatient(selectedPatientId);
+        if (alive) setActivePatient(p);
+        return;
+      }
       if (slots.length === 0) {
         if (alive) setActivePatient(null);
         return;
@@ -373,7 +396,22 @@ export default function DispenserGuidedPage() {
       if (alive) setActivePatient(p);
     }
     pick();
-  }, [slots, schedules]);
+    return () => {
+      alive = false;
+    };
+  }, [slots, schedules, selectedPatientId]);
+
+  // Patients with at least one loaded slot in this dispenser — the choices
+  // the manual picker offers (sorted by name). Excludes patients with no
+  // medication loaded so you can't pick someone the cabinet can't serve.
+  const selectablePatients = useMemo(() => {
+    const ids = new Set(
+      slots.filter((s) => s.name && s.patient_id).map((s) => s.patient_id),
+    );
+    return allPatients
+      .filter((p) => ids.has(p.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [slots, allPatients]);
 
   useEffect(() => {
     return () => {
@@ -753,6 +791,45 @@ export default function DispenserGuidedPage() {
                     : "Confirm patient identity at the cabinet."
                 }
               />
+              <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
+                <label
+                  htmlFor="patient-picker"
+                  className="text-[10px] font-medium uppercase tracking-wider text-gray-400"
+                >
+                  Patient
+                </label>
+                <select
+                  id="patient-picker"
+                  value={selectedPatientId ?? ""}
+                  onChange={(e) =>
+                    setSelectedPatientId(
+                      e.target.value === "" ? null : Number(e.target.value),
+                    )
+                  }
+                  className="rounded-full border border-sand-200 bg-sand-50 px-3 py-1.5 text-xs font-medium text-gray-800"
+                >
+                  <option value="">Auto · next due</option>
+                  {selectablePatients.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                    </option>
+                  ))}
+                </select>
+                {selectedPatientId != null && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedPatientId(null)}
+                    className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-sand-50"
+                  >
+                    Reset to auto
+                  </button>
+                )}
+                <span className="ml-auto text-[10px] text-gray-400">
+                  {selectedPatientId != null
+                    ? "Manual override"
+                    : "Auto-selecting the next-due patient"}
+                </span>
+              </div>
               <PatientBanner
                 patient={activePatient}
                 status={status}
