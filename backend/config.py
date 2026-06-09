@@ -110,8 +110,11 @@ class Settings(BaseSettings):
     # Real billable secret — NEVER expose to the browser. Empty = feature off
     # (the /api/device/tts endpoint soft-fails / the frontend stays silent).
     elevenlabs_api_key: str = ""
-    # Built-in voice id (no cloning needed). Default = "Rachel".
-    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    # Account-owned premade voice id (no cloning needed). Default = "Sarah"
+    # (mature, reassuring — fits a nurse). NOTE: free-tier API keys cannot use
+    # *library* voices (e.g. Rachel 21m00...) — they 402. Premade voices in the
+    # account's own list work; list yours via GET /v1/voices.
+    elevenlabs_voice_id: str = "EXAVITQu4vr4xnSDxMaL"
     # Low-latency multilingual model so non-English patient names speak well.
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     elevenlabs_output_format: str = "mp3_44100_128"
