@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams } from "next/navigation";
 import {
-  fetchPatient, fetchLogs, fetchSlotsByPatient, updateSlot, deleteSlot,
+  fetchPatient, fetchLogs, fetchSlotsByPatient, updateSlot, deleteSlot, moveSlot,
   fetchKnownDispensers, updatePatient, uploadPatientFaceReference,
   type Patient, type IntakeRecord, type SlotInfo,
 } from "@/lib/api";
 import { isDeviceConfigured, triggerDispense } from "@/lib/device";
+import { useSlotDnd } from "@/lib/useSlotDnd";
 
 function statusStyle(s: string) {
   switch (s) {
@@ -150,6 +151,22 @@ export default function PatientDetailPage() {
     await deleteSlot(pid, slotNum);
     await loadData();
   }
+
+  // Drag-drop slot reassignment (swap with target, or move into an empty slot).
+  const handleMove = useCallback(
+    async (patientId: number, from: number, to: number) => {
+      try {
+        await moveSlot(patientId, from, to);
+        await loadData();
+      } catch (e) {
+        setDispenseMsg(`Move failed: ${(e as Error).message}`);
+      }
+    },
+    // loadData closes over a stable `pid`; safe to keep deps empty.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const { getCellDragProps } = useSlotDnd(handleMove);
 
   if (loading) {
     return <div className="py-20 text-center text-sm text-gray-400">Loading patient...</div>;
@@ -379,7 +396,8 @@ export default function PatientDetailPage() {
               return (
                 <div
                   key={i}
-                  className={`group relative overflow-hidden rounded-xl border-2 p-3 text-center transition-all duration-200 ${
+                  {...getCellDragProps(pid, i, !isEmpty && !isEditing)}
+                  className={`group relative overflow-hidden rounded-xl border-2 p-3 text-center transition-all duration-200 data-[dnd-over=true]:ring-2 data-[dnd-over=true]:ring-olive-400 data-[dnd-dragging=true]:opacity-40 ${
                     isEditing
                       ? "border-olive-400 bg-white shadow-lg"
                       : isEmpty
