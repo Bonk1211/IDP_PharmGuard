@@ -13,8 +13,15 @@ export default function IntakeLog({ logs: initialLogs }: Props) {
   const [logs, setLogs] = useState<IntakeRecord[]>(initialLogs);
   const [filterId, setFilterId] = useState<number | "all">("all");
 
+  // Merge the refetched snapshot with any realtime rows that arrived since the
+  // last fetch, deduped by id, so a fresh realtime insert isn't dropped (and
+  // never rendered twice) when SWR revalidates every 30 s.
   useEffect(() => {
-    setLogs(initialLogs);
+    setLogs((prev) => {
+      const seen = new Set(initialLogs.map((l) => l.id));
+      const extras = prev.filter((l) => !seen.has(l.id));
+      return [...extras, ...initialLogs];
+    });
   }, [initialLogs]);
 
   // Existing Supabase Realtime subscription — DO NOT swap to /api/logs/ws
@@ -26,7 +33,12 @@ export default function IntakeLog({ logs: initialLogs }: Props) {
         "postgres_changes",
         { event: "INSERT", schema: "public", table: "adherence_logs" },
         (payload) => {
-          setLogs((prev) => [payload.new as IntakeRecord, ...prev]);
+          const row = payload.new as IntakeRecord;
+          // Realtime delivery is at-least-once and StrictMode double-subscribes
+          // in dev — dedup by id so the same event never renders twice.
+          setLogs((prev) =>
+            prev.some((l) => l.id === row.id) ? prev : [row, ...prev],
+          );
         },
       )
       .subscribe();
