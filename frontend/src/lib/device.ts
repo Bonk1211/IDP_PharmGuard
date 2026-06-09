@@ -632,3 +632,49 @@ export async function setSlotSchedule(
     return { ok: false, status: 0 };
   }
 }
+
+// ─────────────────── nurse-voice TTS (ElevenLabs via Pi) ──────────────
+// One Audio at a time — a new prompt cancels the previous so the centering
+// line and the greeting never overlap.
+let currentAudio: HTMLAudioElement | null = null;
+
+/**
+ * Synthesize `text` on the Pi (ElevenLabs) and play it in the browser.
+ * No-ops silently when the device is unconfigured or TTS fails — the guided
+ * flow must never break because audio is unavailable. Returns true when
+ * playback started.
+ *
+ * NOTE: `audio.play()` rejects when there was no prior user gesture (browser
+ * autoplay policy); the rejection is caught here. Call this from a click
+ * handler (e.g. the Continue button) when the utterance must be guaranteed.
+ */
+export async function speak(text: string, voiceId?: string): Promise<boolean> {
+  if (!isDeviceConfigured() || !text.trim()) return false;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/tts`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voice_id: voiceId ?? null }),
+    });
+    if (!r.ok) {
+      console.warn("[device] /tts", r.status, await safeError(r));
+      return false;
+    }
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.src = "";
+    }
+    const audio = new Audio(url);
+    currentAudio = audio;
+    audio.addEventListener("ended", () => URL.revokeObjectURL(url), {
+      once: true,
+    });
+    await audio.play();
+    return true;
+  } catch (err) {
+    console.warn("[device] speak failed:", err);
+    return false;
+  }
+}

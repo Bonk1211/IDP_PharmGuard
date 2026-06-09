@@ -513,6 +513,35 @@ async def verify_face(body: VerifyFaceBody, request: Request):
     }
 
 
+# ─────────────────── nurse-voice TTS (ElevenLabs proxy) ────────────────
+
+
+class TtsBody(BaseModel):
+    text: str = Field(min_length=1, max_length=600, description="Text to speak.")
+    voice_id: str | None = Field(default=None, description="Override default voice.")
+
+
+@router.post("/tts")
+async def tts(body: TtsBody):
+    """Synthesize ``text`` via ElevenLabs and return audio/mpeg bytes.
+
+    Hardware-independent — works in headless mode (no _get_loop / camera), so the
+    dashboard's nurse voice plays even on a dev-mac backend. Soft-fail: 503 with a
+    JSON detail when TTS is unconfigured or the upstream call fails, so the
+    frontend can stay silent without breaking the guided flow.
+    """
+    from services.elevenlabs_client import synthesize
+
+    t0 = time.monotonic()
+    out = await asyncio.to_thread(synthesize, body.text, body.voice_id)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    if out["audio"] is None:
+        log.warning("tts: failed err=%s latency_ms=%d", out["error"], latency_ms)
+        raise HTTPException(status_code=503, detail=f"TTS unavailable: {out['error']}")
+    log.info("tts: chars=%d latency_ms=%d", len(body.text), latency_ms)
+    return Response(content=out["audio"], media_type="audio/mpeg")
+
+
 @router.get("/snapshot")
 async def camera_snapshot(
     request: Request,
