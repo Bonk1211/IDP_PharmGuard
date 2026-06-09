@@ -342,20 +342,19 @@ def dispatch(name: str, raw_args: dict[str, Any]) -> Any:
 
 
 def build_openai_tools() -> list[dict]:
-    """Convert TOOLS into the OpenAI/ILMU tool-call payload.
+    """Convert TOOLS into the OpenAI/DeepSeek tool-call payload.
 
     Format:
         [
           {"type": "function",
-           "function": {"name": ..., "description": ..., "parameters": <JSON schema>}},
+           "function": {"name": ..., "description": ..., "parameters": <schema>}},
           ...
         ]
     Pass directly as `tools=` to `client.chat.completions.create(...)`.
     """
     decls: list[dict] = []
     for t in TOOLS:
-        schema = t.args_schema.model_json_schema()
-        schema = _normalise_schema(schema)
+        schema = _normalise_schema(t.args_schema.model_json_schema())
         decls.append({
             "type": "function",
             "function": {

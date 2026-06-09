@@ -59,7 +59,7 @@ async def chat_endpoint(body: ChatRequest):
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="agent took too long (>60 s)")
     except RuntimeError as exc:
-        # _ensure_configured raises this when GEMINI_API_KEY is missing.
+        # deepseek_client.get_client raises this when DEEPSEEK_API_KEY is unset.
         raise HTTPException(status_code=503, detail=str(exc))
     return result
 

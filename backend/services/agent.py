@@ -1,4 +1,4 @@
-"""ILMU-powered clinician assistant: conversational chat + daily brief.
+"""DeepSeek-powered clinician assistant: conversational chat + daily brief.
 
 Two public entry points:
 
@@ -9,7 +9,7 @@ Two public entry points:
                                  returns {"kind", "content_markdown",
                                           "metadata"}
 
-Both fail-loud with a 503-ready RuntimeError when ILMU_API_KEY is not
+Both fail-loud with a 503-ready RuntimeError when DEEPSEEK_API_KEY is not
 configured.
 
 This module is read-only on the Supabase side: the only writes are
@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import settings
-from services import agent_tools
+from services import agent_tools, deepseek_client
 
 log = logging.getLogger(__name__)
 
@@ -80,33 +80,6 @@ Constraints:
 """
 
 
-# ──────────────────────────── lazy client bootstrap ─────────────────────────
-
-_client = None
-
-
-def _get_client():
-    """Lazy OpenAI-compatible client pointed at ILMU. Raises if key missing."""
-    global _client
-    if _client is None:
-        if not settings.ilmu_api_key:
-            raise RuntimeError(
-                "ILMU_API_KEY not set — agent endpoints unavailable. "
-                "Set it in backend/.env to enable the clinician assistant."
-            )
-        from openai import OpenAI
-        _client = OpenAI(
-            api_key=settings.ilmu_api_key,
-            base_url=settings.ilmu_base_url,
-        )
-        log.info(
-            "agent: ILMU client ready (base=%s model=%s)",
-            settings.ilmu_base_url,
-            settings.ilmu_model,
-        )
-    return _client
-
-
 # ──────────────────────────── chat (tool-calling loop) ──────────────────────
 
 def _messages_to_openai(messages: list[dict]) -> list[dict]:
@@ -131,7 +104,7 @@ def _summarise_tool_result(name: str, result: Any) -> str:
 
 
 async def chat(messages: list[dict]) -> dict:
-    """Run a tool-calling loop on ILMU.
+    """Run a tool-calling loop on DeepSeek (OpenAI-compatible chat API).
 
     Args:
       messages: [{role: "user"|"assistant", text: str}, ...]
@@ -146,7 +119,7 @@ async def chat(messages: list[dict]) -> dict:
       }
     """
     t0 = time.time()
-    client = _get_client()
+    client = deepseek_client.get_client()
     tools = agent_tools.build_openai_tools()
 
     conversation: list[dict] = [
@@ -161,13 +134,13 @@ async def chat(messages: list[dict]) -> dict:
         try:
             resp = await asyncio.to_thread(
                 client.chat.completions.create,
-                model=settings.ilmu_model,
+                model=settings.deepseek_model,
                 messages=conversation,
                 tools=tools,
                 tool_choice="auto",
             )
         except Exception:
-            log.exception("agent.chat: ILMU call failed at hop %d", hop)
+            log.exception("agent.chat: DeepSeek call failed at hop %d", hop)
             return {
                 "text": (
                     "I couldn't reach the assistant just now. "
@@ -177,7 +150,7 @@ async def chat(messages: list[dict]) -> dict:
                 "metadata": {
                     "hops": hop,
                     "latency_ms": int((time.time() - t0) * 1000),
-                    "model": settings.ilmu_model,
+                    "model": settings.deepseek_model,
                     "truncated": False,
                     "error": True,
                 },
@@ -244,7 +217,7 @@ async def chat(messages: list[dict]) -> dict:
         "metadata": {
             "hops": len(tool_calls_out) + (0 if truncated else 1),
             "latency_ms": int((time.time() - t0) * 1000),
-            "model": settings.ilmu_model,
+            "model": settings.deepseek_model,
             "truncated": truncated,
         },
     }
@@ -310,11 +283,11 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
         f"```json\n{json.dumps(payload, default=str, indent=2)}\n```"
     )
 
-    client = _get_client()
+    client = deepseek_client.get_client()
     try:
         resp = await asyncio.to_thread(
             client.chat.completions.create,
-            model=settings.ilmu_model,
+            model=settings.deepseek_model,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT_BRIEF},
                 {"role": "user", "content": user_prompt},
@@ -322,17 +295,17 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
         )
         content_md = (resp.choices[0].message.content or "").strip()
     except Exception:
-        log.exception("agent.generate_brief: ILMU call failed")
+        log.exception("agent.generate_brief: DeepSeek call failed")
         content_md = (
             "## Brief unavailable\n\n"
-            "LLM call failed. Check backend logs and ILMU_API_KEY."
+            "LLM call failed. Check backend logs and DEEPSEEK_API_KEY."
         )
 
     return {
         "kind": kind,
         "content_markdown": content_md or "## Brief\n\n(empty response)",
         "metadata": {
-            "model": settings.ilmu_model,
+            "model": settings.deepseek_model,
             "latency_ms": int((time.time() - t0) * 1000),
             "lookback_hours": _BRIEF_LOOKBACK.total_seconds() / 3600.0,
             "n_missed": len(missed),

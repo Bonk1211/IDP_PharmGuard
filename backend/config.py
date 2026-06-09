@@ -65,10 +65,13 @@ class Settings(BaseSettings):
     # latency on schedule firing. Lower = tighter, higher = more idle.
     schedule_check_interval_s: float = 60.0
 
-    # ── Clinician assistant (read-only ILMU agent) ────────────────────────
-    ilmu_api_key: str = ""
-    ilmu_base_url: str = "https://api.ilmu.ai/v1"
-    ilmu_model: str = "nemo-super"
+    # ── Clinician assistant (read-only DeepSeek agent) ────────────────────
+    # DeepSeek's API is OpenAI chat-completions compatible; we use the openai
+    # SDK pointed at the DeepSeek base URL. Use deepseek-chat (supports tool
+    # calling); deepseek-reasoner does NOT support tools.
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
     # CSV of LOCAL hours (24h) when the brief scheduler fires.
     # Empty string -> scheduler still runs but never fires (manual-only briefs).
     agent_brief_local_hours: str = "7,19"
@@ -76,7 +79,7 @@ class Settings(BaseSettings):
     # ── Flag detection thresholds ────────────────────────────────────────
     agent_flag_missed_streak_threshold: int = 3
     agent_flag_low_confidence_threshold: float = 0.55
-    # Flip off the LLM soft-pattern pass without unsetting ILMU_API_KEY
+    # Flip off the LLM soft-pattern pass without unsetting DEEPSEEK_API_KEY
     # (which would also disable chat + brief).
     agent_flag_llm_enabled: bool = True
 

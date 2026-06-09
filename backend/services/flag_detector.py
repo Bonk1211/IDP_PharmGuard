@@ -4,8 +4,8 @@ Two passes per run:
 
 1. **Heuristic** — deterministic Python rules over Supabase rows. Cheap,
    predictable, free. Always runs.
-2. **LLM soft pass** — single ILMU call asking for "notable patterns NOT
-   covered by the heuristics". Skipped when ILMU_API_KEY missing OR when
+2. **LLM soft pass** — single DeepSeek call asking for "notable patterns NOT
+   covered by the heuristics". Skipped when DEEPSEEK_API_KEY missing OR when
    ``settings.agent_flag_llm_enabled`` is False.
 
 Persistence is INSERT-only into ``public.agent_flags``. Cross-run dedup is
@@ -27,7 +27,7 @@ from typing import Any
 
 from config import settings
 from db.base import get_supabase
-from services import agent_tools
+from services import agent_tools, deepseek_client
 
 log = logging.getLogger(__name__)
 
@@ -110,7 +110,7 @@ async def detect_and_persist_flags() -> dict[str, Any]:
     # 3) LLM soft pass.
     llm_used = False
     llm_candidates: list[dict[str, Any]] = []
-    if settings.ilmu_api_key and settings.agent_flag_llm_enabled:
+    if settings.deepseek_api_key and settings.agent_flag_llm_enabled:
         try:
             llm_candidates = await _detect_via_llm(existing_open_kinds)
             llm_used = True
@@ -347,7 +347,7 @@ def _detect_trending_empty() -> list[dict[str, Any]]:
 # ──────────────────────────── LLM soft pass ─────────────────────────────────
 
 async def _detect_via_llm(existing_open_kinds: set[str]) -> list[dict[str, Any]]:
-    """Single ILMU call. Returns at most _LLM_MAX_FLAGS validated flag dicts."""
+    """Single DeepSeek call. Returns at most _LLM_MAX_FLAGS validated flag dicts."""
     today_summary = await asyncio.to_thread(agent_tools.today_summary)
     since_iso = (datetime.now(timezone.utc) - _LOOKBACK).isoformat()
     missed = await asyncio.to_thread(
@@ -365,18 +365,14 @@ async def _detect_via_llm(existing_open_kinds: set[str]) -> list[dict[str, Any]]
         "existing_open_kinds": sorted(existing_open_kinds),
     }
 
-    from openai import OpenAI
-    client = OpenAI(
-        api_key=settings.ilmu_api_key,
-        base_url=settings.ilmu_base_url,
-    )
     user_prompt = (
         "Inspect this payload and return notable patterns as a JSON array.\n\n"
         f"```json\n{json.dumps(payload, default=str, indent=2)}\n```"
     )
+    client = deepseek_client.get_client()
     resp = await asyncio.to_thread(
         client.chat.completions.create,
-        model=settings.ilmu_model,
+        model=settings.deepseek_model,
         messages=[
             {"role": "system", "content": _LLM_PROMPT},
             {"role": "user", "content": user_prompt},
