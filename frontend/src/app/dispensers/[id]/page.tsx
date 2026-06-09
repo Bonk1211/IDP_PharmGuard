@@ -27,6 +27,7 @@ import {
   setCalibration,
   setDrawer,
   speak,
+  speakStatic,
   startIntakeWatch,
   streamUrl,
   testEjector,
@@ -34,6 +35,7 @@ import {
   verifyFace,
   verifyPill,
   type CalibrationInfo,
+  type StaticTtsSlug,
   type DeviceStatus,
   type EjectorCalibration,
   type IntakeState,
@@ -127,9 +129,12 @@ function nextRoundFrom(schedules: ScheduleRow[]): { time: string; in: string } |
 }
 
 // ──────────────────────────── nurse-voice scripts ────────────────────────────
-
-const CENTERING_PROMPT =
-  "Hi there. Please make sure your face is centered in the camera so I can recognize you.";
+//
+// Static lines (centering + the three intake-step prompts) are pre-rendered
+// to the Supabase "tts-cache" bucket and played via speakStatic() — see
+// STATIC_TTS in lib/device.ts. Only the DYNAMIC lines below (greeting,
+// dispensed, wrong-pill) are synthesized live, because they interpolate a
+// patient name / medication and can't be cached by fixed text.
 
 function firstName(name: string | null | undefined): string {
   return (name ?? "").trim().split(/\s+/)[0] || "there";
@@ -171,21 +176,15 @@ function wrongPillScript(
   return `${noticed} Let's set it aside and I'll sort the right one out for you. You're safe.`;
 }
 
-// Spoken once each time the swallow-FSM advances to a new step.
-// Keyed by step_name (vision/intake_monitor.py: READY | SWALLOW | DONE);
-// falls back to the backend instruction for any unknown step.
-function intakeStepScript(stepName: string, instruction: string): string {
-  switch (stepName) {
-    case "READY":
-      return "Whenever you're ready, gently bring your hand up to your mouth and take the pill.";
-    case "SWALLOW":
-      return "That's good. Now close your mouth and swallow for me, nice and easy.";
-    case "DONE":
-      return "Almost there — open your mouth so I can see it's all gone. You're doing great.";
-    default:
-      return instruction || "Follow along with me, you're doing great.";
-  }
-}
+// Maps a swallow-FSM step_name (vision/intake_monitor.py) to its cached
+// static-audio slug. Known steps play from the Supabase cache via
+// speakStatic(); an unknown step falls back to speaking the backend
+// instruction live (see the intake step-change effect).
+const INTAKE_STEP_SLUG: Record<string, StaticTtsSlug> = {
+  READY: "intake-ready",
+  SWALLOW: "intake-swallow",
+  DONE: "intake-done",
+};
 
 type SlotState = "ready" | "ejected" | "low" | "empty" | "locked";
 
@@ -315,7 +314,12 @@ export default function DispenserGuidedPage() {
     const idx = intake.step_index ?? 0;
     if (idx === lastSpokenStepRef.current) return;
     lastSpokenStepRef.current = idx;
-    void speak(intakeStepScript(intake.step_name, intake.instruction));
+    const slug = INTAKE_STEP_SLUG[intake.step_name];
+    if (slug) {
+      void speakStatic(slug); // cached → live fallback inside speakStatic
+    } else {
+      void speak(intake.instruction || "Follow along with me, you're doing great.");
+    }
   }, [intake?.running, intake?.step_index, intake?.step_name, intake?.instruction]);
 
   useEffect(() => {
@@ -395,7 +399,7 @@ export default function DispenserGuidedPage() {
     if (!activePatient || faceVerified) return;
     if (centeringSpokenForRef.current === activePatient.id) return;
     centeringSpokenForRef.current = activePatient.id;
-    void speak(CENTERING_PROMPT);
+    void speakStatic("centering");
   }, [viewIdx, activePatient, faceVerified]);
 
   const goToStep = (idx: number) => {

@@ -16,6 +16,8 @@
  * Supabase Edge Function proxy that holds the real key server-side.
  */
 
+import { supabase } from "./supabase";
+
 const baseUrl = (process.env.NEXT_PUBLIC_DEVICE_URL ?? "").replace(/\/$/, "");
 const apiKey = process.env.NEXT_PUBLIC_DEVICE_API_KEY ?? "";
 
@@ -677,4 +679,86 @@ export async function speak(text: string, voiceId?: string): Promise<boolean> {
     console.warn("[device] speak failed:", err);
     return false;
   }
+}
+
+// ─────────────────── static (pre-rendered) nurse lines ────────────────
+// Lines that never change are synthesized ONCE by
+// backend/scripts/seed_tts_cache.py and stored as MP3s in the Supabase
+// "tts-cache" bucket, then played straight from the Supabase CDN — no
+// ElevenLabs call, no Pi/ngrok round-trip, works even when the device is
+// offline. speakStatic() falls back to live speak() if the cached object
+// is missing (seed not run yet) or fails to play.
+//
+// IMPORTANT: keep this text in sync with SLUG_TEXT in
+// backend/scripts/seed_tts_cache.py — that script generates the audio,
+// this text is only the live-synth fallback if the cache misses.
+export const STATIC_TTS = {
+  centering:
+    "Hi there. Please make sure your face is centered in the camera so I can recognize you.",
+  "intake-ready":
+    "Whenever you're ready, gently bring your hand up to your mouth and take the pill.",
+  "intake-swallow":
+    "That's good. Now close your mouth and swallow for me, nice and easy.",
+  "intake-done":
+    "Almost there — open your mouth so I can see it's all gone. You're doing great.",
+} as const;
+
+export type StaticTtsSlug = keyof typeof STATIC_TTS;
+
+const TTS_BUCKET = "tts-cache";
+
+/** Public URL of a cached line's MP3, or null if Supabase env is unset.
+ *  getPublicUrl just builds a string — it does NOT verify the object exists,
+ *  so a missing object 404s at play time and triggers the speak() fallback. */
+function staticTtsUrl(slug: StaticTtsSlug): string | null {
+  try {
+    const { data } = supabase.storage
+      .from(TTS_BUCKET)
+      .getPublicUrl(`${slug}.mp3`);
+    return data.publicUrl || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Play a remote MP3, sharing the single-audio cancel behavior with speak().
+ *  Resolves true only once playback actually starts ("playing" event), false
+ *  on load error (e.g. 404 — cache not seeded) or autoplay block, so the
+ *  caller can fall back. 4 s safety timeout guards against neither firing. */
+function playRemote(src: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.src = "";
+      }
+      const audio = new Audio(src);
+      currentAudio = audio;
+      let settled = false;
+      const finish = (ok: boolean) => {
+        if (!settled) {
+          settled = true;
+          resolve(ok);
+        }
+      };
+      audio.addEventListener("playing", () => finish(true), { once: true });
+      audio.addEventListener("error", () => finish(false), { once: true });
+      audio.play().catch(() => finish(false));
+      setTimeout(() => finish(false), 4000);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * Speak a fixed nurse line from the Supabase cache, falling back to live
+ * ElevenLabs synthesis if the cached object is missing or won't play.
+ * Returns true when audio started (cached or live).
+ */
+export async function speakStatic(slug: StaticTtsSlug): Promise<boolean> {
+  const url = staticTtsUrl(slug);
+  if (url && (await playRemote(url))) return true;
+  // Cache miss / play failure → live synth (no-ops if device unconfigured).
+  return speak(STATIC_TTS[slug]);
 }
