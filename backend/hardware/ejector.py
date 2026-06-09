@@ -30,6 +30,8 @@ import os
 import time
 from typing import Any
 
+from hardware.interlock import ACTUATOR_LOCK, SETTLE_S
+
 log = logging.getLogger(__name__)
 
 # MG996R signal pin. Hardware-PWM-capable, free now that the ULN2003
@@ -116,15 +118,24 @@ class Ejector:
             return
 
         log.info("Ejecting pill (MG996R fwd/rev %.1fs each)", MOVE_S)
-        try:
-            self._drive(FWD_DUTY, MOVE_S)
-            self._drive(STOP_DUTY, PAUSE_S)
-            self._drive(REV_DUTY, MOVE_S)
-            self._drive(STOP_DUTY, PAUSE_S)
-        finally:
-            # Always silence the line, even if interrupted, so a continuous
-            # servo never keeps spinning on an unattended STOP-creep.
-            self.pwm.ChangeDutyCycle(0)
+        # Hold ACTUATOR_LOCK for the full stroke so the magazine stepper
+        # cannot rotate while the pusher is extended — both moving together
+        # fouls the pusher against the magazine wall and jams the mechanism
+        # (see hardware/interlock.py).
+        with ACTUATOR_LOCK:
+            try:
+                self._drive(FWD_DUTY, MOVE_S)
+                self._drive(STOP_DUTY, PAUSE_S)
+                self._drive(REV_DUTY, MOVE_S)
+                self._drive(STOP_DUTY, PAUSE_S)
+            finally:
+                # Always silence the line, even if interrupted, so a continuous
+                # servo never keeps spinning on an unattended STOP-creep.
+                self.pwm.ChangeDutyCycle(0)
+            # Let the servo fully coast to rest before releasing the
+            # interlock, so the magazine cannot start rotating while the
+            # pusher is still returning.
+            time.sleep(SETTLE_S)
 
     def cleanup(self) -> None:
         if self.pwm is not None:
