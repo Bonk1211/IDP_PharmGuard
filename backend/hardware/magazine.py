@@ -25,7 +25,7 @@ STEPS_PER_SLOT = 20  # Adjust based on gear ratio and micro-stepping
 # rpi-lgpio shim reliably latches. The previous HIGH-LOW-sleep pattern
 # left HIGH at s\ub-µs (back-to-back GPIO writes) and the motor missed
 # steps / didn't move at all on bench.
-STEP_DELAY_S = 5e-3
+STEP_DELAY_S = 10e-3
 TOTAL_SLOTS = 10
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
