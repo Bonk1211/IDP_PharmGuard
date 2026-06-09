@@ -30,8 +30,8 @@ STEP_PIN = 17
 DIR_PIN = 27
 EN_PIN = 22
 
-STEPS_PER_REV = 25
-STEP_DELAY = 10e-3  # 1 ms half-period -> 2 ms full step, matches magazine.py
+STEPS_PER_REV = 24
+STEP_DELAY = 5e-3  # 1 ms half-period -> 2 ms full step, matches magazine.py
 
 
 def step_once() -> None:

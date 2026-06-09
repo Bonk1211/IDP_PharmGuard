@@ -19,13 +19,13 @@ PIN_STEP = 17
 PIN_DIR = 27
 PIN_ENABLE = 22
 
-STEPS_PER_SLOT = 20  # Adjust based on gear ratio and micro-stepping
+STEPS_PER_SLOT = 24  # Adjust based on gear ratio and micro-stepping
 # Half-period between STEP edges. Matches test_magazine.py exactly —
 # HIGH-sleep-LOW-sleep gives a 1 ms HIGH width which the A4988 + Pi 5
 # rpi-lgpio shim reliably latches. The previous HIGH-LOW-sleep pattern
 # left HIGH at sub-µs (back-to-back GPIO writes) and the motor missed
 # steps / didn't move at all on bench.
-STEP_DELAY_S = 10e-3
+STEP_DELAY_S = 5e-3
 TOTAL_SLOTS = 10
 
 # Read once at import — flips fail-loud vs. degraded stub behavior.
