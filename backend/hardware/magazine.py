@@ -23,7 +23,7 @@ STEPS_PER_SLOT = 20  # Adjust based on gear ratio and micro-stepping
 # Half-period between STEP edges. Matches test_magazine.py exactly —
 # HIGH-sleep-LOW-sleep gives a 1 ms HIGH width which the A4988 + Pi 5
 # rpi-lgpio shim reliably latches. The previous HIGH-LOW-sleep pattern
-# left HIGH at s\ub-µs (back-to-back GPIO writes) and the motor missed
+# left HIGH at sub-µs (back-to-back GPIO writes) and the motor missed
 # steps / didn't move at all on bench.
 STEP_DELAY_S = 5e-3
 TOTAL_SLOTS = 10

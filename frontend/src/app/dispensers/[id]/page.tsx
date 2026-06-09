@@ -149,6 +149,44 @@ function greetingScript(patient: Patient | null, slots: SlotInfo[]): string {
   return `${hi} It's time to take your ${list}. Take your time — I'm right here with you.`;
 }
 
+// Spoken when a pill lands on the tray during Dispense.
+function dispensedScript(medName: string | null | undefined): string {
+  const med = (medName ?? "").trim();
+  return med
+    ? `Here's your ${med}. Take your time picking it up from the tray — there's no rush.`
+    : `Your medication is on the tray now. Take your time picking it up — there's no rush.`;
+}
+
+// Spoken once when the tray shows the wrong pill or an extra/unauthorized pill.
+// Calm + reassuring, never alarming.
+function wrongPillScript(
+  expected: string | null | undefined,
+  detected?: string | null,
+): string {
+  const exp = (expected ?? "").trim();
+  const det = (detected ?? "").trim();
+  const noticed = det
+    ? `Hold on a moment — that looks like ${det}, not your ${exp || "medication"}.`
+    : `Hold on a moment — that doesn't look quite right.`;
+  return `${noticed} Let's set it aside and I'll sort the right one out for you. You're safe.`;
+}
+
+// Spoken once each time the swallow-FSM advances to a new step.
+// Keyed by step_name (vision/intake_monitor.py: READY | SWALLOW | DONE);
+// falls back to the backend instruction for any unknown step.
+function intakeStepScript(stepName: string, instruction: string): string {
+  switch (stepName) {
+    case "READY":
+      return "Whenever you're ready, gently bring your hand up to your mouth and take the pill.";
+    case "SWALLOW":
+      return "That's good. Now close your mouth and swallow for me, nice and easy.";
+    case "DONE":
+      return "Almost there — open your mouth so I can see it's all gone. You're doing great.";
+    default:
+      return instruction || "Follow along with me, you're doing great.";
+  }
+}
+
 type SlotState = "ready" | "ejected" | "low" | "empty" | "locked";
 
 function deriveSlotState(slot: SlotInfo, ejectedSlot: number | null): SlotState {
@@ -212,6 +250,12 @@ export default function DispenserGuidedPage() {
   // Tracks which patient id the centering prompt already spoke for, so it
   // fires once per patient (not on every Identify-card re-render).
   const centeringSpokenForRef = useRef<number | null>(null);
+  // Guards the wrong-pill voice line so it fires once per eject, not on
+  // every 4 s re-verify tick. Reset on each new eject (see onEject).
+  const wrongPillSpokenRef = useRef<boolean>(false);
+  // Last swallow-FSM step index we spoke a prompt for. -1 = none yet.
+  // Milestone-paced: speak only when this changes, never on every poll.
+  const lastSpokenStepRef = useRef<number>(-1);
 
   const configured = isDeviceConfigured();
 
@@ -254,6 +298,25 @@ export default function DispenserGuidedPage() {
       clearInterval(id);
     };
   }, []);
+
+  // NOTE: terminal result voice (congrats on intake.result === "passed",
+  // gentle re-prompt on "timeout"/"missing_labels") was intentionally left
+  // out per scope. To add: a sibling effect watching intake.result, ref-
+  // guarded once-per-round, calling a resultScript(intake.result).
+  //
+  // Speak a warm prompt each time the swallow FSM advances a step.
+  // Milestones only — guarded by lastSpokenStepRef so the 250 ms intake
+  // poll doesn't re-trigger the same line. Resets when the watch stops.
+  useEffect(() => {
+    if (!intake?.running) {
+      lastSpokenStepRef.current = -1;
+      return;
+    }
+    const idx = intake.step_index ?? 0;
+    if (idx === lastSpokenStepRef.current) return;
+    lastSpokenStepRef.current = idx;
+    void speak(intakeStepScript(intake.step_name, intake.instruction));
+  }, [intake?.running, intake?.step_index, intake?.step_name, intake?.instruction]);
 
   useEffect(() => {
     if (!configured) return;
@@ -455,6 +518,22 @@ export default function DispenserGuidedPage() {
     };
   }, [viewIdx, configured, currentSlot?.name]);
 
+  // Calm spoken alert when the tray shows the wrong or an extra pill,
+  // while the operator is on the Dispense card. Fires once per eject.
+  useEffect(() => {
+    if (viewIdx !== 2) return;
+    if (!verifyResult || !verifyResult.top) return;
+    const isMismatch = verifyResult.match === false;
+    const hasExtra = unauthorized.length > 0;
+    if (!isMismatch && !hasExtra) return;
+    if (wrongPillSpokenRef.current) return;
+    wrongPillSpokenRef.current = true;
+    const detected = isMismatch
+      ? verifyResult.top.class_name
+      : unauthorized[0]?.class_name;
+    void speak(wrongPillScript(currentSlot?.name, detected));
+  }, [viewIdx, verifyResult, unauthorized, currentSlot?.name]);
+
   const cam0Url = streamUrl(0);
   // Cam 1 streams with FaceMesh + Hands overlay so judges can see the
   // MediaPipe FSM tracking the patient in real time.
@@ -513,6 +592,8 @@ export default function DispenserGuidedPage() {
       // handler returns immediately. YOLO inference takes ~150-200 ms
       // on the Pi; give the pill a moment to settle on the tray first.
       const expected = slots.find((s) => s.slot === slot)?.name ?? undefined;
+      void speak(dispensedScript(expected));
+      wrongPillSpokenRef.current = false;
       setVerifyResult(null);
       setVerifying(true);
       setTimeout(() => {
