@@ -108,6 +108,13 @@ class CycleState:
                 "False. DO NOT use this build in production."
             )
 
+        # Establish a known ejector home datum at startup so the pusher is in
+        # its initial position before the first dispense — even if the last
+        # run was interrupted mid-stroke or power was lost while extended.
+        # push() also returns home after every cycle; this covers cold boot.
+        if not self.hardware_stubbed:
+            await asyncio.to_thread(self.ejector.home)
+
         # Open dual cameras (only when hardware is real). Same fail-loud rule.
         if not self.hardware_stubbed:
             try:

@@ -170,6 +170,117 @@ async def manual_rotate(body: RotateBody, request: Request):
     }
 
 
+# ─────────────────── ejector servo calibration + homing ────────────────────
+
+
+def _require_ejector(request: Request):
+    """Return the live Ejector, or raise the right 503. Shared by the
+    calibration / home / test endpoints below."""
+    loop = _get_loop(request)
+    if loop is None:
+        raise HTTPException(status_code=503, detail="Headless mode — no hardware loop")
+    state = getattr(loop, "_state", None)
+    ejector = getattr(state, "ejector", None) if state else None
+    if ejector is None:
+        raise HTTPException(status_code=503, detail="Ejector not initialised")
+    return ejector
+
+
+class CalibrationBody(BaseModel):
+    """Partial update — any omitted field keeps its current value. Bounds
+    mirror hardware/ejector.py US_MIN/MAX, MOVE_S_*, PAUSE_S_*."""
+
+    fwd_us: float | None = Field(default=None, ge=1000, le=2000, description="Forward (eject) pulse width, us.")
+    rev_us: float | None = Field(default=None, ge=1000, le=2000, description="Reverse (home) pulse width, us.")
+    stop_us: float | None = Field(default=None, ge=1000, le=2000, description="Stop pulse width, us (~1500). Trim to kill creep.")
+    move_s: float | None = Field(default=None, ge=0.1, le=30, description="Seconds each stroke is driven.")
+    pause_s: float | None = Field(default=None, ge=0, le=10, description="Pause after each stroke, s.")
+
+
+@router.get("/calibration")
+async def get_calibration(request: Request):
+    """Current ejector servo calibration plus defaults and editable bounds.
+
+    Powers the dashboard Advanced-tab calibration form. ``defaults`` lets the
+    UI offer a one-click reset; ``bounds`` drives input min/max + validation.
+    """
+    from hardware.ejector import (
+        DEFAULT_FWD_US, DEFAULT_PAUSE_S, DEFAULT_MOVE_S, DEFAULT_REV_US,
+        DEFAULT_STOP_US, MOVE_S_MAX, MOVE_S_MIN, PAUSE_S_MAX, PAUSE_S_MIN,
+        US_MAX, US_MIN,
+    )
+
+    ejector = _require_ejector(request)
+    return {
+        "calibration": ejector.get_calibration(),
+        "defaults": {
+            "fwd_us": DEFAULT_FWD_US,
+            "rev_us": DEFAULT_REV_US,
+            "stop_us": DEFAULT_STOP_US,
+            "move_s": DEFAULT_MOVE_S,
+            "pause_s": DEFAULT_PAUSE_S,
+        },
+        "bounds": {
+            "fwd_us": [US_MIN, US_MAX],
+            "rev_us": [US_MIN, US_MAX],
+            "stop_us": [US_MIN, US_MAX],
+            "move_s": [MOVE_S_MIN, MOVE_S_MAX],
+            "pause_s": [PAUSE_S_MIN, PAUSE_S_MAX],
+        },
+    }
+
+
+@router.post("/calibration")
+async def set_calibration(body: CalibrationBody, request: Request):
+    """Persist new servo calibration. Takes effect on the next push()/home().
+
+    Send only the fields you want to change. Values are clamped to the safe
+    bounds server-side and written atomically to the Pi-local calibration
+    file so they survive a restart.
+    """
+    ejector = _require_ejector(request)
+    updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not updates:
+        raise HTTPException(status_code=400, detail="No calibration fields provided")
+    new = await asyncio.to_thread(lambda: ejector.set_calibration(**updates))
+    log.info("calibration updated: %s", updates)
+    return {"ok": True, "calibration": new}
+
+
+@router.post("/ejector/home")
+async def ejector_home(request: Request):
+    """Run just the return-home (reverse) stroke to re-seat the pusher.
+
+    Manual recovery if the pusher is left extended. Serialized with the
+    cycle via app.state.hardware_lock.
+    """
+    ejector = _require_ejector(request)
+    lock: asyncio.Lock = request.app.state.hardware_lock
+    t0 = time.monotonic()
+    async with lock:
+        await asyncio.to_thread(ejector.home)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    log.info("ejector home: latency_ms=%d", latency_ms)
+    return {"ok": True, "latency_ms": latency_ms}
+
+
+@router.post("/ejector/test")
+async def ejector_test(request: Request):
+    """Run one full push() (fwd + return-home) with the current calibration.
+
+    No magazine rotation, no DB write — a fast tune-and-test loop for the
+    calibration form. Serialized with the cycle via app.state.hardware_lock.
+    """
+    ejector = _require_ejector(request)
+    lock: asyncio.Lock = request.app.state.hardware_lock
+    t0 = time.monotonic()
+    async with lock:
+        await asyncio.to_thread(ejector.push)
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    log.info("ejector test push: latency_ms=%d", latency_ms)
+    return {"ok": True, "latency_ms": latency_ms}
+
+
 class DrawerBody(BaseModel):
     action: Literal["lock", "unlock"]
 

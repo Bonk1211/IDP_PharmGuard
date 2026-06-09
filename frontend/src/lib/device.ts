@@ -476,6 +476,107 @@ async function safeError(r: Response): Promise<string> {
   }
 }
 
+// ─────────────────── ejector servo calibration + homing ──────────────────────
+
+export type EjectorCalibration = {
+  fwd_us: number;   // forward (eject) pulse width, µs
+  rev_us: number;   // reverse (home) pulse width, µs
+  stop_us: number;  // stop pulse width, µs (~1500; trim to kill creep)
+  move_s: number;   // seconds each stroke is driven
+  pause_s: number;  // pause after each stroke, s
+};
+
+export type CalibrationInfo = {
+  calibration: EjectorCalibration;
+  defaults: EjectorCalibration;
+  bounds: Record<keyof EjectorCalibration, [number, number]>;
+};
+
+export async function fetchCalibration(): Promise<CalibrationInfo | null> {
+  if (!isDeviceConfigured()) return null;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/calibration`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return null;
+    return (await r.json()) as CalibrationInfo;
+  } catch {
+    return null;
+  }
+}
+
+export type SetCalibrationResult = {
+  ok: boolean;
+  status: number;
+  calibration?: EjectorCalibration;
+  error?: string;
+};
+
+/** Persist a partial calibration update; only the given fields change. */
+export async function setCalibration(
+  updates: Partial<EjectorCalibration>,
+): Promise<SetCalibrationResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/calibration`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      calibration: data?.calibration,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+/** Run just the return-home stroke (re-seat the pusher). */
+export async function homeEjector(): Promise<EjectResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/ejector/home`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      latency_ms: data?.latency_ms,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+/** Run one full eject (forward + return-home) with current calibration —
+ *  no magazine rotation, no DB write. For tuning the servo. */
+export async function testEjector(): Promise<EjectResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/ejector/test`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      latency_ms: data?.latency_ms,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
 // ─────────────────────────── per-slot daily schedules ────────────────────────
 
 export type ScheduleRow = {

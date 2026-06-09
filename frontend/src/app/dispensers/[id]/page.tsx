@@ -15,20 +15,26 @@ import { useParams } from "next/navigation";
 import { useSWRConfig } from "swr";
 
 import {
+  fetchCalibration,
   fetchDeviceStatus,
   fetchIntakeState,
   fetchSchedules,
   fetchSnapshot,
+  homeEjector,
   isDeviceConfigured,
   manualEject,
   rotateMagazine,
+  setCalibration,
   setDrawer,
   startIntakeWatch,
   streamUrl,
+  testEjector,
   triggerDispense,
   verifyFace,
   verifyPill,
+  type CalibrationInfo,
   type DeviceStatus,
+  type EjectorCalibration,
   type IntakeState,
   type PillDetection,
   type ScheduleRow,
@@ -2922,6 +2928,9 @@ function AdvancedSheet({
             </div>
           </div>
 
+          {/* Ejector servo calibration */}
+          <ServoCalibrationSection configured={configured} parentBusy={busy} />
+
           {/* Snapshot + cam debug */}
           <div className="rounded-2xl border border-sand-200 p-4">
             <div className="mb-3 flex items-center justify-between">
@@ -2962,6 +2971,227 @@ function AdvancedSheet({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ──────────────────────── ServoCalibrationSection ───────────────────────────
+
+const CAL_FIELDS: {
+  key: keyof EjectorCalibration;
+  label: string;
+  unit: string;
+  step: number;
+  hint: string;
+}[] = [
+  { key: "fwd_us", label: "Forward pulse", unit: "µs", step: 5, hint: ">1500 = eject direction; further from 1500 = faster" },
+  { key: "rev_us", label: "Reverse pulse", unit: "µs", step: 5, hint: "<1500 = return-home direction" },
+  { key: "stop_us", label: "Stop pulse", unit: "µs", step: 1, hint: "~1500; trim in small steps to kill creep" },
+  { key: "move_s", label: "Stroke time", unit: "s", step: 0.5, hint: "seconds driven each direction" },
+  { key: "pause_s", label: "Pause", unit: "s", step: 0.1, hint: "settle between strokes" },
+];
+
+function toDraft(cal: EjectorCalibration): Record<string, string> {
+  return Object.fromEntries(
+    CAL_FIELDS.map((f) => [f.key, String(cal[f.key])]),
+  );
+}
+
+/**
+ * Operator calibration for the continuous-rotation ejector servo. Tune
+ * pulse widths + stroke timing, save (persists on the Pi), and Test/Home to
+ * iterate. Self-contained: fetches + writes through lib/device.ts directly.
+ */
+function ServoCalibrationSection({
+  configured,
+  parentBusy,
+}: {
+  configured: boolean;
+  parentBusy: string | null;
+}) {
+  const [info, setInfo] = useState<CalibrationInfo | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const ci = await fetchCalibration();
+      if (alive && ci) {
+        setInfo(ci);
+        setDraft(toDraft(ci.calibration));
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const locked = !configured || busy !== null || parentBusy !== null || !info;
+
+  async function onSave() {
+    const updates: Partial<EjectorCalibration> = {};
+    for (const f of CAL_FIELDS) {
+      const n = parseFloat(draft[f.key]);
+      if (!Number.isFinite(n)) {
+        setMsg({ text: `${f.label} is not a number`, ok: false });
+        return;
+      }
+      const [lo, hi] = info?.bounds[f.key] ?? [-Infinity, Infinity];
+      if (n < lo || n > hi) {
+        setMsg({ text: `${f.label} must be ${lo}–${hi} ${f.unit}`, ok: false });
+        return;
+      }
+      updates[f.key] = n;
+    }
+    setBusy("save");
+    setMsg(null);
+    const r = await setCalibration(updates);
+    setBusy(null);
+    if (r.ok && r.calibration) {
+      setInfo((p) => (p ? { ...p, calibration: r.calibration! } : p));
+      setDraft(toDraft(r.calibration));
+      setMsg({ text: "Calibration saved (takes effect next eject).", ok: true });
+    } else {
+      setMsg({ text: r.error ?? `Save failed (${r.status})`, ok: false });
+    }
+  }
+
+  function onResetDefaults() {
+    if (!info) return;
+    setDraft(toDraft(info.defaults));
+    setMsg({ text: "Filled defaults — press Save to apply.", ok: true });
+  }
+
+  async function onTest() {
+    setBusy("test");
+    setMsg(null);
+    const r = await testEjector();
+    setBusy(null);
+    setMsg(
+      r.ok
+        ? { text: `Test eject ran (${r.latency_ms ?? "?"} ms).`, ok: true }
+        : { text: r.error ?? `Test failed (${r.status})`, ok: false },
+    );
+  }
+
+  async function onHome() {
+    setBusy("home");
+    setMsg(null);
+    const r = await homeEjector();
+    setBusy(null);
+    setMsg(
+      r.ok
+        ? { text: `Homed (${r.latency_ms ?? "?"} ms).`, ok: true }
+        : { text: r.error ?? `Home failed (${r.status})`, ok: false },
+    );
+  }
+
+  return (
+    <div className="rounded-2xl border border-sand-200 p-4">
+      <div className="mb-1 flex items-center justify-between">
+        <p className="text-xs font-semibold text-gray-900">
+          Ejector servo calibration
+        </p>
+        <span className="font-mono text-[10px] uppercase tracking-wider text-gray-400">
+          MG996R · continuous
+        </span>
+      </div>
+      <p className="mb-3 text-[11px] text-gray-500">
+        Tune the pusher motion. Saved values persist on the device and take
+        effect on the next eject. Use Test to try them and Home to re-seat the
+        pusher.
+      </p>
+
+      {!info ? (
+        <p className="rounded-xl bg-sand-50 px-3 py-2 text-[11px] text-gray-500">
+          {configured
+            ? "Loading calibration…"
+            : "Device not connected — calibration unavailable."}
+        </p>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {CAL_FIELDS.map((f) => {
+              const [lo, hi] = info.bounds[f.key];
+              return (
+                <label key={f.key} className="flex flex-col gap-1">
+                  <span className="flex items-baseline justify-between">
+                    <span className="text-[11px] font-medium text-gray-700">
+                      {f.label}
+                    </span>
+                    <span className="font-mono text-[10px] text-gray-400">
+                      {f.unit} · {lo}–{hi}
+                    </span>
+                  </span>
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    step={f.step}
+                    min={lo}
+                    max={hi}
+                    value={draft[f.key] ?? ""}
+                    disabled={locked}
+                    onChange={(e) =>
+                      setDraft((p) => ({ ...p, [f.key]: e.target.value }))
+                    }
+                    className="rounded-xl border border-sand-200 bg-sand-50 px-3 py-2 font-mono text-sm tabular-nums text-gray-900 transition-colors focus:border-olive-400 focus:bg-white focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+                  />
+                  <span className="text-[10px] text-gray-400">{f.hint}</span>
+                </label>
+              );
+            })}
+          </div>
+
+          {msg && (
+            <p
+              className={`mt-3 rounded-xl px-3 py-2 text-[11px] ${
+                msg.ok
+                  ? "bg-olive-50 text-olive-800"
+                  : "bg-status-warning-bg text-status-warning"
+              }`}
+            >
+              {msg.text}
+            </p>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onSave}
+              disabled={locked}
+              className="rounded-full border border-olive-300 bg-olive-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy === "save" ? "Saving…" : "Save"}
+            </button>
+            <button
+              type="button"
+              onClick={onTest}
+              disabled={locked}
+              className="rounded-full border border-sand-300 bg-white px-4 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy === "test" ? "Testing…" : "Test eject"}
+            </button>
+            <button
+              type="button"
+              onClick={onHome}
+              disabled={locked}
+              className="rounded-full border border-sand-300 bg-white px-4 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy === "home" ? "Homing…" : "Home"}
+            </button>
+            <button
+              type="button"
+              onClick={onResetDefaults}
+              disabled={locked}
+              className="ml-auto text-[11px] font-medium text-gray-500 underline-offset-2 hover:underline disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Reset to defaults
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }
