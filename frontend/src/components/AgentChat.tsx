@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { chatAgent, type ChatToolCall, type ChatTurn } from "@/lib/agent";
 
 type Bubble = ChatTurn & {
@@ -128,7 +130,11 @@ export default function AgentChat() {
                   : "bg-sand-50 text-gray-800"
               }`}
             >
-              <p className="whitespace-pre-wrap">{m.text || "(no response)"}</p>
+              {m.role === "assistant" ? (
+                <MarkdownMessage text={m.text || "(no response)"} />
+              ) : (
+                <p className="whitespace-pre-wrap">{m.text || "(no response)"}</p>
+              )}
               {m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0 && (
                 <details className="mt-2 text-[11px] text-gray-500">
                   <summary className="cursor-pointer select-none">
@@ -146,7 +152,7 @@ export default function AgentChat() {
               {m.role === "assistant" && (m.truncated || m.error) && (
                 <p className="mt-1 text-[11px] text-status-warning">
                   {m.error
-                    ? "Reached Gemini error — try again."
+                    ? "Assistant error — try again."
                     : "Truncated — narrow the question."}
                 </p>
               )}
@@ -197,6 +203,51 @@ export default function AgentChat() {
           Send
         </button>
       </form>
+    </div>
+  );
+}
+
+function MarkdownMessage({ text }: { text: string }) {
+  return (
+    <div className="text-sm leading-relaxed [&>*:first-child]:mt-0 [&>*:last-child]:mb-0">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ node, ...p }) => <h3 className="mb-1 mt-2 text-sm font-semibold text-gray-900" {...p} />,
+          h2: ({ node, ...p }) => <h3 className="mb-1 mt-2 text-sm font-semibold text-gray-900" {...p} />,
+          h3: ({ node, ...p }) => <h4 className="mb-1 mt-2 text-[13px] font-semibold text-gray-900" {...p} />,
+          h4: ({ node, ...p }) => <h4 className="mb-1 mt-2 text-[13px] font-semibold text-gray-900" {...p} />,
+          p: ({ node, ...p }) => <p className="my-1.5" {...p} />,
+          ul: ({ node, ...p }) => <ul className="my-1.5 list-disc space-y-0.5 pl-4 marker:text-gray-400" {...p} />,
+          ol: ({ node, ...p }) => <ol className="my-1.5 list-decimal space-y-0.5 pl-4 marker:text-gray-400" {...p} />,
+          li: ({ node, ...p }) => <li className="pl-0.5" {...p} />,
+          strong: ({ node, ...p }) => <strong className="font-semibold text-gray-900" {...p} />,
+          em: ({ node, ...p }) => <em className="italic" {...p} />,
+          a: ({ node, ...p }) => (
+            <a className="text-olive-700 underline underline-offset-2" target="_blank" rel="noreferrer" {...p} />
+          ),
+          code: ({ node, ...p }) => (
+            <code className="rounded bg-sand-100 px-1 py-0.5 font-mono text-[12px] text-gray-800" {...p} />
+          ),
+          pre: ({ node, ...p }) => (
+            <pre className="my-2 overflow-x-auto rounded-lg bg-sand-100 p-3 font-mono text-[12px] [&>code]:bg-transparent [&>code]:p-0" {...p} />
+          ),
+          blockquote: ({ node, ...p }) => (
+            <blockquote className="my-2 border-l-2 border-sand-300 pl-3 text-gray-600" {...p} />
+          ),
+          hr: () => <hr className="my-2 border-sand-200" />,
+          table: ({ node, ...p }) => (
+            <div className="my-2 overflow-x-auto">
+              <table className="w-full border-collapse text-[12px]" {...p} />
+            </div>
+          ),
+          thead: ({ node, ...p }) => <thead className="border-b border-sand-300 text-left" {...p} />,
+          th: ({ node, ...p }) => <th className="px-2 py-1 font-semibold text-gray-900" {...p} />,
+          td: ({ node, ...p }) => <td className="border-t border-sand-100 px-2 py-1 align-top" {...p} />,
+        }}
+      >
+        {text}
+      </ReactMarkdown>
     </div>
   );
 }
