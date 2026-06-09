@@ -271,6 +271,67 @@ export async function deleteSlot(patientId: number, slot: number): Promise<void>
   if (error) throw error;
 }
 
+/**
+ * Relocate the medication at `fromSlot` to `toSlot` within ONE patient's
+ * dispenser. Two cases, both constraint-safe:
+ *   • target empty   → UPDATE the source row's `slot` (one write).
+ *   • target filled  → SWAP the medication-identifying columns between the
+ *                      two rows, leaving `slot`/`id`/`patient_id` fixed.
+ *
+ * Why swap content instead of swapping the `slot` values: the table has
+ *   UNIQUE (patient_id, slot)  AND  CHECK (slot BETWEEN 0 AND 9)
+ * so there is NO legal "parking" slot to stash a row in mid-swap, and
+ * supabase-js cannot issue a single multi-row UPDATE with per-row values.
+ * Swapping the content columns achieves the same visible result with two
+ * plain by-id updates and never touches the unique/range-constrained slot.
+ */
+export async function moveSlot(
+  patientId: number,
+  fromSlot: number,
+  toSlot: number,
+): Promise<void> {
+  if (fromSlot === toSlot) return;
+
+  // Pull both rows with all columns (need every med field for the swap).
+  const { data: rows, error: readErr } = await supabase
+    .from("medications")
+    .select("*")
+    .eq("patient_id", patientId)
+    .in("slot", [fromSlot, toSlot]);
+  if (readErr) throw readErr;
+
+  const all = (rows ?? []) as Record<string, unknown>[];
+  const src = all.find((r) => r.slot === fromSlot);
+  const dst = all.find((r) => r.slot === toSlot);
+  if (!src) return; // nothing to move (source empty)
+
+  if (!dst) {
+    // Target empty → just move the slot index of the source row.
+    const { error } = await supabase
+      .from("medications")
+      .update({ slot: toSlot })
+      .eq("id", src.id);
+    if (error) throw error;
+    return;
+  }
+
+  // Both filled → swap the medication-identifying columns by id.
+  const fields = (r: Record<string, unknown>) => ({
+    name: r.name,
+    description: r.description,
+    quantity: r.quantity,
+    expiry_date: r.expiry_date,
+    pills_per_dose: r.pills_per_dose,
+    schedule_at: r.schedule_at,
+  });
+  const { error: e1 } = await supabase
+    .from("medications").update(fields(dst)).eq("id", src.id);
+  if (e1) throw e1;
+  const { error: e2 } = await supabase
+    .from("medications").update(fields(src)).eq("id", dst.id);
+  if (e2) throw e2;
+}
+
 // ── Alerts (Phase 5 schema; Phase 7 dashboard reads from public.alerts) ──
 
 export type AlertKind = "expiry" | "low_stock";

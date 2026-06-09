@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   fetchPatients,
   fetchAllSlots,
+  moveSlot,
   type Patient,
   type SlotInfo,
 } from "@/lib/api";
+import { useSlotDnd } from "@/lib/useSlotDnd";
 
 function getInitials(name: string) {
   return name
@@ -142,6 +144,21 @@ export default function InventoryPage() {
       return { patient: p, cells };
     });
   }, [patients, slots]);
+
+  // Drag-drop slot reassignment within a single patient's dispenser.
+  const handleMove = useCallback(
+    async (patientId: number, from: number, to: number) => {
+      try {
+        await moveSlot(patientId, from, to);
+        const fresh = await fetchAllSlots();
+        setSlots(fresh);
+      } catch {
+        // mirror the page's silent .catch(() => {}) load convention
+      }
+    },
+    [],
+  );
+  const { getCellDragProps } = useSlotDnd(handleMove);
 
   return (
     <div>
@@ -329,7 +346,8 @@ export default function InventoryPage() {
                   return (
                     <div
                       key={i}
-                      className={`rounded-lg border p-2 text-center transition-all ${statusClasses(
+                      {...getCellDragProps(patient.id, i, !!slot)}
+                      className={`rounded-lg border p-2 text-center transition-all data-[dnd-over=true]:ring-2 data-[dnd-over=true]:ring-olive-400 data-[dnd-dragging=true]:opacity-40 ${statusClasses(
                         status,
                       )}`}
                       title={tooltip(slot, i)}
