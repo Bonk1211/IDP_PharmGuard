@@ -106,6 +106,16 @@ class Settings(BaseSettings):
     intake_label_min_confidence: float = 70.0
     intake_label_poll_interval_s: float = 1.5
 
+    # ── ElevenLabs nurse-voice TTS (guided-demo greeting) ────────────────
+    # Real billable secret — NEVER expose to the browser. Empty = feature off
+    # (the /api/device/tts endpoint soft-fails / the frontend stays silent).
+    elevenlabs_api_key: str = ""
+    # Built-in voice id (no cloning needed). Default = "Rachel".
+    elevenlabs_voice_id: str = "21m00Tcm4TlvDq8ikWAM"
+    # Low-latency multilingual model so non-English patient names speak well.
+    elevenlabs_model_id: str = "eleven_turbo_v2_5"
+    elevenlabs_output_format: str = "mp3_44100_128"
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

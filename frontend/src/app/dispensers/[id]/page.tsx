@@ -26,6 +26,7 @@ import {
   rotateMagazine,
   setCalibration,
   setDrawer,
+  speak,
   startIntakeWatch,
   streamUrl,
   testEjector,
@@ -125,6 +126,29 @@ function nextRoundFrom(schedules: ScheduleRow[]): { time: string; in: string } |
   return { time: fmtHHmm(best), in: inLabel };
 }
 
+// ──────────────────────────── nurse-voice scripts ────────────────────────────
+
+const CENTERING_PROMPT =
+  "Hi there. Please make sure your face is centered in the camera so I can recognize you.";
+
+function firstName(name: string | null | undefined): string {
+  return (name ?? "").trim().split(/\s+/)[0] || "there";
+}
+
+// e.g. "Hello Mary. It's time to take your Metformin and Aspirin. I'm right here with you."
+function greetingScript(patient: Patient | null, slots: SlotInfo[]): string {
+  const hi = `Hello ${firstName(patient?.name)}.`;
+  const meds = slots.map((s) => s.name).filter(Boolean) as string[];
+  if (meds.length === 0) {
+    return `${hi} You're all verified. Please wait while I prepare your medication.`;
+  }
+  const list =
+    meds.length === 1
+      ? meds[0]
+      : `${meds.slice(0, -1).join(", ")} and ${meds[meds.length - 1]}`;
+  return `${hi} It's time to take your ${list}. Take your time — I'm right here with you.`;
+}
+
 type SlotState = "ready" | "ejected" | "low" | "empty" | "locked";
 
 function deriveSlotState(slot: SlotInfo, ejectedSlot: number | null): SlotState {
@@ -185,6 +209,9 @@ export default function DispenserGuidedPage() {
   const [faceVerified, setFaceVerified] = useState<boolean>(false);
   const prevSnapUrl = useRef<string | null>(null);
   const lastStepIdxRef = useRef<number>(-1);
+  // Tracks which patient id the centering prompt already spoke for, so it
+  // fires once per patient (not on every Identify-card re-render).
+  const centeringSpokenForRef = useRef<number | null>(null);
 
   const configured = isDeviceConfigured();
 
@@ -294,7 +321,19 @@ export default function DispenserGuidedPage() {
     setFaceVerified(false);
     setFaceResult(null);
     setFaceVerifying(false);
+    centeringSpokenForRef.current = null;
   }, [activePatient?.id]);
+
+  // Speak the face-centering instruction once per patient while the Identify
+  // card shows and we haven't verified yet. Best-effort: browser autoplay may
+  // block until the first click — speak() swallows the rejection.
+  useEffect(() => {
+    if (viewIdx !== 0) return;
+    if (!activePatient || faceVerified) return;
+    if (centeringSpokenForRef.current === activePatient.id) return;
+    centeringSpokenForRef.current = activePatient.id;
+    void speak(CENTERING_PROMPT);
+  }, [viewIdx, activePatient, faceVerified]);
 
   const goToStep = (idx: number) => {
     setViewIdx(Math.max(0, Math.min(idx, 4)));
@@ -679,6 +718,7 @@ export default function DispenserGuidedPage() {
                   onContinue={() => {
                     setFaceVerified(true);
                     setMsg("Identity confirmed. Step advanced.");
+                    void speak(greetingScript(activePatient, activeSlots));
                   }}
                   onReset={() => {
                     setFaceVerified(false);
