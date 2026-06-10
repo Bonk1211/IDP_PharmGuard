@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 
 // Single-tenant default — the "Dispenser" tab links to a fixed id mirrored
 // from the backend DEFAULT_DISPENSER_ID. Multi-tenant routing isn't wired
@@ -18,12 +19,22 @@ const NAV_ITEMS = [
   { label: "Patient List", href: "/patients" },
 ];
 
+function isActiveTab(pathname: string, href: string): boolean {
+  return href === "/" ? pathname === "/" : pathname.startsWith(href);
+}
+
 export default function Navbar() {
   const pathname = usePathname();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close the mobile panel whenever the route changes.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [pathname]);
 
   return (
     <header className="sticky top-0 z-50 border-b border-sand-200 bg-white/80 backdrop-blur-md">
-      <div className="mx-auto flex h-16 max-w-[1360px] items-center justify-between px-6">
+      <div className="mx-auto flex h-16 max-w-[1360px] items-center justify-between px-4 sm:px-6">
         {/* Logo */}
         <Link href="/" className="flex items-center gap-2.5">
           <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-olive-600">
@@ -38,9 +49,9 @@ export default function Navbar() {
         </Link>
 
         {/* Nav tabs */}
-        <nav className="flex items-center gap-1">
+        <nav className="hidden items-center gap-1 md:flex">
           {NAV_ITEMS.map((item) => {
-            const isActive = pathname.startsWith(item.href);
+            const isActive = isActiveTab(pathname, item.href);
             return (
               <Link
                 key={item.href}
@@ -69,7 +80,7 @@ export default function Navbar() {
           </button>
 
           {/* Settings */}
-          <button className="rounded-full p-2 text-gray-400 transition-colors hover:bg-sand-100 hover:text-gray-600">
+          <button className="hidden rounded-full p-2 text-gray-400 transition-colors hover:bg-sand-100 hover:text-gray-600 sm:block">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3" />
               <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
@@ -82,8 +93,49 @@ export default function Navbar() {
               NS
             </div>
           </div>
+
+          {/* Hamburger (mobile only) */}
+          <button
+            type="button"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label={menuOpen ? "Close menu" : "Open menu"}
+            aria-expanded={menuOpen}
+            className="rounded-full p-2 text-gray-500 transition-colors hover:bg-sand-100 hover:text-gray-900 md:hidden"
+          >
+            {menuOpen ? (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            ) : (
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18M3 12h18M3 18h18" />
+              </svg>
+            )}
+          </button>
         </div>
       </div>
+
+      {/* Mobile dropdown panel */}
+      {menuOpen && (
+        <nav className="border-t border-sand-100 px-4 pb-4 pt-2 md:hidden">
+          {NAV_ITEMS.map((item) => {
+            const isActive = isActiveTab(pathname, item.href);
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={`block rounded-xl px-4 py-3 text-sm font-medium transition-all duration-200 ${
+                  isActive
+                    ? "bg-olive-700 text-white shadow-sm"
+                    : "text-gray-500 hover:bg-sand-100 hover:text-gray-900"
+                }`}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
+      )}
     </header>
   );
 }

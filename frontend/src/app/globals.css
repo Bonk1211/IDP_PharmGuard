@@ -31,6 +31,10 @@
   --font-display: 'DM Serif Display', Georgia, serif;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: var(--color-sand-50);
@@ -138,4 +142,14 @@ body {
 }
 .animate-sheet-up {
   animation: sheet-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* iOS Safari zooms the page when a focused input is under 16px.
+   Force 16px on coarse-pointer (touch) devices only. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }

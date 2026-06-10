@@ -386,7 +386,7 @@ export default function PatientDetailPage() {
             <span className="text-xs text-gray-400">10-Slot Magazine</span>
           </div>
 
-          <div className="grid grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-5">
             {displaySlots.map((slot, i) => {
               const isEmpty = !slot;
               const isLow = slot && slot.quantity > 0 && slot.quantity <= 3;

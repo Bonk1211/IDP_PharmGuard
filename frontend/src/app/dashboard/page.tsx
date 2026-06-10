@@ -4,6 +4,7 @@ import DispenserOverview from "@/components/DispenserOverview";
 import IntakeLog from "@/components/IntakeLog";
 import WhatHappenedLately from "@/components/WhatHappenedLately";
 import FloorMap from "@/components/FloorMap";
+import ShiftBrief from "@/components/ShiftBrief";
 import { useLogs, usePatients, useSlots } from "@/lib/swr";
 
 export default function Dashboard() {
@@ -24,6 +25,10 @@ export default function Dashboard() {
 
       <div className="animate-fade-up stagger-1">
         <WhatHappenedLately />
+      </div>
+
+      <div className="animate-fade-up stagger-2 mb-8">
+        <ShiftBrief />
       </div>
 
       <div className="animate-fade-up stagger-2 mb-8">
