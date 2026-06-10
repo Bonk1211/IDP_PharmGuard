@@ -481,7 +481,7 @@ export default function DispenserGuidedPage() {
   }, [viewIdx, activePatient, faceVerified]);
 
   const goToStep = (idx: number) => {
-    setViewIdx(Math.max(0, Math.min(idx, 4)));
+    setViewIdx(Math.max(0, Math.min(idx, 3)));
   };
 
   // Confirm + Override on step 3 funnel through here so the backend
@@ -489,7 +489,7 @@ export default function DispenserGuidedPage() {
   // CHECK panel stays "Idle" because nothing is feeding cam_b frames
   // into the FSM (the cycle runner is the only other caller).
   const confirmAndVerify = async () => {
-    setViewIdx(3);
+    setViewIdx(2);
     const r = await startIntakeWatch(60);
     if (!r.ok) {
       setMsg(`Intake watch failed to start: ${r.error ?? r.status}`);
@@ -527,7 +527,9 @@ export default function DispenserGuidedPage() {
 
   const drawerUnlocked = !!status?.is_unlocked;
 
-  // 0=Identify 1=Unlock 2=Dispense 3=Verify 4=Log 5=Done
+  // 0=Identify 1=Dispense 2=Verify 3=Log 4=Done. Drawer unlock is no
+  // longer a flow step — lock/unlock lives in the Advanced sheet, and the
+  // Dispense card gates ejects on drawerUnlocked itself.
   // Layer-1 face verify pins stepIdx at 0 until faceVerified flips true.
   const stepIdx = useMemo(() => {
     if (!activePatient) return 0;
@@ -537,13 +539,12 @@ export default function DispenserGuidedPage() {
       currentSlot &&
       confirmedSlots.has(currentSlot.slot)
     ) {
-      return 5;
+      return 4;
     }
-    if (intake?.result === "passed") return 4;
-    if (intake?.running) return 3;
-    if (drawerUnlocked) return 2;
+    if (intake?.result === "passed") return 3;
+    if (intake?.running) return 2;
     return 1;
-  }, [activePatient, faceVerified, intake, currentSlot, confirmedSlots, drawerUnlocked, activeSlots]);
+  }, [activePatient, faceVerified, intake, currentSlot, confirmedSlots, activeSlots]);
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
 
@@ -553,8 +554,8 @@ export default function DispenserGuidedPage() {
   );
 
   // Verdict tone per step for the StepBar — a judge scanning the bar sees
-  // exactly where a round passed or went wrong. Index: 0 Identify, 1 Unlock,
-  // 2 Dispense (pill verify), 3 Verify (swallow FSM), 4 Log.
+  // exactly where a round passed or went wrong. Index: 0 Identify,
+  // 1 Dispense (pill verify), 2 Verify (swallow FSM), 3 Log.
   const stepTones = useMemo<("ok" | "fail" | undefined)[]>(
     () => [
       faceVerified
@@ -562,7 +563,6 @@ export default function DispenserGuidedPage() {
         : faceResult?.ok && faceResult.match === false
         ? "fail"
         : undefined,
-      undefined,
       verifyResult?.match === true
         ? "ok"
         : verifyResult?.match === false
@@ -584,7 +584,7 @@ export default function DispenserGuidedPage() {
   useEffect(() => {
     if (lastStepIdxRef.current === stepIdx) return;
     lastStepIdxRef.current = stepIdx;
-    setViewIdx(Math.min(stepIdx, 4));
+    setViewIdx(Math.min(stepIdx, 3));
   }, [stepIdx]);
 
   // Esc closes the advanced sheet.
@@ -613,7 +613,7 @@ export default function DispenserGuidedPage() {
   // medication is known yet, if a verify call is already in flight,
   // or if hardware isn't configured.
   useEffect(() => {
-    if (viewIdx !== 3) return;
+    if (viewIdx !== 2) return;
     if (!configured) return;
     const expected = currentSlot?.name ?? undefined;
     let alive = true;
@@ -639,7 +639,7 @@ export default function DispenserGuidedPage() {
   // Calm spoken alert when the tray shows the wrong or an extra pill,
   // while the operator is on the Dispense card. Fires once per eject.
   useEffect(() => {
-    if (viewIdx !== 2) return;
+    if (viewIdx !== 1) return;
     if (!verifyResult || !verifyResult.top) return;
     const isMismatch = verifyResult.match === false;
     const hasExtra = unauthorized.length > 0;
@@ -807,7 +807,7 @@ export default function DispenserGuidedPage() {
   // ──────────────────────────── render ───────────────────────
 
   const canPrev = viewIdx > 0;
-  const canNext = viewIdx < 4 && viewIdx < Math.min(stepIdx, 4);
+  const canNext = viewIdx < 3 && viewIdx < Math.min(stepIdx, 3);
 
   return (
     <div className="-mx-6 px-6">
@@ -866,7 +866,7 @@ export default function DispenserGuidedPage() {
             <>
               <SectionHeading
                 index={1}
-                total={5}
+                total={4}
                 eyebrow="Identify"
                 title={
                   faceVerified
@@ -977,27 +977,7 @@ export default function DispenserGuidedPage() {
             <>
               <SectionHeading
                 index={2}
-                total={5}
-                eyebrow="Unlock"
-                title={
-                  drawerUnlocked
-                    ? "Drawer is unlocked."
-                    : "Unlock the drawer to begin."
-                }
-              />
-              <UnlockSection
-                drawerUnlocked={drawerUnlocked}
-                configured={configured}
-                busy={busy}
-                onSetDrawer={onSetDrawer}
-              />
-            </>
-          )}
-          {viewIdx === 2 && (
-            <>
-              <SectionHeading
-                index={3}
-                total={5}
+                total={4}
                 eyebrow="Dispense"
                 title={
                   currentSlot
@@ -1094,11 +1074,11 @@ export default function DispenserGuidedPage() {
               )}
             </>
           )}
-          {viewIdx === 3 && (
+          {viewIdx === 2 && (
             <>
               <SectionHeading
-                index={4}
-                total={5}
+                index={3}
+                total={4}
                 eyebrow="Verify"
                 title="AI is watching the patient take the pill."
               />
@@ -1123,14 +1103,14 @@ export default function DispenserGuidedPage() {
               </div>
             </>
           )}
-          {viewIdx === 4 && (
+          {viewIdx === 3 && (
             <>
               <SectionHeading
-                index={5}
-                total={5}
+                index={4}
+                total={4}
                 eyebrow="Log"
                 title={
-                  stepIdx === 5
+                  stepIdx === 4
                     ? "Round complete."
                     : `Confirm ${activePatient?.name?.split(" ")[0] ?? "the patient"} took the pill.`
                 }
@@ -1175,7 +1155,7 @@ export default function DispenserGuidedPage() {
           ← {viewIdx > 0 ? STEP_LABELS[viewIdx - 1] : "Back"}
         </button>
         <p className="text-[11px] text-gray-400">
-          Card {viewIdx + 1} of 5 · Live step {Math.min(stepIdx, 4) + 1}
+          Card {viewIdx + 1} of 4 · Live step {Math.min(stepIdx, 3) + 1}
         </p>
         <button
           type="button"
@@ -1183,7 +1163,7 @@ export default function DispenserGuidedPage() {
           disabled={!canNext}
           className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {viewIdx < 4 ? STEP_LABELS[viewIdx + 1] : "Done"} →
+          {viewIdx < 3 ? STEP_LABELS[viewIdx + 1] : "Done"} →
         </button>
       </div>
 
@@ -1206,7 +1186,7 @@ export default function DispenserGuidedPage() {
         onClose={() => setIntakeSuccessOpen(false)}
         onGoToLog={() => {
           setIntakeSuccessOpen(false);
-          goToStep(4); // Step 5 "Log"
+          goToStep(3); // Step 4 "Log"
         }}
       />
 
@@ -2646,7 +2626,7 @@ function DispenseCTA({
         <p className="mt-1 text-[11px] text-gray-500">
           {drawerUnlocked
             ? "Press Eject to push the pill onto the tray. Tray camera will show the drop."
-            : "Drawer is locked. Unlock the drawer (step 2) before ejecting."}
+            : "Drawer is locked. Unlock it from Advanced controls before ejecting."}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -3071,7 +3051,7 @@ function SectionHeading({
 
 // ──────────────────────────── StepBar ────────────────────────────
 
-const STEP_LABELS = ["Identify", "Unlock", "Dispense", "Verify", "Log"];
+const STEP_LABELS = ["Identify", "Dispense", "Verify", "Log"];
 
 function StepBar({
   stepIdx,
@@ -3168,68 +3148,6 @@ function StepBar({
       <p className="font-mono text-[10px] uppercase tracking-wider text-gray-400">
         cycle {cycleN} · {clock}
       </p>
-    </div>
-  );
-}
-
-// ──────────────────────────── UnlockSection ────────────────────────────
-
-function UnlockSection({
-  drawerUnlocked,
-  configured,
-  busy,
-  onSetDrawer,
-}: {
-  drawerUnlocked: boolean;
-  configured: boolean;
-  busy: string | null;
-  onSetDrawer: (action: "lock" | "unlock") => void;
-}) {
-  return (
-    <div className="flex flex-col items-start gap-5 rounded-2xl border border-sand-200 bg-white p-6">
-      <div className="flex items-center gap-3">
-        <span
-          className={`flex h-14 w-14 items-center justify-center rounded-2xl text-2xl ${
-            drawerUnlocked
-              ? "bg-status-warning-bg text-status-warning"
-              : "bg-olive-50 text-olive-700"
-          }`}
-          aria-hidden
-        >
-          {drawerUnlocked ? "🔓" : "🔒"}
-        </span>
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-            Drawer state
-          </p>
-          <p className="font-[family-name:var(--font-display)] text-xl text-gray-900">
-            {drawerUnlocked ? "Unlocked" : "Locked"}
-          </p>
-          <p className="mt-1 text-xs text-gray-600">
-            {drawerUnlocked
-              ? "Cabinet drawer is open. Ready to dispense."
-              : "Drawer must be unlocked before the round can begin."}
-          </p>
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onSetDrawer("lock")}
-          disabled={!configured || busy !== null || !drawerUnlocked}
-          className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy === "drawer-lock" ? "Locking…" : "Lock (0°)"}
-        </button>
-        <button
-          type="button"
-          onClick={() => onSetDrawer("unlock")}
-          disabled={!configured || busy !== null || drawerUnlocked}
-          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy === "drawer-unlock" ? "Unlocking…" : "Unlock (180°)"}
-        </button>
-      </div>
     </div>
   );
 }
