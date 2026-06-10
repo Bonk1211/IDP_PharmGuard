@@ -1,6 +1,8 @@
 <div align="center">
 
 # 💊 PharmGuard
+<img width="360" height="480" alt="E16DE87F-FC44-498E-A36D-2E00AC1B43E0_4_5005_c" src="https://github.com/user-attachments/assets/3ea4fad3-f739-44a2-aa7e-a2c045ee3dd5" />
+<img width="360" height="480" alt="7C39FD51-146B-4A77-A730-12D9C5C4218D_4_5005_c" src="https://github.com/user-attachments/assets/d39579cd-91ae-4163-8ebe-3c13a8f2f2a8" />
 
 **A smart pill dispenser that doesn't just dispense — it verifies the right patient took the right pill, and actually swallowed it.**
 
