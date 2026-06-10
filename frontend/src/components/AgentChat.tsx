@@ -74,7 +74,7 @@ export default function AgentChat() {
   }
 
   return (
-    <div className="flex h-full min-h-[60vh] flex-col rounded-2xl border border-sand-200 bg-white">
+    <div className="flex h-full min-h-[60dvh] max-h-[calc(100dvh-12rem)] flex-col rounded-2xl border border-sand-200 bg-white md:min-h-[60vh] md:max-h-none">
       <header className="flex items-center justify-between border-b border-sand-200 px-6 py-4">
         <div>
           <h2 className="text-base font-semibold text-gray-900">

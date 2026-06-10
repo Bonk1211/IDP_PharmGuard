@@ -14,7 +14,7 @@ export default function LayoutShell({ children }: { children: React.ReactNode })
   return (
     <>
       <Navbar />
-      <main className="mx-auto max-w-[1360px] px-6 pb-12 pt-6">{children}</main>
+      <main className="mx-auto max-w-[1360px] px-4 pb-12 pt-6 sm:px-6">{children}</main>
     </>
   );
 }

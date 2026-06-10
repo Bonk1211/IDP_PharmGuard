@@ -126,7 +126,7 @@ export default function PatientsPage() {
   return (
     <div>
       {/* Header */}
-      <div className="animate-fade-up mb-6 flex items-center justify-between">
+      <div className="animate-fade-up mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="font-[family-name:var(--font-display)] text-3xl text-gray-900">
           Patients
         </h1>
@@ -143,7 +143,7 @@ export default function PatientsPage() {
       </div>
 
       {/* Search + Filters */}
-      <div className="animate-fade-up stagger-1 mb-6 flex items-center gap-3">
+      <div className="animate-fade-up stagger-1 mb-6 flex flex-wrap items-center gap-3">
         <div className="relative max-w-sm flex-1">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="11" cy="11" r="8" />
@@ -170,7 +170,8 @@ export default function PatientsPage() {
         {loading ? (
           <div className="py-16 text-center text-sm text-gray-400">Loading patients...</div>
         ) : (
-          <table className="w-full">
+          <div className="overflow-x-auto">
+          <table className="w-full min-w-[760px]">
             <thead>
               <tr className="border-b border-sand-100">
                 <th className="px-5 py-3.5 text-left text-xs font-medium uppercase tracking-wider text-gray-400">Name</th>
@@ -233,10 +234,11 @@ export default function PatientsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
 
         {/* Pagination */}
-        <div className="flex items-center justify-between border-t border-sand-100 px-5 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-t border-sand-100 px-5 py-3">
           <span className="text-xs text-gray-400">
             Showing {filtered.length} of {patients.length} patients
           </span>
@@ -264,7 +266,7 @@ export default function PatientsPage() {
           />
 
           {/* Modal */}
-          <div className="animate-fade-up relative w-full max-w-lg rounded-2xl border border-sand-200 bg-white p-6 shadow-xl">
+          <div className="animate-fade-up relative mx-4 max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-sand-200 bg-white p-6 shadow-xl">
             <div className="mb-5 flex items-center justify-between">
               <h2 className="font-[family-name:var(--font-display)] text-xl text-gray-900">
                 New Patient

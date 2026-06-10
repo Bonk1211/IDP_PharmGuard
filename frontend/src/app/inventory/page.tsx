@@ -209,9 +209,10 @@ export default function InventoryPage() {
             No patients enrolled yet.
           </p>
         ) : (
-          <div className="space-y-1.5">
+          <div className="overflow-x-auto">
+          <div className="min-w-[560px] space-y-1.5">
             {/* Column header strip */}
-            <div className="grid grid-cols-[180px_repeat(10,minmax(0,1fr))] gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400">
+            <div className="grid grid-cols-[120px_repeat(10,minmax(0,1fr))] sm:grid-cols-[180px_repeat(10,minmax(0,1fr))] gap-1.5 text-[10px] font-medium uppercase tracking-wider text-gray-400">
               <span />
               {Array.from({ length: 10 }, (_, i) => (
                 <span key={i} className="text-center">
@@ -223,7 +224,7 @@ export default function InventoryPage() {
             {heatmapRows.map(({ patient, cells }) => (
               <div
                 key={patient.id}
-                className="grid grid-cols-[180px_repeat(10,minmax(0,1fr))] items-center gap-1.5"
+                className="grid grid-cols-[120px_repeat(10,minmax(0,1fr))] sm:grid-cols-[180px_repeat(10,minmax(0,1fr))] items-center gap-1.5"
               >
                 <Link
                   href={`/patients/${patient.id}`}
@@ -254,6 +255,7 @@ export default function InventoryPage() {
                 })}
               </div>
             ))}
+          </div>
           </div>
         )}
       </div>
