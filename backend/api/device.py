@@ -643,7 +643,7 @@ async def set_schedule(body: ScheduleBody):
 
 @router.get("/intake")
 async def intake_state(request: Request):
-    """Live state of the 3-step intake-verification game.
+    """Live state of the 4-step intake-verification game.
 
     Polled by the dashboard's IntakeGamePanel ~4×/s. Returns an idle
     snapshot when the cycle hasn't reached the swallow phase yet, so
@@ -659,7 +659,7 @@ async def intake_state(request: Request):
         return {
             "running": False,
             "step_index": 0,
-            "total_steps": 3,
+            "total_steps": 4,
             "step_name": "READY",
             "step_label": "Take the pill",
             "instruction": "Waiting for cycle to start",

@@ -46,7 +46,7 @@ export type IntakeState = {
   running: boolean;
   step_index: number;       // 0-based
   total_steps: number;
-  step_name: string;        // READY | SWALLOW | DONE
+  step_name: string;        // READY | INSERT | SWALLOW | DONE
   step_label: string;       // human label, e.g. "Take the pill"
   instruction: string;      // patient prompt
   confidence: number;       // 0..1, EMA of current step verifier
@@ -697,6 +697,8 @@ export const STATIC_TTS = {
     "Hi there. Please make sure your face is centered in the camera so I can recognize you.",
   "intake-ready":
     "Whenever you're ready, gently bring your hand up to your mouth and take the pill.",
+  "intake-insert":
+    "Now open wide and place the pill in your mouth.",
   "intake-swallow":
     "That's good. Now close your mouth and swallow for me, nice and easy.",
   "intake-done":

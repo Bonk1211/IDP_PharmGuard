@@ -1,4 +1,4 @@
-"""Patient intake verification — 3-step game FSM over MediaPipe FaceMesh + Hands.
+"""Patient intake verification — 4-step game FSM over MediaPipe FaceMesh + Hands.
 
 Replaces the old 5-step HSV-color-based monster (HAND -> TILT -> LEVEL ->
 MOUTH -> TONGUE) which depended on the pill being a specific blue colour.
@@ -6,9 +6,10 @@ This version uses only face/hand landmark geometry, so it works for any
 pill colour and is patient-friendly.
 
 Game flow:
-    1. READY    — bring hand close to your mouth.    hold 1.5 s
-    2. SWALLOW  — close your mouth and swallow.      hold 2.0 s
-    3. DONE     — open your mouth (empty).           hold 1.5 s
+    1. READY    — bring hand close to your mouth.    hold 0.8 s
+    2. INSERT   — open your mouth, put the pill in.  hold 0.6 s
+    3. SWALLOW  — close your mouth and swallow.      hold 1.2 s
+    4. DONE     — open your mouth (empty).           hold 0.8 s
 
 Each step's confidence is EMA-smoothed; once it stays above
 ``REQUIRED_CONFIDENCE`` for the step's hold duration, the FSM advances.
@@ -52,7 +53,7 @@ log = logging.getLogger(__name__)
 
 # ---- Tunables ----
 REQUIRED_CONFIDENCE = 0.70   # smoothed confidence to trigger the hold timer
-SMOOTHING_ALPHA = 0.40       # EMA factor (higher = more responsive, less stable)
+SMOOTHING_ALPHA = 0.55       # EMA factor (higher = more responsive, less stable)
 HAND_NEAR_MOUTH_PX = 200.0   # absolute distance threshold (640x480 frame)
 MOUTH_OPEN_RATIO = 0.30      # mouth-open if vertical/horizontal lip ratio > this
 MOUTH_CLOSED_RATIO = 0.10    # mouth-closed if ratio <= this
@@ -67,12 +68,14 @@ class StepDef:
 
 
 # Step 1: READY — hand close to mouth
-# Step 2: SWALLOW — mouth closed (after the patient swallows)
-# Step 3: DONE — mouth open + empty
+# Step 2: INSERT — mouth open while putting the pill in
+# Step 3: SWALLOW — mouth closed (after the patient swallows)
+# Step 4: DONE — mouth open + empty
 _STEPS: tuple[StepDef, ...] = (
-    StepDef("READY",   "Take the pill",      "Bring your hand close to your mouth", 1.5),
-    StepDef("SWALLOW", "Swallow",            "Close your mouth and swallow",         2.0),
-    StepDef("DONE",    "Show empty mouth",   "Open your mouth (empty) to confirm",   1.5),
+    StepDef("READY",   "Take the pill",      "Bring your hand close to your mouth",  0.8),
+    StepDef("INSERT",  "Put the pill in",    "Open your mouth and place the pill",   0.6),
+    StepDef("SWALLOW", "Swallow",            "Close your mouth and swallow",         1.2),
+    StepDef("DONE",    "Show empty mouth",   "Open your mouth (empty) to confirm",   0.8),
 )
 
 
@@ -141,6 +144,18 @@ def _step_ready(open_ratio: float, hand_d: float) -> float:
     return float(proximity)
 
 
+def _step_insert(open_ratio: float, hand_d: float) -> float:
+    """Confidence the patient has opened mouth to put the pill in."""
+    if open_ratio >= MOUTH_OPEN_RATIO:
+        return 1.0
+    if open_ratio <= MOUTH_CLOSED_RATIO:
+        return 0.0
+    return float(
+        (open_ratio - MOUTH_CLOSED_RATIO)
+            / (MOUTH_OPEN_RATIO - MOUTH_CLOSED_RATIO)
+    )
+
+
 def _step_swallow(open_ratio: float, hand_d: float) -> float:
     """Confidence the patient has closed mouth (ready to swallow / swallowing)."""
     if open_ratio <= MOUTH_CLOSED_RATIO:
@@ -166,7 +181,7 @@ def _step_done(open_ratio: float, hand_d: float) -> float:
 
 
 _VERIFIERS: tuple[Callable[[float, float], float], ...] = (
-    _step_ready, _step_swallow, _step_done,
+    _step_ready, _step_insert, _step_swallow, _step_done,
 )
 
 
@@ -457,7 +472,7 @@ class IntakeMonitor:
             with self._lock:
                 if self._state["result"] == "passed":
                     return True
-            time.sleep(0.05)  # ~20 fps inner cap
+            time.sleep(0.01)  # tiny yield; MediaPipe inference is the real cap
 
         # Timeout. Pick the most informative terminal state.
         with self._lock:

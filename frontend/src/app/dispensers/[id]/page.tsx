@@ -183,6 +183,7 @@ function wrongPillScript(
 // instruction live (see the intake step-change effect).
 const INTAKE_STEP_SLUG: Record<string, StaticTtsSlug> = {
   READY: "intake-ready",
+  INSERT: "intake-insert",
   SWALLOW: "intake-swallow",
   DONE: "intake-done",
 };
@@ -1938,7 +1939,7 @@ function IntakeReportCard({
               : "Idle"
           }
           sub={`step ${(intake?.step_index ?? 0) + 1}/${
-            intake?.total_steps ?? 3
+            intake?.total_steps ?? 4
           } · ${fsmConfPct}%`}
           tone={
             fsmResult === "passed"

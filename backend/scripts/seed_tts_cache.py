@@ -49,6 +49,9 @@ SLUG_TEXT: dict[str, str] = {
         "Whenever you're ready, gently bring your hand up to your mouth "
         "and take the pill."
     ),
+    "intake-insert": (
+        "Now open wide and place the pill in your mouth."
+    ),
     "intake-swallow": (
         "That's good. Now close your mouth and swallow for me, nice and easy."
     ),
