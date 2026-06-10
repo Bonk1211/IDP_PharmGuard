@@ -1,7 +1,7 @@
 "use client";
 
 import AgentChat from "@/components/AgentChat";
-import BriefCard from "@/components/BriefCard";
+import ShiftBrief from "@/components/ShiftBrief";
 
 export default function AgentPage() {
   return (
@@ -21,7 +21,7 @@ export default function AgentPage() {
           <AgentChat />
         </div>
         <div className="animate-slide-in-right stagger-3">
-          <BriefCard />
+          <ShiftBrief />
         </div>
       </div>
     </div>

@@ -27,7 +27,7 @@ export default function Landing() {
 function Header() {
   return (
     <header className="sticky top-0 z-40 border-b border-sand-200 bg-sand-50/85 backdrop-blur-md">
-      <div className="mx-auto flex h-16 max-w-[1360px] items-center justify-between px-6">
+      <div className="mx-auto flex h-16 max-w-[1360px] items-center justify-between px-4 sm:px-6">
         <div className="flex items-baseline gap-2">
           <span className="font-[family-name:var(--font-display)] text-xl text-olive-700">
             PharmGuard
@@ -49,7 +49,8 @@ function Header() {
           href="/dashboard"
           className="inline-flex items-center gap-1.5 rounded-full bg-olive-700 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-olive-800"
         >
-          Open the Dashboard
+          <span className="hidden sm:inline">Open the Dashboard</span>
+          <span className="sm:hidden">Dashboard</span>
           <Arrow />
         </Link>
       </div>
@@ -61,15 +62,15 @@ function Hero() {
   return (
     <section
       id="product"
-      className="relative overflow-hidden border-b border-sand-200"
+      className="relative scroll-mt-16 overflow-hidden border-b border-sand-200"
     >
-      <div className="mx-auto grid max-w-[1360px] grid-cols-1 gap-12 px-6 pb-20 pt-8 lg:grid-cols-[1.1fr_1fr] lg:pb-28 lg:pt-12">
+      <div className="mx-auto grid max-w-[1360px] grid-cols-1 gap-12 px-4 pb-20 pt-8 sm:px-6 lg:grid-cols-[1.1fr_1fr] lg:pb-28 lg:pt-12">
         <div className="animate-fade-up flex flex-col justify-center">
           <span className="mb-5 inline-flex w-fit items-center gap-2 rounded-full border border-olive-200 bg-olive-50 px-3 py-1 text-xs font-medium uppercase tracking-wider text-olive-700">
             <span className="h-1.5 w-1.5 rounded-full bg-olive-600" />
-            V1 prototype · Singapore
+            
           </span>
-          <h1 className="font-[family-name:var(--font-display)] text-5xl leading-[1.05] tracking-tight text-gray-900 sm:text-6xl lg:text-7xl">
+          <h1 className="font-[family-name:var(--font-display)] text-4xl leading-[1.08] tracking-tight text-gray-900 sm:text-6xl sm:leading-[1.05] lg:text-7xl">
             <span className="text-olive-700">Right</span> patient.{" "}
             <span className="text-olive-700">Right</span> pill.{" "}
             <span className="text-olive-700">Verified</span> swallow.
@@ -114,7 +115,7 @@ function Hero() {
 
             {/* Mid-left chip — Cam 2 */}
             <FeatureChip
-              className="absolute left-0 top-1/2 -translate-y-1/2 sm:left-2"
+              className="hidden sm:flex absolute left-0 top-1/2 -translate-y-1/2 sm:left-2"
               dotClass="bg-olive-600"
               title="YOLO 99.2% · slot 3"
               body="Pill verified · cycle 6.4 s"
@@ -130,7 +131,7 @@ function Hero() {
 
             {/* Bottom-left chip — Stream */}
             <FeatureChip
-              className="absolute bottom-2 left-0 sm:left-4"
+              className="hidden sm:flex absolute bottom-2 left-0 sm:left-4"
               dotClass="bg-status-warning"
               title="Ward dashboard · live"
               body="Cycle streamed in 280 ms"
@@ -162,8 +163,8 @@ function CamerasSection() {
   ];
 
   return (
-    <section id="how" className="border-b border-sand-200 bg-white">
-      <div className="mx-auto max-w-[1360px] px-6 py-20 lg:py-24">
+    <section id="how" className="scroll-mt-16 border-b border-sand-200 bg-white">
+      <div className="mx-auto max-w-[1360px] px-4 py-20 sm:px-6 lg:py-24">
         <div className="animate-fade-up mb-14 max-w-3xl">
           <span className="mb-4 inline-block text-xs font-medium uppercase tracking-[0.2em] text-olive-700">
             How it works
@@ -217,9 +218,9 @@ function OutcomesSection() {
   return (
     <section
       id="outcomes"
-      className="border-b border-sand-200 bg-olive-900 text-white"
+      className="scroll-mt-16 border-b border-sand-200 bg-olive-900 text-white"
     >
-      <div className="mx-auto max-w-[1360px] px-6 py-20 lg:py-24">
+      <div className="mx-auto max-w-[1360px] px-4 py-20 sm:px-6 lg:py-24">
         <div className="animate-fade-up mb-14 max-w-3xl">
           <span className="mb-4 inline-block text-xs font-medium uppercase tracking-[0.2em] text-olive-200">
             Outcomes
@@ -258,11 +259,11 @@ function OutcomesSection() {
 function Footer() {
   return (
     <footer className="bg-sand-50">
-      <div className="mx-auto flex max-w-[1360px] flex-col items-start justify-between gap-4 px-6 py-10 sm:flex-row sm:items-center">
+      <div className="mx-auto flex max-w-[1360px] flex-col items-start justify-between gap-4 px-4 py-10 sm:flex-row sm:items-center sm:px-6">
         <span className="font-[family-name:var(--font-display)] text-lg text-olive-700">
           PharmGuard
         </span>
-        <span className="text-xs text-gray-400">© 2025 · Singapore</span>
+        <span className="text-xs text-gray-400">© 2026 · IDP Group 21</span>
       </div>
     </footer>
   );
