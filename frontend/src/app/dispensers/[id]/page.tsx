@@ -241,6 +241,8 @@ export default function DispenserGuidedPage() {
   const [now, setNow] = useState<Date>(new Date());
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [viewIdx, setViewIdx] = useState<number>(0);
+  // Success modal shown once per round when the swallow FSM passes.
+  const [intakeSuccessOpen, setIntakeSuccessOpen] = useState(false);
   const [lastEjected, setLastEjected] = useState<number | null>(null);
   const [verifyResult, setVerifyResult] = useState<VerifyPillResult | null>(null);
   const [verifying, setVerifying] = useState<boolean>(false);
@@ -261,6 +263,9 @@ export default function DispenserGuidedPage() {
   // Last swallow-FSM step index we spoke a prompt for. -1 = none yet.
   // Milestone-paced: speak only when this changes, never on every poll.
   const lastSpokenStepRef = useRef<number>(-1);
+  // Latches the success modal to fire once per round (resists the 250 ms
+  // intake poll). Re-armed when a fresh watch starts (see effect below).
+  const intakeSuccessShownRef = useRef<boolean>(false);
 
   const configured = isDeviceConfigured();
 
@@ -327,6 +332,21 @@ export default function DispenserGuidedPage() {
       void speak(intake.instruction || "Follow along with me, you're doing great.");
     }
   }, [intake?.running, intake?.step_index, intake?.step_name, intake?.instruction]);
+
+  // Show the "medication taken" modal once per round, the moment the swallow
+  // FSM passes. Re-arm the latch when a fresh watch starts (running with no
+  // terminal result yet) so the next round can fire again. Ref-guarded so the
+  // 250 ms intake poll doesn't re-open it on every tick.
+  useEffect(() => {
+    if (intake?.result === "passed") {
+      if (!intakeSuccessShownRef.current) {
+        intakeSuccessShownRef.current = true;
+        setIntakeSuccessOpen(true);
+      }
+    } else if (intake?.running && intake.result === null) {
+      intakeSuccessShownRef.current = false;
+    }
+  }, [intake?.result, intake?.running]);
 
   useEffect(() => {
     if (!configured) return;
@@ -531,6 +551,16 @@ export default function DispenserGuidedPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [advancedOpen]);
+
+  // Esc closes the intake-success modal.
+  useEffect(() => {
+    if (!intakeSuccessOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setIntakeSuccessOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [intakeSuccessOpen]);
 
   // While the Verify card is on screen, keep re-running the pill
   // detector so the tray-status strip reflects whether the pill is
@@ -1118,6 +1148,18 @@ export default function DispenserGuidedPage() {
         Advanced
         <span className="text-gray-400">{advancedOpen ? "▼" : "▲"}</span>
       </button>
+
+      <IntakeSuccessModal
+        open={intakeSuccessOpen}
+        patient={activePatient}
+        slot={currentSlot}
+        intake={intake}
+        onClose={() => setIntakeSuccessOpen(false)}
+        onGoToLog={() => {
+          setIntakeSuccessOpen(false);
+          goToStep(4); // Step 5 "Log"
+        }}
+      />
 
       <AdvancedSheet
         open={advancedOpen}
@@ -1756,6 +1798,163 @@ function RotateTestBar({
             </button>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ──────────────────────────── IntakeSuccessModal ────────────────────────────
+
+// Fires once per round the moment the swallow FSM passes (intake.result ===
+// "passed"). Affirms the dose was taken, surfaces the proof parameters, and
+// its CTA hands the operator to the in-flow Log step to finalize the record.
+function IntakeSuccessModal({
+  open,
+  patient,
+  slot,
+  intake,
+  onClose,
+  onGoToLog,
+}: {
+  open: boolean;
+  patient: Patient | null;
+  slot: SlotInfo | null;
+  intake: IntakeState | null;
+  onClose: () => void;
+  onGoToLog: () => void;
+}) {
+  if (!open) return null;
+
+  const confPct = Math.round((intake?.confidence ?? 0) * 100);
+  const labelsSeen = intake?.labels_seen ?? [];
+  const labelsSatisfied = intake?.labels_satisfied ?? false;
+
+  const startedAt = intake?.started_at ?? null;
+  const endedAt = intake?.ended_at ?? null;
+  const durationS =
+    startedAt !== null ? (endedAt ?? Date.now() / 1000) - startedAt : null;
+
+  // Epoch seconds → local time; mirrors IntakeReportCard's formatters.
+  const fmtTime = (s: number | null) =>
+    s === null
+      ? "—"
+      : new Date(s * 1000).toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        });
+  const fmtDuration = (s: number | null) => {
+    if (s === null) return "—";
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const r = Math.round(s - m * 60);
+    return `${m}m ${r}s`;
+  };
+
+  const rows: { label: string; value: string; ok?: boolean }[] = [
+    { label: "Patient", value: patient?.name ?? "Patient" },
+    {
+      label: "Medication",
+      value: `Slot ${slot?.slot ?? "—"} · ${slot?.name ?? "—"}`,
+    },
+    { label: "Swallow", value: `confirmed · ${confPct}% confidence`, ok: true },
+    {
+      label: "Labels",
+      value: labelsSeen.length ? `${labelsSeen.join(", ")} seen` : "—",
+      ok: labelsSeen.length ? labelsSatisfied : undefined,
+    },
+    { label: "Duration", value: fmtDuration(durationS) },
+    { label: "Time", value: fmtTime(endedAt) },
+  ];
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Medication taken"
+    >
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+        onClick={onClose}
+      />
+
+      {/* Modal */}
+      <div className="animate-fade-up relative w-full max-w-md rounded-2xl border border-status-success bg-white p-6 shadow-xl">
+        <div className="mb-4 flex items-start justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-status-success-bg text-lg font-bold text-status-success"
+              aria-hidden
+            >
+              ✓
+            </span>
+            <div>
+              <h2 className="font-[family-name:var(--font-display)] text-xl text-gray-900">
+                Medication taken
+              </h2>
+              <p className="text-xs text-gray-400">
+                Swallow confirmed by the AI intake check.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="rounded-lg p-1.5 text-gray-400 transition-colors hover:bg-sand-100 hover:text-gray-600"
+            aria-label="Close"
+          >
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <dl className="space-y-2 rounded-2xl border border-sand-200 bg-sand-50 p-4">
+          {rows.map((r) => (
+            <div
+              key={r.label}
+              className="flex items-baseline justify-between gap-3"
+            >
+              <dt className="text-[11px] font-medium uppercase tracking-wider text-gray-400">
+                {r.label}
+              </dt>
+              <dd
+                className={`text-right text-sm font-medium ${
+                  r.ok === true
+                    ? "text-status-success"
+                    : r.ok === false
+                    ? "text-status-warning"
+                    : "text-gray-800"
+                }`}
+              >
+                {r.value}
+                {r.ok === true && " ✓"}
+              </dd>
+            </div>
+          ))}
+        </dl>
+
+        <div className="mt-5 flex justify-end">
+          <button
+            type="button"
+            onClick={onGoToLog}
+            className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800"
+          >
+            Go to logging →
+          </button>
+        </div>
       </div>
     </div>
   );
