@@ -1,7 +1,7 @@
 """AWS Rekognition CompareFaces wrapper for patient identity verification.
 
 Used by ``POST /api/device/verify_face`` to confirm the patient at cam_b
-matches the stored reference photo before the drawer can unlock. The
+matches the stored reference photo before dispensing is allowed. The
 endpoint downloads the patient's ``face_reference_url`` (Supabase Storage
 public URL), grabs one cam_b frame, encodes both as JPEG, and calls
 ``compare_faces`` here.

@@ -138,7 +138,7 @@ class Magazine:
     def cleanup(self) -> None:
         # Scope cleanup to OUR pins. A bare GPIO.cleanup() globally
         # wipes setmode + every other driver's claimed pins, causing
-        # sibling cleanups (Ejector, DrawerLock) to fail with
+        # sibling cleanups (Ejector) to fail with
         # "Please set pin numbering mode" + 'NoneType' PWM handle errors.
         if self.gpio is not None:
             try:

@@ -27,7 +27,6 @@ def _reload_hardware_modules() -> None:
         "hardware.magazine",
         "hardware.ejector",
         "hardware.diverter",
-        "hardware.drawer_lock",
     ):
         sys.modules.pop(mod, None)
 

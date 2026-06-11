@@ -88,8 +88,8 @@ class CycleState:
 
         # HI-012: refuse to run as if hardware were real when it isn't.
         # Mirror of edge_pi/main.py:295-316 — sys.exit(1) becomes RuntimeError.
-        # Drawer lock (SG90) removed from the control flow — the drawer is a
-        # manual demo toggle via /api/device/drawer, not part of dispense.
+        # Drawer lock (SG90) removed entirely — face verification is the
+        # only gate before dispense.
         self.hardware_stubbed = (
             self.magazine.is_stub
             or self.ejector.is_stub
@@ -397,10 +397,9 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     # Pill-ID (single-chute design — no diverter, no drawer lock).
     # Fail-safe: if pill-ID rejects, the pill sits in the chute for the
     # operator to remove. Adherence log records pill_taken=false. The
-    # patient never gets a wrong-pill delivery. The drawer SG90 servo is
-    # no longer in the control flow — it is a manual demo toggle exposed
-    # at /api/device/drawer. t_drawer is pinned to t_pillid so the bench
-    # CSV schema (t_drawer_ms column) stays stable (reads ~0).
+    # patient never gets a wrong-pill delivery. The drawer SG90 servo and
+    # its lock logic are removed entirely. t_drawer is pinned to t_pillid
+    # so the bench CSV schema (t_drawer_ms column) stays stable (reads ~0).
     if state.hardware_stubbed:
         pill_taken_actual = False
         pill_conf: float | None = None

@@ -23,12 +23,21 @@ foul the next magazine rotation (see hardware/interlock.py).
 
 Motion parameters are operator-tunable at runtime (dashboard Advanced
 tab -> /api/device/calibration) and persisted to CALIBRATION_PATH so a
-hand-calibrated servo survives restarts. Defaults below are the
-bench-validated Arduino values (Servo.writeMicroseconds):
-  FWD = 1600 us   REV = 1400 us   STOP = 1500 us
-  MOVE = 7.5 s    PAUSE = 1.0 s
-If it spins the wrong way, swap fwd_us/rev_us. If it creeps while
-"stopped", trim stop_us in ~5 us (0.1 % duty) steps.
+hand-calibrated servo survives restarts. Defaults below command full
+drive for ONE short stroke — distance from 1500 us sets how hard the
+controller drives the motor (near-center values like 1600/1400 stall
+under load), and move_s sets stroke length (~1 s ≈ one revolution at
+full drive):
+  FWD = 2000 us   REV = 1000 us   STOP = 1500 us
+  MOVE = 1.0 s    REV_MOVE = 1.2 s    PAUSE = 1.0 s
+The return stroke has its OWN duration (rev_move_s) because the
+open-loop return often needs longer than the push (friction, load,
+direction asymmetry). Slightly overdriving the return is safe when the
+pusher has a mechanical home stop — it guarantees a full re-seat.
+fwd_us and rev_us MUST be on opposite sides of 1500 — if both sit on
+the same side the "return home" stroke drives forward again and the
+pusher never comes back. If it spins the wrong way, swap fwd_us/rev_us.
+If it creeps while "stopped", trim stop_us in ~5 us (0.1 % duty) steps.
 
 Wiring (MG996R on hardware-PWM-capable BCM 13 / phys 33):
     Signal (orange/white) -> Pi BCM 13 (phys 33)
@@ -51,25 +60,27 @@ from hardware.interlock import ACTUATOR_LOCK, SETTLE_S
 log = logging.getLogger(__name__)
 
 # MG996R signal pin. Hardware-PWM-capable, free now that the ULN2003
-# stepper (BCM 5/6/16/26) is gone and the drawer SG90 owns BCM 18.
+# stepper (BCM 5/6/16/26) and the drawer SG90 (BCM 18) are gone.
 PIN_SERVO = 13
 PWM_HZ = 50
 
 
 # Pulse-us -> duty-% at 50 Hz: duty = pulse_us / (1e6 / PWM_HZ) * 100
 #   1500 us -> 7.5 %   (STOP)
-#   1600 us -> 8.0 %   (FORWARD — further from 1500 = faster)
-#   1400 us -> 7.0 %   (REVERSE)
+#   2000 us -> 10.0 %  (FORWARD — further from 1500 = faster/stronger)
+#   1000 us -> 5.0 %   (REVERSE)
 def _us_to_duty(pulse_us: float) -> float:
     return pulse_us / (1_000_000 / PWM_HZ) * 100.0
 
 
-# Bench-validated defaults. Operators override these via set_calibration();
-# overrides persist to CALIBRATION_PATH and are reloaded on next boot.
-DEFAULT_FWD_US = 1600.0
-DEFAULT_REV_US = 1400.0
+# Full-drive, single-short-stroke defaults (see module docstring).
+# Operators override these via set_calibration(); overrides persist to
+# CALIBRATION_PATH and are reloaded on next boot.
+DEFAULT_FWD_US = 2000.0
+DEFAULT_REV_US = 1000.0
 DEFAULT_STOP_US = 1500.0
-DEFAULT_MOVE_S = 7.5
+DEFAULT_MOVE_S = 1.0
+DEFAULT_REV_MOVE_S = 1.2
 DEFAULT_PAUSE_S = 1.0
 
 # Safety bounds — a bad calibration must never command an out-of-range
@@ -98,15 +109,18 @@ class EjectorCalibration:
     """Operator-tunable servo motion parameters.
 
     fwd_us / rev_us : pulse width for the forward (eject) and return
-        (home) strokes. STOP is ``stop_us``. move_s is how long each
-        stroke is driven; the return stroke is what brings the pusher
-        back home, so rev_us + move_s together set the homing motion.
+        (home) strokes. STOP is ``stop_us``. move_s is how long the
+        forward stroke is driven; rev_move_s is how long the return
+        stroke is driven (often needs to exceed move_s to fully re-seat
+        the pusher), so rev_us + rev_move_s together set the homing
+        motion.
     """
 
     fwd_us: float = DEFAULT_FWD_US
     rev_us: float = DEFAULT_REV_US
     stop_us: float = DEFAULT_STOP_US
     move_s: float = DEFAULT_MOVE_S
+    rev_move_s: float = DEFAULT_REV_MOVE_S
     pause_s: float = DEFAULT_PAUSE_S
 
     def clamped(self) -> "EjectorCalibration":
@@ -115,6 +129,7 @@ class EjectorCalibration:
             rev_us=_clamp(self.rev_us, US_MIN, US_MAX),
             stop_us=_clamp(self.stop_us, US_MIN, US_MAX),
             move_s=_clamp(self.move_s, MOVE_S_MIN, MOVE_S_MAX),
+            rev_move_s=_clamp(self.rev_move_s, MOVE_S_MIN, MOVE_S_MAX),
             pause_s=_clamp(self.pause_s, PAUSE_S_MIN, PAUSE_S_MAX),
         )
 
@@ -216,7 +231,7 @@ class Ejector:
         is still coasting back.
         """
         try:
-            self._drive(self.cal.rev_us, self.cal.move_s)
+            self._drive(self.cal.rev_us, self.cal.rev_move_s)
             self._drive(self.cal.stop_us, self.cal.pause_s)
         finally:
             self.pwm.ChangeDutyCycle(0)
@@ -236,7 +251,7 @@ class Ejector:
 
         log.info(
             "Ejecting pill (MG996R fwd %.1fs @ %.0fus, then home rev %.1fs @ %.0fus)",
-            self.cal.move_s, self.cal.fwd_us, self.cal.move_s, self.cal.rev_us,
+            self.cal.move_s, self.cal.fwd_us, self.cal.rev_move_s, self.cal.rev_us,
         )
         with ACTUATOR_LOCK:
             try:
@@ -260,9 +275,49 @@ class Ejector:
         if self._is_stub:
             log.debug("stub: would home")
             return
-        log.info("Homing ejector (rev %.1fs @ %.0fus)", self.cal.move_s, self.cal.rev_us)
+        log.info("Homing ejector (rev %.1fs @ %.0fus)", self.cal.rev_move_s, self.cal.rev_us)
         with ACTUATOR_LOCK:
             self._return_home_locked()
+
+    def set_pulse(self, pulse_us: float) -> float:
+        """Live-drive (jog): hold ``pulse_us`` on the signal line until the
+        next set_pulse()/release_pulse() call.
+
+        Powers the dashboard's potentiometer-style slider — each slider move
+        lands here and the servo follows in real time. On a positional servo
+        the pulse maps to an angle; on this continuous-rotation MG996R it maps
+        to speed+direction (stop_us = stand still), so the caller is expected
+        to release_pulse() when the operator lets go of the slider.
+
+        Returns the clamped pulse actually applied. Raises RuntimeError if
+        another actuator motion (eject stroke / magazine rotation) is in
+        flight — jogging mid-stroke would violate the interlock.
+        """
+        pulse = _clamp(float(pulse_us), US_MIN, US_MAX)
+        if self._is_stub:
+            log.debug("stub: would jog to %.0fus", pulse)
+            return pulse
+        # Non-blocking probe only — the duty cycle persists after release,
+        # which is exactly what lets the slider behave like a held knob.
+        if not ACTUATOR_LOCK.acquire(blocking=False):
+            raise RuntimeError("Actuators busy — wait for the current motion to finish")
+        try:
+            self.pwm.ChangeDutyCycle(_us_to_duty(pulse))
+        finally:
+            ACTUATOR_LOCK.release()
+        return pulse
+
+    def release_pulse(self) -> None:
+        """End a jog: drop PWM to 0 so the servo gets no pulses at all.
+
+        For the continuous MG996R this is a true stop (no creep); a
+        positional servo simply loses holding torque and stays put.
+        Idempotent and safe to call even if no jog is active.
+        """
+        if self._is_stub:
+            log.debug("stub: would release jog")
+            return
+        self.pwm.ChangeDutyCycle(0)
 
     def get_calibration(self) -> dict:
         """Current servo motion parameters."""

@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
@@ -35,13 +34,6 @@ router = APIRouter(dependencies=[Depends(verify_device_api_key)])
 _RPICAM_TCP_BASE_PORT = 8888
 _STREAM_JPEG_QUALITY = 70
 
-# Dummy drawer state for the demo lock/unlock button. The SG90 servo was
-# pulled out of the dispense control flow (scheduler/cycle_runner.py); the
-# /api/device/drawer endpoint now just flips this in-memory flag and the
-# frontend renders it. No GPIO is touched. Process-local, resets on restart.
-_dummy_drawer_unlocked = False
-
-
 def _get_loop(request: Request):
     """Return the HardwareLoop instance, or None when in headless mode."""
     return getattr(request.app.state, "hardware_loop", None)
@@ -58,7 +50,6 @@ async def device_status(request: Request):
             "cycle_n": 0,
             "last_cycle": None,
             "task_running": False,
-            "is_unlocked": False,
         }
     try:
         base = loop.status()
@@ -71,8 +62,6 @@ async def device_status(request: Request):
             "last_cycle": None,
             "task_running": False,
         }
-    # Drawer SG90 removed from the control flow — report the demo flag.
-    base["is_unlocked"] = _dummy_drawer_unlocked
     return base
 
 
@@ -117,9 +106,9 @@ class EjectBody(BaseModel):
 async def manual_eject(body: EjectBody, request: Request):
     """Rotate the magazine to ``slot`` and run one ejector push.
 
-    Raw mechanical test. No DB read or write. Drawer is NOT opened.
-    Serializes with the cycle via ``app.state.hardware_lock`` so two
-    threads never drive the GPIO at once.
+    Raw mechanical test. No DB read or write. Serializes with the cycle
+    via ``app.state.hardware_lock`` so two threads never drive the GPIO
+    at once.
     """
     loop = _get_loop(request)
     if loop is None:
@@ -193,7 +182,8 @@ class CalibrationBody(BaseModel):
     fwd_us: float | None = Field(default=None, ge=1000, le=2000, description="Forward (eject) pulse width, us.")
     rev_us: float | None = Field(default=None, ge=1000, le=2000, description="Reverse (home) pulse width, us.")
     stop_us: float | None = Field(default=None, ge=1000, le=2000, description="Stop pulse width, us (~1500). Trim to kill creep.")
-    move_s: float | None = Field(default=None, ge=0.1, le=30, description="Seconds each stroke is driven.")
+    move_s: float | None = Field(default=None, ge=0.1, le=30, description="Seconds the forward stroke is driven.")
+    rev_move_s: float | None = Field(default=None, ge=0.1, le=30, description="Seconds the return stroke is driven (raise to fully re-seat).")
     pause_s: float | None = Field(default=None, ge=0, le=10, description="Pause after each stroke, s.")
 
 
@@ -205,9 +195,9 @@ async def get_calibration(request: Request):
     UI offer a one-click reset; ``bounds`` drives input min/max + validation.
     """
     from hardware.ejector import (
-        DEFAULT_FWD_US, DEFAULT_PAUSE_S, DEFAULT_MOVE_S, DEFAULT_REV_US,
-        DEFAULT_STOP_US, MOVE_S_MAX, MOVE_S_MIN, PAUSE_S_MAX, PAUSE_S_MIN,
-        US_MAX, US_MIN,
+        DEFAULT_FWD_US, DEFAULT_PAUSE_S, DEFAULT_MOVE_S, DEFAULT_REV_MOVE_S,
+        DEFAULT_REV_US, DEFAULT_STOP_US, MOVE_S_MAX, MOVE_S_MIN, PAUSE_S_MAX,
+        PAUSE_S_MIN, US_MAX, US_MIN,
     )
 
     ejector = _require_ejector(request)
@@ -218,6 +208,7 @@ async def get_calibration(request: Request):
             "rev_us": DEFAULT_REV_US,
             "stop_us": DEFAULT_STOP_US,
             "move_s": DEFAULT_MOVE_S,
+            "rev_move_s": DEFAULT_REV_MOVE_S,
             "pause_s": DEFAULT_PAUSE_S,
         },
         "bounds": {
@@ -225,6 +216,7 @@ async def get_calibration(request: Request):
             "rev_us": [US_MIN, US_MAX],
             "stop_us": [US_MIN, US_MAX],
             "move_s": [MOVE_S_MIN, MOVE_S_MAX],
+            "rev_move_s": [MOVE_S_MIN, MOVE_S_MAX],
             "pause_s": [PAUSE_S_MIN, PAUSE_S_MAX],
         },
     }
@@ -281,22 +273,39 @@ async def ejector_test(request: Request):
     return {"ok": True, "latency_ms": latency_ms}
 
 
-class DrawerBody(BaseModel):
-    action: Literal["lock", "unlock"]
+class PulseBody(BaseModel):
+    """Live-drive pulse for the calibration slider. ``null`` releases the
+    servo (PWM off). Bounds mirror hardware/ejector.py US_MIN/US_MAX."""
+
+    pulse_us: float | None = Field(
+        default=None, ge=1000, le=2000,
+        description="Pulse width to hold, us. null/omitted = release (stop pulses).",
+    )
 
 
-@router.post("/drawer")
-async def manual_drawer(body: DrawerBody):
-    """Demo drawer toggle — flips an in-memory flag, no SG90 servo.
+@router.post("/ejector/pulse")
+async def ejector_pulse(body: PulseBody, request: Request):
+    """Drive the ejector servo at a raw pulse width, potentiometer-style.
 
-    The drawer lock was removed from the dispense control flow. This
-    endpoint exists only so the dashboard's lock/unlock button has
-    something to call; it touches no GPIO and works in headless mode.
+    The dashboard slider streams values here while dragged; the servo
+    follows in real time. Send ``pulse_us: null`` to release (PWM 0 — a
+    continuous servo stops, a positional one loses holding torque).
+
+    Deliberately does NOT take app.state.hardware_lock: jog calls arrive
+    many times per second and must not queue behind a multi-second eject.
+    Instead Ejector.set_pulse() probes the hardware interlock non-blocking
+    and we map "busy" to 409 so the UI can tell the operator to wait.
     """
-    global _dummy_drawer_unlocked
-    _dummy_drawer_unlocked = body.action == "unlock"
-    log.info("demo drawer: action=%s (no servo)", body.action)
-    return {"ok": True, "action": body.action, "is_unlocked": _dummy_drawer_unlocked}
+    ejector = _require_ejector(request)
+    if body.pulse_us is None:
+        await asyncio.to_thread(ejector.release_pulse)
+        log.info("ejector jog released")
+        return {"ok": True, "pulse_us": None}
+    try:
+        applied = await asyncio.to_thread(ejector.set_pulse, body.pulse_us)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "pulse_us": applied}
 
 
 # ─────────────────── pill verification (post-eject) ────────────────────
