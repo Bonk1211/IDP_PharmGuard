@@ -15,6 +15,7 @@ import { useParams } from "next/navigation";
 import { useSWRConfig } from "swr";
 
 import {
+  driveServoPulse,
   fetchCalibration,
   fetchDeviceStatus,
   fetchIntakeState,
@@ -25,7 +26,6 @@ import {
   manualEject,
   rotateMagazine,
   setCalibration,
-  setDrawer,
   speak,
   speakStatic,
   startIntakeWatch,
@@ -35,6 +35,7 @@ import {
   verifyFace,
   verifyPill,
   type CalibrationInfo,
+  type PulseResult,
   type StaticTtsSlug,
   type DeviceStatus,
   type EjectorCalibration,
@@ -413,7 +414,10 @@ export default function DispenserGuidedPage() {
       const ranked = [...slots]
         .filter((s) => s.name && s.patient_id)
         .map((s) => {
-          const sched = schedules.find((x) => x.slot === s.slot)?.schedule_at ?? null;
+          const sched =
+            schedules.find(
+              (x) => x.slot === s.slot && x.patient_id === s.patient_id,
+            )?.schedule_at ?? null;
           let dueMs = Infinity;
           if (sched) {
             const d = new Date(`${today}T${sched}`);
@@ -525,11 +529,9 @@ export default function DispenserGuidedPage() {
     return () => clearTimeout(t);
   }, [lastEjected]);
 
-  const drawerUnlocked = !!status?.is_unlocked;
-
-  // 0=Identify 1=Dispense 2=Verify 3=Log 4=Done. Drawer unlock is no
-  // longer a flow step — lock/unlock lives in the Advanced sheet, and the
-  // Dispense card gates ejects on drawerUnlocked itself.
+  // 0=Identify 1=Dispense 2=Verify 3=Log 4=Done. The drawer lock was
+  // removed entirely — once face verification passes, dispensing is
+  // immediately allowed.
   // Layer-1 face verify pins stepIdx at 0 until faceVerified flips true.
   const stepIdx = useMemo(() => {
     if (!activePatient) return 0;
@@ -686,21 +688,6 @@ export default function DispenserGuidedPage() {
     }
   }
 
-  async function onSetDrawer(action: "lock" | "unlock") {
-    const r = await withBusy(`drawer-${action}`, () => setDrawer(action));
-    if (r.ok) {
-      // Reflect new state immediately so the UI doesn't wait for the
-      // 3 s status poll. Prefer device-reported state, else trust the
-      // requested action.
-      const nextUnlocked =
-        typeof r.is_unlocked === "boolean" ? r.is_unlocked : action === "unlock";
-      setStatus((s) => (s ? { ...s, is_unlocked: nextUnlocked } : s));
-      setMsg(`Drawer ${nextUnlocked ? "unlocked" : "locked"}.`);
-    } else {
-      setMsg(`Drawer ${action} failed: ${r.error ?? r.status}`);
-    }
-  }
-
   async function onEject(slot: number) {
     const r = await withBusy(`eject-${slot}`, () => manualEject(slot));
     if (r.ok) {
@@ -709,7 +696,10 @@ export default function DispenserGuidedPage() {
       // Kick off pill verification in the background so the eject
       // handler returns immediately. YOLO inference takes ~150-200 ms
       // on the Pi; give the pill a moment to settle on the tray first.
-      const expected = slots.find((s) => s.slot === slot)?.name ?? undefined;
+      // Look up within the ACTIVE patient's slots — slot numbers repeat
+      // across patients (UNIQUE(patient_id, slot)), so a bare slot match
+      // against all rows can pick another patient's medication.
+      const expected = activeSlots.find((s) => s.slot === slot)?.name ?? undefined;
       void speak(dispensedScript(expected));
       wrongPillSpokenRef.current = false;
       setVerifyResult(null);
@@ -988,18 +978,15 @@ export default function DispenserGuidedPage() {
 
               <DispenseCTA
                 currentSlot={currentSlot}
-                drawerUnlocked={drawerUnlocked}
                 busy={busy}
                 configured={configured}
                 onEject={onEject}
-                onOpenAdvanced={() => setAdvancedOpen(true)}
               />
 
               <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
                 <SlotGrid
-                  slots={slots}
+                  slots={activeSlots}
                   ejectedSlot={ejectedSlot}
-                  drawerUnlocked={drawerUnlocked}
                   busy={busy}
                   configured={configured}
                   onEject={onEject}
@@ -1040,9 +1027,7 @@ export default function DispenserGuidedPage() {
                         onClick={() =>
                           currentSlot && onEject(currentSlot.slot)
                         }
-                        disabled={
-                          !currentSlot || !drawerUnlocked || busy !== null
-                        }
+                        disabled={!currentSlot || busy !== null}
                         className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         Re-eject
@@ -1193,9 +1178,8 @@ export default function DispenserGuidedPage() {
       <AdvancedSheet
         open={advancedOpen}
         onClose={() => setAdvancedOpen(false)}
-        slots={slots}
+        slots={activeSlots}
         ejectedSlot={ejectedSlot}
-        drawerUnlocked={drawerUnlocked}
         busy={busy}
         configured={configured}
         cam0Src={cam0Src}
@@ -1205,7 +1189,6 @@ export default function DispenserGuidedPage() {
         status={status}
         clock={fmtClock(now)}
         onEject={onEject}
-        onSetDrawer={onSetDrawer}
         onResnapshot={onResnapshot}
         onRotate={onRotate}
       />
@@ -1273,11 +1256,6 @@ function PatientBanner({
         {status?.hardware_stubbed && (
           <Pill label="HW" value="sim" tone="warn" />
         )}
-        <Pill
-          label="Drawer"
-          value={status?.is_unlocked ? "unlocked" : "locked"}
-          tone={status?.is_unlocked ? "warn" : "good"}
-        />
       </div>
 
       <div className="flex items-center gap-3 border-l border-sand-200 pl-4">
@@ -1735,14 +1713,12 @@ function StateLegend() {
 function SlotGrid({
   slots,
   ejectedSlot,
-  drawerUnlocked,
   busy,
   configured,
   onEject,
 }: {
   slots: SlotInfo[];
   ejectedSlot: number | null;
-  drawerUnlocked: boolean;
   busy: string | null;
   configured: boolean;
   onEject: (slot: number) => void;
@@ -1767,8 +1743,7 @@ function SlotGrid({
           const state = s ? deriveSlotState(s, ejectedSlot) : "locked";
           const isEjected = state === "ejected";
           const isBusy = busy === `eject-${slot}`;
-          const canEject =
-            !!s?.name && configured && drawerUnlocked && busy === null;
+          const canEject = !!s?.name && configured && busy === null;
           return (
             <button
               key={slot}
@@ -2589,18 +2564,14 @@ function VerifyResultCard({
 
 function DispenseCTA({
   currentSlot,
-  drawerUnlocked,
   busy,
   configured,
   onEject,
-  onOpenAdvanced,
 }: {
   currentSlot: SlotInfo | null;
-  drawerUnlocked: boolean;
   busy: string | null;
   configured: boolean;
   onEject: (slot: number) => void;
-  onOpenAdvanced: () => void;
 }) {
   const slot = currentSlot?.slot;
   const slotBusy =
@@ -2609,7 +2580,6 @@ function DispenseCTA({
     !!currentSlot &&
     !!currentSlot.name &&
     configured &&
-    drawerUnlocked &&
     busy === null;
 
   return (
@@ -2624,21 +2594,10 @@ function DispenseCTA({
             : "No active slot"}
         </p>
         <p className="mt-1 text-[11px] text-gray-500">
-          {drawerUnlocked
-            ? "Press Eject to push the pill onto the tray. Tray camera will show the drop."
-            : "Drawer is locked. Unlock it from Advanced controls before ejecting."}
+          Press Eject to push the pill onto the tray. Tray camera will show the drop.
         </p>
       </div>
       <div className="flex items-center gap-2">
-        {!drawerUnlocked && (
-          <button
-            type="button"
-            onClick={onOpenAdvanced}
-            className="rounded-full border border-sand-300 bg-white px-3 py-2 text-xs font-medium text-gray-700 transition-colors hover:bg-sand-50"
-          >
-            Open Advanced
-          </button>
-        )}
         <button
           type="button"
           onClick={() => slot !== undefined && onEject(slot)}
@@ -3159,7 +3118,6 @@ function AdvancedSheet({
   onClose,
   slots,
   ejectedSlot,
-  drawerUnlocked,
   busy,
   configured,
   cam0Src,
@@ -3169,7 +3127,6 @@ function AdvancedSheet({
   status,
   clock,
   onEject,
-  onSetDrawer,
   onResnapshot,
   onRotate,
 }: {
@@ -3177,7 +3134,6 @@ function AdvancedSheet({
   onClose: () => void;
   slots: SlotInfo[];
   ejectedSlot: number | null;
-  drawerUnlocked: boolean;
   busy: string | null;
   configured: boolean;
   cam0Src: string | null;
@@ -3187,7 +3143,6 @@ function AdvancedSheet({
   status: DeviceStatus | null;
   clock: string;
   onEject: (slot: number) => void;
-  onSetDrawer: (action: "lock" | "unlock") => void;
   onResnapshot: () => void;
   onRotate: (slot: number) => void;
 }) {
@@ -3232,58 +3187,11 @@ function AdvancedSheet({
         </div>
 
         <div className="space-y-4 p-6">
-          {/* Drawer lock */}
-          <div className="rounded-2xl border border-sand-200 bg-sand-50 p-4">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <span
-                  className={`flex h-10 w-10 items-center justify-center rounded-2xl text-lg ${
-                    drawerUnlocked
-                      ? "bg-status-warning-bg text-status-warning"
-                      : "bg-olive-50 text-olive-700"
-                  }`}
-                  aria-hidden
-                >
-                  {drawerUnlocked ? "🔓" : "🔒"}
-                </span>
-                <div>
-                  <p className="text-xs font-semibold text-gray-900">
-                    Drawer {drawerUnlocked ? "unlocked" : "locked"}
-                  </p>
-                  <p className="text-[11px] text-gray-500">
-                    Physical lock controlling the cabinet door.
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => onSetDrawer("lock")}
-                  disabled={!configured || busy !== null || !drawerUnlocked}
-                  className="rounded-full border border-sand-300 bg-white px-4 py-1.5 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busy === "drawer-lock" ? "…" : "Lock (0°)"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onSetDrawer("unlock")}
-                  disabled={!configured || busy !== null || drawerUnlocked}
-                  className="rounded-full border border-olive-300 bg-olive-700 px-4 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  {busy === "drawer-unlock" ? "…" : "Unlock (180°)"}
-                </button>
-              </div>
-            </div>
-          </div>
-
           {/* Manual eject grid */}
           <div className="rounded-2xl border border-sand-200 p-4">
             <div className="mb-3 flex items-center justify-between">
               <p className="text-xs font-semibold text-gray-900">
                 Manual eject
-              </p>
-              <p className="text-[10px] text-gray-400">
-                Requires drawer unlocked.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
@@ -3296,12 +3204,7 @@ function AdvancedSheet({
                     key={slot}
                     type="button"
                     onClick={() => s?.name && onEject(slot)}
-                    disabled={
-                      !s?.name ||
-                      !configured ||
-                      !drawerUnlocked ||
-                      busy !== null
-                    }
+                    disabled={!s?.name || !configured || busy !== null}
                     className={`flex flex-col gap-1 rounded-xl border p-2 text-left text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${slotStateClasses(
                       state,
                     )}`}
@@ -3392,7 +3295,8 @@ const CAL_FIELDS: {
   { key: "fwd_us", label: "Forward pulse", unit: "µs", step: 5, hint: ">1500 = eject direction; further from 1500 = faster" },
   { key: "rev_us", label: "Reverse pulse", unit: "µs", step: 5, hint: "<1500 = return-home direction" },
   { key: "stop_us", label: "Stop pulse", unit: "µs", step: 1, hint: "~1500; trim in small steps to kill creep" },
-  { key: "move_s", label: "Stroke time", unit: "s", step: 0.5, hint: "seconds driven each direction" },
+  { key: "move_s", label: "Forward stroke time", unit: "s", step: 0.1, hint: "seconds the eject push is driven" },
+  { key: "rev_move_s", label: "Return stroke time", unit: "s", step: 0.1, hint: "raise above forward time if the pusher doesn't fully return" },
   { key: "pause_s", label: "Pause", unit: "s", step: 0.1, hint: "settle between strokes" },
 ];
 
@@ -3401,6 +3305,10 @@ function toDraft(cal: EjectorCalibration): Record<string, string> {
     CAL_FIELDS.map((f) => [f.key, String(cal[f.key])]),
   );
 }
+
+// Min gap between live-drive requests while the slider is dragged (~8/s).
+// The ngrok->Pi round trip is ~100-300 ms, so faster sends just queue up.
+const JOG_SEND_MS = 120;
 
 /**
  * Operator calibration for the continuous-rotation ejector servo. Tune
@@ -3419,6 +3327,18 @@ function ServoCalibrationSection({
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
 
+  // ── Live drive (potentiometer-style jog) ────────────────────────────
+  // Slider value streams to /api/device/ejector/pulse while dragged so the
+  // servo follows in real time. Throttled to one request per JOG_SEND_MS
+  // (trailing send guarantees the final position always lands).
+  const [jogUs, setJogUs] = useState(1500);
+  const [jogHold, setJogHold] = useState(false);
+  const [jogDriving, setJogDriving] = useState(false);
+  const jogLatest = useRef(1500);
+  const jogLastSent = useRef(0);
+  const jogTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const jogActive = useRef(false); // pulses possibly live on the servo
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -3426,12 +3346,66 @@ function ServoCalibrationSection({
       if (alive && ci) {
         setInfo(ci);
         setDraft(toDraft(ci.calibration));
+        // Park the slider on the saved stop pulse — the one value that is
+        // guaranteed motionless on a continuous-rotation servo.
+        setJogUs(ci.calibration.stop_us);
+        jogLatest.current = ci.calibration.stop_us;
       }
     })();
     return () => {
       alive = false;
     };
   }, []);
+
+  // Never leave the servo being driven when the sheet unmounts.
+  useEffect(() => {
+    return () => {
+      if (jogTimer.current !== null) clearTimeout(jogTimer.current);
+      if (jogActive.current) void driveServoPulse(null);
+    };
+  }, []);
+
+  function onJogResult(r: PulseResult) {
+    if (r.ok) return;
+    setJogDriving(false);
+    setMsg({
+      text:
+        r.error ??
+        (r.status === 409
+          ? "Actuators busy — wait for the current motion to finish."
+          : `Live drive failed (${r.status})`),
+      ok: false,
+    });
+  }
+
+  function pushJog(v: number) {
+    jogLatest.current = v;
+    jogActive.current = true;
+    setJogDriving(true);
+    const now = Date.now();
+    const wait = JOG_SEND_MS - (now - jogLastSent.current);
+    if (wait <= 0) {
+      jogLastSent.current = now;
+      void driveServoPulse(v).then(onJogResult);
+    } else if (jogTimer.current === null) {
+      jogTimer.current = setTimeout(() => {
+        jogTimer.current = null;
+        jogLastSent.current = Date.now();
+        void driveServoPulse(jogLatest.current).then(onJogResult);
+      }, wait);
+    }
+  }
+
+  function releaseJog() {
+    if (jogTimer.current !== null) {
+      clearTimeout(jogTimer.current);
+      jogTimer.current = null;
+    }
+    if (!jogActive.current) return;
+    jogActive.current = false;
+    setJogDriving(false);
+    void driveServoPulse(null);
+  }
 
   const locked = !configured || busy !== null || parentBusy !== null || !info;
 
@@ -3547,6 +3521,86 @@ function ServoCalibrationSection({
                 </label>
               );
             })}
+          </div>
+
+          {/* Live drive — slider acts like a potentiometer on the pulse
+              width. Drag → servo follows; let go → pulses released (unless
+              Hold is on). */}
+          <div className="mt-4 rounded-xl border border-sand-200 bg-sand-50 p-3">
+            <div className="mb-1 flex items-center justify-between">
+              <span className="flex items-center gap-2 text-[11px] font-medium text-gray-700">
+                Live drive (pulse width)
+                {jogDriving && (
+                  <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-olive-600" />
+                )}
+              </span>
+              <span className="font-mono text-xs tabular-nums text-gray-900">
+                {Math.round(jogUs)} µs
+              </span>
+            </div>
+            <input
+              type="range"
+              min={info.bounds.fwd_us[0]}
+              max={info.bounds.fwd_us[1]}
+              step={5}
+              value={jogUs}
+              disabled={locked}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                setJogUs(v);
+                pushJog(v);
+              }}
+              onPointerUp={() => {
+                if (!jogHold) releaseJog();
+              }}
+              onKeyUp={() => {
+                if (!jogHold) releaseJog();
+              }}
+              className="w-full accent-olive-700 disabled:cursor-not-allowed disabled:opacity-50"
+            />
+            <div className="flex justify-between font-mono text-[10px] text-gray-400">
+              <span>{info.bounds.fwd_us[0]}</span>
+              <span>← rev · {info.calibration.stop_us} stop · fwd →</span>
+              <span>{info.bounds.fwd_us[1]}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap items-center gap-3">
+              <label className="flex items-center gap-1.5 text-[11px] text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={jogHold}
+                  disabled={locked}
+                  onChange={(e) => {
+                    setJogHold(e.target.checked);
+                    if (!e.target.checked) releaseJog();
+                  }}
+                  className="accent-olive-700"
+                />
+                Hold pulse after release
+              </label>
+              <button
+                type="button"
+                disabled={locked}
+                onClick={() => {
+                  const stop = info.calibration.stop_us;
+                  setJogUs(stop);
+                  pushJog(stop);
+                }}
+                className="rounded-full border border-sand-300 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-sand-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Center (stop)
+              </button>
+              <button
+                type="button"
+                disabled={locked || !jogDriving}
+                onClick={releaseJog}
+                className="rounded-full border border-sand-300 bg-white px-3 py-1 text-[11px] font-medium text-gray-700 transition-colors hover:bg-sand-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Release
+              </button>
+              <span className="ml-auto text-[10px] text-gray-400">
+                Continuous servo: distance from {info.calibration.stop_us} = speed
+              </span>
+            </div>
           </div>
 
           {msg && (

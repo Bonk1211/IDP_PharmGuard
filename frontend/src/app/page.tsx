@@ -79,7 +79,7 @@ function Hero() {
           </h1>
           <p className="mt-7 max-w-xl text-base leading-relaxed text-gray-600 sm:text-lg">
             A bedside dispenser for TB, COVID and MDRO isolation rooms. Face ID
-            unlocks the drawer, YOLO verifies the pill, a swallow-FSM confirms
+            releases the dose, YOLO verifies the pill, a swallow-FSM confirms
             ingestion — and every cycle streams to the ward dashboard in real
             time.
           </p>
@@ -110,7 +110,7 @@ function Hero() {
               className="absolute right-0 top-8 sm:right-2"
               dotClass="bg-status-success"
               title="Face ID matched · Bed 4"
-              body="Drawer unlocked · 0 nurse entry"
+              body="Dispense released · 0 nurse entry"
             />
 
             {/* Mid-left chip — Cam 2 */}
@@ -148,7 +148,7 @@ function CamerasSection() {
     {
       tag: "CAM 1 · Face",
       title: "Verify the patient",
-      body: "Bed-facing camera runs AWS Rekognition face match against the assigned patient. Drawer stays locked on mismatch.",
+      body: "Bed-facing camera runs AWS Rekognition face match against the assigned patient. No dispense on mismatch.",
     },
     {
       tag: "CAM 2 · Tray",
@@ -210,7 +210,7 @@ function CamerasSection() {
 function OutcomesSection() {
   const metrics = [
     { value: "100%", label: "Wrong-pill catch on the 5-SKU bench set" },
-    { value: "≤ 8s", label: "Face ID → drawer unlock, p95 on Pi 5" },
+    { value: "≤ 8s", label: "Face ID → dispense, p95 on Pi 5" },
     { value: "0", label: "Nurse touches per verified dose" },
     { value: "5", label: "FSM steps to confirm a swallow" },
   ];

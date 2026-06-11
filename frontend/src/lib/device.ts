@@ -33,7 +33,6 @@ export type DeviceStatus = {
   cycle_n: number;
   last_cycle: LastCycleSummary | null;
   task_running: boolean;
-  is_unlocked: boolean;
 };
 
 export type IntakeStepHistoryRow = {
@@ -190,15 +189,6 @@ export type EjectResult = {
   ok: boolean;
   status: number;
   latency_ms?: number;
-  error?: string;
-};
-
-export type DrawerAction = "lock" | "unlock";
-
-export type DrawerResult = {
-  ok: boolean;
-  status: number;
-  is_unlocked?: boolean;
   error?: string;
 };
 
@@ -419,26 +409,6 @@ export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
   }
 }
 
-export async function setDrawer(action: DrawerAction): Promise<DrawerResult> {
-  if (!isDeviceConfigured()) return { ok: false, status: 0 };
-  try {
-    const r = await fetch(`${baseUrl}/api/device/drawer`, {
-      method: "POST",
-      headers: { ...authHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({ action }),
-    });
-    const data = r.ok ? await r.json() : null;
-    return {
-      ok: r.ok,
-      status: r.status,
-      is_unlocked: data?.is_unlocked,
-      error: r.ok ? undefined : await safeError(r),
-    };
-  } catch {
-    return { ok: false, status: 0 };
-  }
-}
-
 export async function fetchSnapshot(cam: 0 | 1): Promise<string | null> {
   if (!isDeviceConfigured()) return null;
   try {
@@ -481,11 +451,12 @@ async function safeError(r: Response): Promise<string> {
 // ─────────────────── ejector servo calibration + homing ──────────────────────
 
 export type EjectorCalibration = {
-  fwd_us: number;   // forward (eject) pulse width, µs
-  rev_us: number;   // reverse (home) pulse width, µs
-  stop_us: number;  // stop pulse width, µs (~1500; trim to kill creep)
-  move_s: number;   // seconds each stroke is driven
-  pause_s: number;  // pause after each stroke, s
+  fwd_us: number;     // forward (eject) pulse width, µs
+  rev_us: number;     // reverse (home) pulse width, µs
+  stop_us: number;    // stop pulse width, µs (~1500; trim to kill creep)
+  move_s: number;     // seconds the forward stroke is driven
+  rev_move_s: number; // seconds the return stroke is driven
+  pause_s: number;    // pause after each stroke, s
 };
 
 export type CalibrationInfo = {
@@ -572,6 +543,41 @@ export async function testEjector(): Promise<EjectResult> {
       ok: r.ok,
       status: r.status,
       latency_ms: data?.latency_ms,
+      error: r.ok ? undefined : await safeError(r),
+    };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+export type PulseResult = {
+  ok: boolean;
+  status: number;
+  pulse_us?: number | null;
+  error?: string;
+};
+
+/**
+ * Live-drive the ejector servo at a raw pulse width (µs), like turning a
+ * potentiometer — the Pi holds the pulse until the next call. Pass `null`
+ * to release (PWM off: continuous servo stops, positional servo loses
+ * holding torque). 409 = another motion (eject/rotate) is in flight.
+ */
+export async function driveServoPulse(
+  pulseUs: number | null,
+): Promise<PulseResult> {
+  if (!isDeviceConfigured()) return { ok: false, status: 0 };
+  try {
+    const r = await fetch(`${baseUrl}/api/device/ejector/pulse`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ pulse_us: pulseUs }),
+    });
+    const data = r.ok ? await r.json() : null;
+    return {
+      ok: r.ok,
+      status: r.status,
+      pulse_us: data?.pulse_us,
       error: r.ok ? undefined : await safeError(r),
     };
   } catch {
