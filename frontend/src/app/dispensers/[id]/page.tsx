@@ -52,6 +52,9 @@ import {
   type SlotInfo,
 } from "@/lib/api";
 import { KEYS, useSlots } from "@/lib/swr";
+import ConfidenceGauge from "@/components/ConfidenceGauge";
+import FsmJourney from "@/components/FsmJourney";
+import VerdictStamp from "@/components/VerdictStamp";
 
 const TOTAL_SLOTS = 10;
 const SLOT_NUMBERS = Array.from({ length: TOTAL_SLOTS }, (_, i) => i);
@@ -266,6 +269,9 @@ export default function DispenserGuidedPage() {
   // Latches the success modal to fire once per round (resists the 250 ms
   // intake poll). Re-armed when a fresh watch starts (see effect below).
   const intakeSuccessShownRef = useRef<boolean>(false);
+  // Pending timeout that delays the success modal so the FsmJourney green
+  // sweep is visible first. Cleared on unmount.
+  const intakeSuccessTimerRef = useRef<number | null>(null);
 
   const configured = isDeviceConfigured();
 
@@ -341,12 +347,25 @@ export default function DispenserGuidedPage() {
     if (intake?.result === "passed") {
       if (!intakeSuccessShownRef.current) {
         intakeSuccessShownRef.current = true;
-        setIntakeSuccessOpen(true);
+        // Let the FsmJourney success sweep play before the modal covers it.
+        intakeSuccessTimerRef.current = window.setTimeout(
+          () => setIntakeSuccessOpen(true),
+          700,
+        );
       }
     } else if (intake?.running && intake.result === null) {
       intakeSuccessShownRef.current = false;
     }
   }, [intake?.result, intake?.running]);
+
+  // Clear any pending success-modal timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (intakeSuccessTimerRef.current !== null) {
+        clearTimeout(intakeSuccessTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!configured) return;
@@ -462,7 +481,7 @@ export default function DispenserGuidedPage() {
   }, [viewIdx, activePatient, faceVerified]);
 
   const goToStep = (idx: number) => {
-    setViewIdx(Math.max(0, Math.min(idx, 4)));
+    setViewIdx(Math.max(0, Math.min(idx, 3)));
   };
 
   // Confirm + Override on step 3 funnel through here so the backend
@@ -470,7 +489,7 @@ export default function DispenserGuidedPage() {
   // CHECK panel stays "Idle" because nothing is feeding cam_b frames
   // into the FSM (the cycle runner is the only other caller).
   const confirmAndVerify = async () => {
-    setViewIdx(3);
+    setViewIdx(2);
     const r = await startIntakeWatch(60);
     if (!r.ok) {
       setMsg(`Intake watch failed to start: ${r.error ?? r.status}`);
@@ -508,7 +527,9 @@ export default function DispenserGuidedPage() {
 
   const drawerUnlocked = !!status?.is_unlocked;
 
-  // 0=Identify 1=Unlock 2=Dispense 3=Verify 4=Log 5=Done
+  // 0=Identify 1=Dispense 2=Verify 3=Log 4=Done. Drawer unlock is no
+  // longer a flow step — lock/unlock lives in the Advanced sheet, and the
+  // Dispense card gates ejects on drawerUnlocked itself.
   // Layer-1 face verify pins stepIdx at 0 until faceVerified flips true.
   const stepIdx = useMemo(() => {
     if (!activePatient) return 0;
@@ -518,13 +539,12 @@ export default function DispenserGuidedPage() {
       currentSlot &&
       confirmedSlots.has(currentSlot.slot)
     ) {
-      return 5;
+      return 4;
     }
-    if (intake?.result === "passed") return 4;
-    if (intake?.running) return 3;
-    if (drawerUnlocked) return 2;
+    if (intake?.result === "passed") return 3;
+    if (intake?.running) return 2;
     return 1;
-  }, [activePatient, faceVerified, intake, currentSlot, confirmedSlots, drawerUnlocked, activeSlots]);
+  }, [activePatient, faceVerified, intake, currentSlot, confirmedSlots, activeSlots]);
 
   const nextRound = useMemo(() => nextRoundFrom(schedules), [schedules]);
 
@@ -533,13 +553,38 @@ export default function DispenserGuidedPage() {
     [verifyResult, currentSlot?.name],
   );
 
+  // Verdict tone per step for the StepBar — a judge scanning the bar sees
+  // exactly where a round passed or went wrong. Index: 0 Identify,
+  // 1 Dispense (pill verify), 2 Verify (swallow FSM), 3 Log.
+  const stepTones = useMemo<("ok" | "fail" | undefined)[]>(
+    () => [
+      faceVerified
+        ? "ok"
+        : faceResult?.ok && faceResult.match === false
+        ? "fail"
+        : undefined,
+      verifyResult?.match === true
+        ? "ok"
+        : verifyResult?.match === false
+        ? "fail"
+        : undefined,
+      intake?.result === "passed"
+        ? "ok"
+        : intake?.result != null
+        ? "fail"
+        : undefined,
+      undefined,
+    ],
+    [faceVerified, faceResult, verifyResult?.match, intake?.result],
+  );
+
   // When stepIdx advances, swap the visible card to follow.
   // User can still click a different step to preview — we only auto-swap on
   // a real stepIdx change, not on every render.
   useEffect(() => {
     if (lastStepIdxRef.current === stepIdx) return;
     lastStepIdxRef.current = stepIdx;
-    setViewIdx(Math.min(stepIdx, 4));
+    setViewIdx(Math.min(stepIdx, 3));
   }, [stepIdx]);
 
   // Esc closes the advanced sheet.
@@ -568,7 +613,7 @@ export default function DispenserGuidedPage() {
   // medication is known yet, if a verify call is already in flight,
   // or if hardware isn't configured.
   useEffect(() => {
-    if (viewIdx !== 3) return;
+    if (viewIdx !== 2) return;
     if (!configured) return;
     const expected = currentSlot?.name ?? undefined;
     let alive = true;
@@ -594,7 +639,7 @@ export default function DispenserGuidedPage() {
   // Calm spoken alert when the tray shows the wrong or an extra pill,
   // while the operator is on the Dispense card. Fires once per eject.
   useEffect(() => {
-    if (viewIdx !== 2) return;
+    if (viewIdx !== 1) return;
     if (!verifyResult || !verifyResult.top) return;
     const isMismatch = verifyResult.match === false;
     const hasExtra = unauthorized.length > 0;
@@ -762,7 +807,7 @@ export default function DispenserGuidedPage() {
   // ──────────────────────────── render ───────────────────────
 
   const canPrev = viewIdx > 0;
-  const canNext = viewIdx < 4 && viewIdx < Math.min(stepIdx, 4);
+  const canNext = viewIdx < 3 && viewIdx < Math.min(stepIdx, 3);
 
   return (
     <div className="-mx-6 px-6">
@@ -774,6 +819,7 @@ export default function DispenserGuidedPage() {
           cycleN={status?.cycle_n ?? 0}
           onJump={goToStep}
           viewIdx={viewIdx}
+          stepTones={stepTones}
         />
         <div className="mt-2">
           <ThisPassRow
@@ -797,8 +843,14 @@ export default function DispenserGuidedPage() {
           </div>
         )}
         {msg && (
-          <div className="rounded-2xl border border-sand-200 bg-sand-50 px-3 py-2 text-xs text-gray-700">
-            {msg}
+          <div className="animate-fade-in flex items-start gap-2 rounded-2xl border border-sand-200 bg-white px-3 py-2 text-xs text-gray-700 shadow-sm">
+            <span
+              className="mt-px inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-olive-50 text-[10px] font-bold text-olive-700"
+              aria-hidden
+            >
+              i
+            </span>
+            <span className="min-w-0">{msg}</span>
           </div>
         )}
       </div>
@@ -814,7 +866,7 @@ export default function DispenserGuidedPage() {
             <>
               <SectionHeading
                 index={1}
-                total={5}
+                total={4}
                 eyebrow="Identify"
                 title={
                   faceVerified
@@ -925,27 +977,7 @@ export default function DispenserGuidedPage() {
             <>
               <SectionHeading
                 index={2}
-                total={5}
-                eyebrow="Unlock"
-                title={
-                  drawerUnlocked
-                    ? "Drawer is unlocked."
-                    : "Unlock the drawer to begin."
-                }
-              />
-              <UnlockSection
-                drawerUnlocked={drawerUnlocked}
-                configured={configured}
-                busy={busy}
-                onSetDrawer={onSetDrawer}
-              />
-            </>
-          )}
-          {viewIdx === 2 && (
-            <>
-              <SectionHeading
-                index={3}
-                total={5}
+                total={4}
                 eyebrow="Dispense"
                 title={
                   currentSlot
@@ -979,12 +1011,6 @@ export default function DispenserGuidedPage() {
                   footer={cam0Footer}
                 />
               </div>
-
-              <RotateTestBar
-                busy={busy}
-                configured={configured}
-                onRotate={onRotate}
-              />
 
               {(verifying || verifyResult) && (
                 <div className="mt-4 space-y-3">
@@ -1048,14 +1074,17 @@ export default function DispenserGuidedPage() {
               )}
             </>
           )}
-          {viewIdx === 3 && (
+          {viewIdx === 2 && (
             <>
               <SectionHeading
-                index={4}
-                total={5}
+                index={3}
+                total={4}
                 eyebrow="Verify"
                 title="AI is watching the patient take the pill."
               />
+              <div className="mb-4">
+                <FsmJourney intake={intake} />
+              </div>
               <TrayStatusStrip
                 result={verifyResult}
                 expected={currentSlot?.name ?? null}
@@ -1074,14 +1103,14 @@ export default function DispenserGuidedPage() {
               </div>
             </>
           )}
-          {viewIdx === 4 && (
+          {viewIdx === 3 && (
             <>
               <SectionHeading
-                index={5}
-                total={5}
+                index={4}
+                total={4}
                 eyebrow="Log"
                 title={
-                  stepIdx === 5
+                  stepIdx === 4
                     ? "Round complete."
                     : `Confirm ${activePatient?.name?.split(" ")[0] ?? "the patient"} took the pill.`
                 }
@@ -1126,7 +1155,7 @@ export default function DispenserGuidedPage() {
           ← {viewIdx > 0 ? STEP_LABELS[viewIdx - 1] : "Back"}
         </button>
         <p className="text-[11px] text-gray-400">
-          Card {viewIdx + 1} of 5 · Live step {Math.min(stepIdx, 4) + 1}
+          Card {viewIdx + 1} of 4 · Live step {Math.min(stepIdx, 3) + 1}
         </p>
         <button
           type="button"
@@ -1134,7 +1163,7 @@ export default function DispenserGuidedPage() {
           disabled={!canNext}
           className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {viewIdx < 4 ? STEP_LABELS[viewIdx + 1] : "Done"} →
+          {viewIdx < 3 ? STEP_LABELS[viewIdx + 1] : "Done"} →
         </button>
       </div>
 
@@ -1157,7 +1186,7 @@ export default function DispenserGuidedPage() {
         onClose={() => setIntakeSuccessOpen(false)}
         onGoToLog={() => {
           setIntakeSuccessOpen(false);
-          goToStep(4); // Step 5 "Log"
+          goToStep(3); // Step 4 "Log"
         }}
       />
 
@@ -1178,6 +1207,7 @@ export default function DispenserGuidedPage() {
         onEject={onEject}
         onSetDrawer={onSetDrawer}
         onResnapshot={onResnapshot}
+        onRotate={onRotate}
       />
     </div>
   );
@@ -1240,11 +1270,9 @@ function PatientBanner({
           value={status?.task_running ? "running" : "stopped"}
           tone={status?.task_running ? "good" : "bad"}
         />
-        <Pill
-          label="HW"
-          value={status?.hardware_stubbed ? "stub" : "real"}
-          tone={status?.hardware_stubbed ? "warn" : "good"}
-        />
+        {status?.hardware_stubbed && (
+          <Pill label="HW" value="sim" tone="warn" />
+        )}
         <Pill
           label="Drawer"
           value={status?.is_unlocked ? "unlocked" : "locked"}
@@ -1435,6 +1463,34 @@ function FaceVerifySection({
                     </span>
                   </div>
                 )}
+                {result.ok && result.match === true && (
+                  <VerdictStamp
+                    key="face-verdict-ok"
+                    size="lg"
+                    tone="ok"
+                    headline="Identity verified"
+                    sub={
+                      patient
+                        ? `${patient.name}${
+                            sim != null ? ` · ${sim.toFixed(1)}% match` : ""
+                          }`
+                        : undefined
+                    }
+                  />
+                )}
+                {result.ok && result.match === false && (
+                  <VerdictStamp
+                    key="face-verdict-fail"
+                    size="lg"
+                    tone="fail"
+                    headline="Not recognized"
+                    sub={
+                      sim != null
+                        ? `${sim.toFixed(1)}% < ${threshold ?? "?"}% required`
+                        : "No matching face found"
+                    }
+                  />
+                )}
               </>
             ) : cam1Url ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -1459,32 +1515,15 @@ function FaceVerifySection({
         </figure>
       </div>
 
-      {/* Similarity bar + threshold marker */}
+      {/* Similarity gauge + threshold marker */}
       {result && sim != null && threshold != null && (
         <div className="mt-3">
-          <div className="mb-1 flex items-baseline justify-between text-[11px]">
-            <span className="font-mono text-gray-500">similarity</span>
-            <span
-              className={`font-mono font-semibold ${
-                result.match ? "text-status-success" : "text-status-danger"
-              }`}
-            >
-              {sim.toFixed(1)}% / {threshold}%
-            </span>
-          </div>
-          <div className="relative h-2 overflow-hidden rounded-full bg-sand-100">
-            <div
-              className={`h-full ${
-                result.match ? "bg-status-success" : "bg-status-danger"
-              }`}
-              style={{ width: `${Math.min(100, Math.max(0, sim))}%` }}
-            />
-            <div
-              className="absolute top-0 h-full w-px bg-gray-700"
-              style={{ left: `${Math.min(100, Math.max(0, threshold))}%` }}
-              title={`threshold ${threshold}%`}
-            />
-          </div>
+          <ConfidenceGauge
+            value={sim}
+            threshold={threshold}
+            label="Rekognition similarity"
+            tone={result.match ? "ok" : "fail"}
+          />
         </div>
       )}
 
@@ -2415,90 +2454,53 @@ function VerifyResultCard({
           bg: "bg-status-success-bg",
           border: "border-status-success",
           text: "text-status-success",
-          icon: "✓",
-          headline: "Verified — correct medication",
         }
       : match === false
       ? {
           bg: "bg-status-danger-bg",
           border: "border-status-danger",
           text: "text-status-danger",
-          icon: "✗",
-          headline: "Mismatch — pill does not match expected",
         }
       : top
       ? {
           bg: "bg-olive-50",
           border: "border-olive-300",
           text: "text-olive-700",
-          icon: "·",
-          headline: "Detection complete",
         }
       : {
           bg: "bg-status-warning-bg",
           border: "border-status-warning",
           text: "text-status-warning",
-          icon: "?",
-          headline: "No pill detected on tray",
         };
 
   const confPct = top ? Math.round(top.confidence * 100) : null;
 
+  const verdict =
+    match === true
+      ? {
+          tone: "ok" as const,
+          headline: "Correct medication",
+          sub: top ? `${top.class_name} · ${confPct}%` : undefined,
+        }
+      : match === false
+      ? {
+          tone: "fail" as const,
+          headline: "Wrong pill detected",
+          sub: top ? `${top.class_name} — expected ${expected}` : undefined,
+        }
+      : !top
+      ? {
+          tone: "warn" as const,
+          headline: "No pill on tray",
+          sub: expected ? `Expecting ${expected}` : undefined,
+        }
+      : null;
+
   return (
     <div className={`rounded-2xl border ${tone.border} ${tone.bg} p-4`}>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[2fr_3fr]">
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center gap-3">
-            <span
-              className={`flex h-10 w-10 items-center justify-center rounded-2xl bg-white text-lg font-bold ${tone.text}`}
-            >
-              {tone.icon}
-            </span>
-            <div>
-              <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">
-                Pill verification
-              </p>
-              <p className={`text-sm font-semibold ${tone.text}`}>
-                {tone.headline}
-              </p>
-            </div>
-          </div>
-
-          <dl className="grid grid-cols-2 gap-2 text-xs">
-            <dt className="text-gray-500">Detected</dt>
-            <dd className="font-semibold text-gray-900">
-              {top ? top.class_name : "—"}
-            </dd>
-            <dt className="text-gray-500">Confidence</dt>
-            <dd className="font-mono text-gray-900">
-              {confPct !== null ? `${confPct}%` : "—"}
-            </dd>
-            <dt className="text-gray-500">Expected</dt>
-            <dd className="text-gray-900">{expected ?? "—"}</dd>
-            <dt className="text-gray-500">Other candidates</dt>
-            <dd className="text-gray-700">
-              {result.detections.length > 1
-                ? result.detections
-                    .slice(1, 4)
-                    .map(
-                      (d) =>
-                        `${d.class_name} ${Math.round(d.confidence * 100)}%`,
-                    )
-                    .join(", ")
-                : "none"}
-            </dd>
-            {typeof result.latency_ms === "number" && (
-              <>
-                <dt className="text-gray-500">Inference</dt>
-                <dd className="font-mono text-gray-500">
-                  {result.latency_ms} ms
-                </dd>
-              </>
-            )}
-          </dl>
-        </div>
-
-        <div className="overflow-hidden rounded-xl border border-sand-200 bg-black">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-[3fr_2fr]">
+        {/* Annotated tray snapshot — the evidence, with the verdict on top */}
+        <div className="relative min-h-44 overflow-hidden rounded-xl border border-sand-200 bg-black">
           {result.snapshot_b64 ? (
             /* eslint-disable-next-line @next/next/no-img-element */
             <img
@@ -2511,6 +2513,72 @@ function VerifyResultCard({
               No snapshot
             </div>
           )}
+          {verdict && (
+            <VerdictStamp
+              key={`pill-${verdict.tone}-${top?.class_name ?? "none"}`}
+              size="lg"
+              tone={verdict.tone}
+              headline={verdict.headline}
+              sub={verdict.sub}
+            />
+          )}
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <div>
+            <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">
+              Pill identification · YOLO
+            </p>
+            <p
+              className={`mt-0.5 truncate font-[family-name:var(--font-display)] text-3xl ${tone.text}`}
+            >
+              {top ? top.class_name : "—"}
+            </p>
+          </div>
+
+          {top && confPct !== null && (
+            <ConfidenceGauge
+              value={confPct}
+              label="Detection confidence"
+              tone={
+                match === true ? "ok" : match === false ? "fail" : "neutral"
+              }
+            />
+          )}
+
+          <div className="flex flex-wrap gap-1.5 text-xs">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-sand-100 px-2.5 py-1 text-gray-700">
+              Expected
+              <span className="font-semibold text-gray-900">
+                {expected ?? "—"}
+              </span>
+            </span>
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
+                match === true
+                  ? "bg-status-success-bg text-status-success"
+                  : match === false
+                  ? "bg-status-danger-bg text-status-danger"
+                  : "bg-sand-100 text-gray-700"
+              }`}
+            >
+              Detected
+              <span className="font-semibold">{top?.class_name ?? "none"}</span>
+            </span>
+          </div>
+
+          <p className="mt-auto font-mono text-[10px] text-gray-400">
+            {result.detections.length > 1
+              ? `also: ${result.detections
+                  .slice(1, 4)
+                  .map(
+                    (d) => `${d.class_name} ${Math.round(d.confidence * 100)}%`,
+                  )
+                  .join(", ")}`
+              : "no other candidates"}
+            {typeof result.latency_ms === "number" &&
+              ` · ${result.latency_ms} ms inference`}
+          </p>
         </div>
       </div>
     </div>
@@ -2558,7 +2626,7 @@ function DispenseCTA({
         <p className="mt-1 text-[11px] text-gray-500">
           {drawerUnlocked
             ? "Press Eject to push the pill onto the tray. Tray camera will show the drop."
-            : "Drawer is locked. Unlock the drawer (step 2) before ejecting."}
+            : "Drawer is locked. Unlock it from Advanced controls before ejecting."}
         </p>
       </div>
       <div className="flex items-center gap-2">
@@ -2594,11 +2662,15 @@ function CameraTile({
   url,
   clock,
   footer,
+  footerClassName,
 }: {
   label: string;
   url: string | null;
   clock: string;
   footer: string;
+  // Override for debug surfaces (AdvancedSheet shows raw stream URLs);
+  // default is the judge-readable size used in the main flow.
+  footerClassName?: string;
 }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-sand-200 bg-white">
@@ -2624,7 +2696,11 @@ function CameraTile({
           </div>
         )}
       </div>
-      <div className="border-t border-sand-200 px-3 py-1.5 text-[11px] text-gray-600">
+      <div
+        className={`border-t border-sand-200 px-3 py-2 ${
+          footerClassName ?? "text-sm font-medium text-gray-700"
+        }`}
+      >
         {footer}
       </div>
     </div>
@@ -2633,6 +2709,8 @@ function CameraTile({
 
 // ──────────────────────────── AIIntakeCheck ────────────────────────────
 
+// Compact secondary checklist — the FsmJourney strip above owns the
+// headline/instruction; this card just lists the boolean evidence.
 function AIIntakeCheck({
   intake,
   patient,
@@ -2641,24 +2719,7 @@ function AIIntakeCheck({
   patient: Patient | null;
 }) {
   const passed = intake?.result === "passed";
-  const failed = intake?.result === "timeout";
   const running = intake?.running ?? false;
-
-  const headline = passed
-    ? "Confirmed"
-    : failed
-    ? "Timed out"
-    : running
-    ? "Watching…"
-    : "Idle";
-
-  const sub = passed
-    ? "Empty-mouth check passed"
-    : failed
-    ? "No swallow detected before timeout"
-    : running
-    ? intake?.instruction ?? "Following the patient"
-    : "Waiting for cycle to start";
 
   const checks: { label: string; value: string; ok: boolean | null }[] = [
     {
@@ -2692,25 +2753,8 @@ function AIIntakeCheck({
       <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gray-400">
         AI intake check
       </p>
-      <div className="flex items-start gap-3">
-        <div
-          className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-base font-bold ${
-            passed
-              ? "bg-status-success-bg text-status-success"
-              : failed
-              ? "bg-status-danger-bg text-status-danger"
-              : "bg-olive-50 text-olive-700"
-          }`}
-        >
-          {passed ? "✓" : failed ? "✗" : "…"}
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="text-sm font-semibold text-gray-900">{headline}</p>
-          <p className="text-[11px] text-gray-500">{sub}</p>
-        </div>
-      </div>
 
-      <div className="mt-3 space-y-1.5">
+      <div className="space-y-1.5">
         {checks.map((c) => (
           <div
             key={c.label}
@@ -2764,16 +2808,17 @@ function Layer2LabelPanel({
   const disabled = required.length === 0;
   const nowMs = now.getTime();
 
+  // Layer disabled server-side → one quiet line so the operator can still
+  // tell the confirmation rests on MediaPipe alone. The env-var setup hint
+  // (INTAKE_LABEL_ENABLED=1) lives in backend/README.md, not on the demo UI.
   if (disabled) {
     return (
-      <div className="rounded-2xl border border-sand-200 bg-white p-4">
-        <p className="mb-2 text-[10px] font-medium uppercase tracking-wider text-gray-400">
-          Layer 2 · Object evidence
-        </p>
-        <p className="text-xs text-gray-500">
-          Disabled — set <code>INTAKE_LABEL_ENABLED=1</code> on the Pi to require
-          bottle / cup / pill evidence alongside MediaPipe.
-        </p>
+      <div className="flex items-center gap-2 rounded-2xl border border-sand-200 bg-white px-4 py-2.5 text-xs text-gray-500">
+        <span
+          className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-sand-300"
+          aria-hidden
+        />
+        Layer 2 object evidence off — intake confirms on MediaPipe only.
       </div>
     );
   }
@@ -3006,7 +3051,7 @@ function SectionHeading({
 
 // ──────────────────────────── StepBar ────────────────────────────
 
-const STEP_LABELS = ["Identify", "Unlock", "Dispense", "Verify", "Log"];
+const STEP_LABELS = ["Identify", "Dispense", "Verify", "Log"];
 
 function StepBar({
   stepIdx,
@@ -3014,12 +3059,16 @@ function StepBar({
   clock,
   cycleN,
   onJump,
+  stepTones = [],
 }: {
   stepIdx: number;
   viewIdx: number;
   clock: string;
   cycleN: number;
   onJump: (i: number) => void;
+  // Per-step verdict tone: "fail" paints the circle danger-red so a judge
+  // scanning the bar sees where the round went wrong. Default = no tint.
+  stepTones?: ("ok" | "fail" | undefined)[];
 }) {
   return (
     <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
@@ -3028,6 +3077,7 @@ function StepBar({
           const done = i < stepIdx;
           const liveActive = i === stepIdx;
           const focused = i === viewIdx;
+          const failed = stepTones[i] === "fail";
           return (
             <div key={label} className="flex items-center gap-1.5">
               <button
@@ -3042,7 +3092,9 @@ function StepBar({
               >
                 <span
                   className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold ${
-                    done
+                    failed
+                      ? "bg-status-danger-bg text-status-danger"
+                      : done
                       ? "bg-status-success-bg text-status-success"
                       : liveActive
                       ? "bg-olive-700 text-white animate-pulse-soft"
@@ -3051,7 +3103,9 @@ function StepBar({
                       : "bg-sand-100 text-gray-400"
                   }`}
                 >
-                  {done ? (
+                  {failed ? (
+                    "✗"
+                  ) : done ? (
                     <svg
                       key={`done-${i}`}
                       width="12"
@@ -3098,68 +3152,6 @@ function StepBar({
   );
 }
 
-// ──────────────────────────── UnlockSection ────────────────────────────
-
-function UnlockSection({
-  drawerUnlocked,
-  configured,
-  busy,
-  onSetDrawer,
-}: {
-  drawerUnlocked: boolean;
-  configured: boolean;
-  busy: string | null;
-  onSetDrawer: (action: "lock" | "unlock") => void;
-}) {
-  return (
-    <div className="flex flex-col items-start gap-5 rounded-2xl border border-sand-200 bg-white p-6">
-      <div className="flex items-center gap-3">
-        <span
-          className={`flex h-14 w-14 items-center justify-center rounded-2xl text-2xl ${
-            drawerUnlocked
-              ? "bg-status-warning-bg text-status-warning"
-              : "bg-olive-50 text-olive-700"
-          }`}
-          aria-hidden
-        >
-          {drawerUnlocked ? "🔓" : "🔒"}
-        </span>
-        <div>
-          <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
-            Drawer state
-          </p>
-          <p className="font-[family-name:var(--font-display)] text-xl text-gray-900">
-            {drawerUnlocked ? "Unlocked" : "Locked"}
-          </p>
-          <p className="mt-1 text-xs text-gray-600">
-            {drawerUnlocked
-              ? "Cabinet drawer is open. Ready to dispense."
-              : "Drawer must be unlocked before the round can begin."}
-          </p>
-        </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={() => onSetDrawer("lock")}
-          disabled={!configured || busy !== null || !drawerUnlocked}
-          className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy === "drawer-lock" ? "Locking…" : "Lock (0°)"}
-        </button>
-        <button
-          type="button"
-          onClick={() => onSetDrawer("unlock")}
-          disabled={!configured || busy !== null || drawerUnlocked}
-          className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {busy === "drawer-unlock" ? "Unlocking…" : "Unlock (180°)"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
 // ──────────────────────────── AdvancedSheet ────────────────────────────
 
 function AdvancedSheet({
@@ -3179,6 +3171,7 @@ function AdvancedSheet({
   onEject,
   onSetDrawer,
   onResnapshot,
+  onRotate,
 }: {
   open: boolean;
   onClose: () => void;
@@ -3196,6 +3189,7 @@ function AdvancedSheet({
   onEject: (slot: number) => void;
   onSetDrawer: (action: "lock" | "unlock") => void;
   onResnapshot: () => void;
+  onRotate: (slot: number) => void;
 }) {
   if (!open) return null;
 
@@ -3330,6 +3324,13 @@ function AdvancedSheet({
             </div>
           </div>
 
+          {/* Rotate test — operator tooling, kept out of the judge-facing flow */}
+          <RotateTestBar
+            busy={busy}
+            configured={configured}
+            onRotate={onRotate}
+          />
+
           {/* Ejector servo calibration */}
           <ServoCalibrationSection configured={configured} parentBusy={busy} />
 
@@ -3354,12 +3355,14 @@ function AdvancedSheet({
                 url={cam0Src}
                 clock={clock}
                 footer={cam0Url ?? "no URL"}
+                footerClassName="break-all font-mono text-[10px] text-gray-400"
               />
               <CameraTile
                 label="Cam 1 · Patient"
                 url={cam1Src}
                 clock={clock}
                 footer={cam1Url ?? "no URL"}
+                footerClassName="break-all font-mono text-[10px] text-gray-400"
               />
             </div>
             <details className="mt-3 rounded-xl bg-sand-50 p-3 text-[11px] text-gray-700">

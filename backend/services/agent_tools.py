@@ -37,6 +37,28 @@ def _today_iso_bounds() -> tuple[str, str]:
     return start.isoformat(), end.isoformat()
 
 
+def _attach_patient_names(rows: list[dict]) -> list[dict]:
+    """Stitch a flat `patient_name` onto rows bearing `patient_id` with one
+    extra lookup. Used where a PostgREST embed isn't available (agent_flags
+    has no FK to patients). Null patient_id → patient_name None."""
+    ids = {r["patient_id"] for r in rows if r.get("patient_id") is not None}
+    if not ids:
+        for r in rows:
+            r.setdefault("patient_name", None)
+        return rows
+    res = (
+        get_supabase()
+        .table("patients")
+        .select("id, name")
+        .in_("id", sorted(ids))
+        .execute()
+    )
+    names = {p["id"]: p["name"] for p in (res.data or [])}
+    for r in rows:
+        r["patient_name"] = names.get(r.get("patient_id"))
+    return rows
+
+
 # ──────────────────────────── tool: today_summary ───────────────────────────
 
 class TodaySummaryArgs(BaseModel):
@@ -105,7 +127,10 @@ def query_adherence(**kwargs: Any) -> list[dict]:
     sb = get_supabase()
     q = (
         sb.table("adherence_logs")
-        .select("id, patient_id, slot, pill_taken, timestamp, dispenser_id, confidence_score")
+        .select(
+            "id, patient_id, slot, pill_taken, timestamp, dispenser_id, "
+            "confidence_score, patient:patients(name)"
+        )
         .order("timestamp", desc=True)
         .limit(args.limit)
     )
@@ -117,7 +142,12 @@ def query_adherence(**kwargs: Any) -> list[dict]:
         q = q.lt("timestamp", args.until_iso)
     if args.only_missed:
         q = q.eq("pill_taken", False)
-    return q.execute().data or []
+    rows = q.execute().data or []
+    # Flatten the embed so the LLM sees a plain `patient_name` field and can
+    # cite names instead of numeric IDs.
+    for r in rows:
+        r["patient_name"] = (r.pop("patient", None) or {}).get("name")
+    return rows
 
 
 # ──────────────────────────── tool: query_alerts ────────────────────────────
@@ -246,7 +276,263 @@ def query_flags(**kwargs: Any) -> list[dict]:
         q = q.eq("kind", args.kind)
     if args.patient_id is not None:
         q = q.eq("patient_id", args.patient_id)
-    return q.execute().data or []
+    return _attach_patient_names(q.execute().data or [])
+
+
+# ──────────────────────────── tool: adherence_stats ─────────────────────────
+
+class AdherenceStatsArgs(BaseModel):
+    model_config = {"extra": "forbid"}
+    lookback_days: int = Field(default=7, ge=1, le=90, description="Window size in days.")
+    patient_id: int | None = Field(default=None, description="Limit to one patient.")
+
+
+# PostgREST silently caps un-ranged selects at 1000 rows; page past it so a
+# busy 90-day window can't skew the rates. Hard ceiling keeps a runaway
+# table from stalling the tool.
+_STATS_PAGE = 1000
+_STATS_MAX_ROWS = 20_000
+
+
+def adherence_stats(**kwargs: Any) -> list[dict]:
+    """Per-patient adherence rate + missed streak over a lookback window,
+    computed server-side so the LLM never has to eyeball raw rows. Patients
+    with ZERO logs in the window are still reported (n_scheduled=0,
+    no_data_in_window=true) — a silent dispenser is a risk signal."""
+    args = AdherenceStatsArgs(**kwargs)
+    sb = get_supabase()
+    since = (datetime.now(timezone.utc) - timedelta(days=args.lookback_days)).isoformat()
+
+    rows: list[dict] = []
+    while len(rows) < _STATS_MAX_ROWS:
+        q = (
+            sb.table("adherence_logs")
+            .select("patient_id, pill_taken, timestamp")
+            .gte("timestamp", since)
+            .order("timestamp", desc=True)
+            .range(len(rows), len(rows) + _STATS_PAGE - 1)
+        )
+        if args.patient_id is not None:
+            q = q.eq("patient_id", args.patient_id)
+        page = q.execute().data or []
+        rows.extend(page)
+        if len(page) < _STATS_PAGE:
+            break
+
+    # Full roster (or the one filtered patient) — needed both for names and
+    # to surface zero-log patients below.
+    pq = sb.table("patients").select("id, name")
+    if args.patient_id is not None:
+        pq = pq.eq("id", args.patient_id)
+    patients = pq.execute().data or []
+    names = {p["id"]: p["name"] for p in patients}
+
+    by_patient: dict[int, list[dict]] = {}
+    for r in rows:
+        pid = r.get("patient_id")
+        if pid is None:
+            continue
+        by_patient.setdefault(pid, []).append(r)
+
+    out: list[dict] = []
+    for pid, logs in by_patient.items():  # logs are newest-first
+        n_scheduled = len(logs)
+        n_taken = sum(1 for entry in logs if entry.get("pill_taken"))
+        n_missed = n_scheduled - n_taken
+        streak = 0
+        for entry in logs:
+            if entry.get("pill_taken"):
+                break
+            streak += 1
+        last_taken_at = next(
+            (e.get("timestamp") for e in logs if e.get("pill_taken")), None,
+        )
+        out.append({
+            "patient_id": pid,
+            "patient_name": names.get(pid),
+            "lookback_days": args.lookback_days,
+            "n_scheduled": n_scheduled,
+            "n_taken": n_taken,
+            "n_missed": n_missed,
+            "adherence_pct": (
+                round(100 * n_taken / n_scheduled, 1) if n_scheduled else None
+            ),
+            "current_missed_streak": streak,
+            # last_event_at is the newest LOG (taken or missed); last_taken_at
+            # is the newest dose actually taken — don't conflate them.
+            "last_event_at": logs[0].get("timestamp") if logs else None,
+            "last_taken_at": last_taken_at,
+        })
+
+    # Patients with no logs at all in the window — report, don't hide.
+    for p in patients:
+        if p["id"] in by_patient:
+            continue
+        out.append({
+            "patient_id": p["id"],
+            "patient_name": p["name"],
+            "lookback_days": args.lookback_days,
+            "n_scheduled": 0,
+            "n_taken": 0,
+            "n_missed": 0,
+            "adherence_pct": None,
+            "current_missed_streak": 0,
+            "last_event_at": None,
+            "last_taken_at": None,
+            "no_data_in_window": True,
+        })
+
+    # Worst adherence first; no-data patients sort last but stay visible.
+    out.sort(
+        key=lambda s: s["adherence_pct"] if s["adherence_pct"] is not None else 101.0
+    )
+    return out
+
+
+# ──────────────────────────── tool: patient_overview ────────────────────────
+
+class PatientOverviewArgs(BaseModel):
+    model_config = {"extra": "forbid"}
+    patient_id: int | None = Field(default=None, description="Numeric id, if known.")
+    name: str | None = Field(
+        default=None,
+        description="Full or partial patient name (case-insensitive).",
+    )
+
+
+def _ilike_escape(term: str) -> str:
+    """Sanitise a user-typed search term for a PostgREST ilike filter:
+    strip reserved punctuation that breaks filter parsing, escape LIKE
+    wildcards so '%'/'_' in the input match literally."""
+    term = term.replace(",", " ").replace("(", " ").replace(")", " ")
+    term = term.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    return term.strip()
+
+
+def patient_overview(**kwargs: Any) -> dict:
+    """Everything about one patient in a single call: chart row, loaded
+    medications, recent adherence, open flags. One hop instead of four."""
+    args = PatientOverviewArgs(**kwargs)
+    if args.patient_id is None and not (args.name or "").strip():
+        raise ValueError("provide patient_id or name")
+    sb = get_supabase()
+
+    pq = sb.table("patients").select(
+        "id, name, gender, age, condition, status, allergies, "
+        "contraindications, dispenser_id"
+    )
+    if args.patient_id is not None:
+        pq = pq.eq("id", args.patient_id)
+    else:
+        needle = _ilike_escape(args.name)
+        if not needle:
+            return {"error": "no patient matched"}
+        pq = pq.ilike("name", f"%{needle}%")
+    candidates = pq.execute().data or []
+    if not candidates:
+        return {"error": "no patient matched"}
+    if len(candidates) > 1:
+        # Cap the list — an over-broad needle ('%a%') can match the whole
+        # roster and flood the model context.
+        return {
+            "ambiguous": [
+                {"id": c["id"], "name": c["name"]} for c in candidates[:8]
+            ],
+            "ambiguous_count": len(candidates),
+        }
+    patient = candidates[0]
+    pid = patient["id"]
+
+    medications = (
+        sb.table("medications")
+        .select("slot, name, quantity, expiry_date, pills_per_dose, schedule_at")
+        .eq("patient_id", pid)
+        .order("slot")
+        .execute()
+        .data
+        or []
+    )
+    recent_adherence = (
+        sb.table("adherence_logs")
+        .select("slot, pill_taken, timestamp, confidence_score")
+        .eq("patient_id", pid)
+        .order("timestamp", desc=True)
+        .limit(10)
+        .execute()
+        .data
+        or []
+    )
+    open_flags = (
+        sb.table("agent_flags")
+        .select("kind, severity, status, title, detail, created_at")
+        .eq("patient_id", pid)
+        .eq("status", "open")
+        .order("created_at", desc=True)
+        .limit(10)
+        .execute()
+        .data
+        or []
+    )
+    return {
+        "patient": patient,
+        "medications": medications,
+        "recent_adherence": recent_adherence,
+        "open_flags": open_flags,
+    }
+
+
+# ──────────────────────────── tool: query_schedules ─────────────────────────
+
+class QuerySchedulesArgs(BaseModel):
+    model_config = {"extra": "forbid"}
+    patient_id: int | None = Field(default=None)
+    due_within_hours: float | None = Field(
+        default=None, ge=0, le=24,
+        description="Only doses whose next occurrence is within this many hours.",
+    )
+
+
+def query_schedules(**kwargs: Any) -> list[dict]:
+    """Scheduled doses (medications.schedule_at, daily HH:MM) with the next
+    due time computed in Pi-local time — the same clock the device scheduler
+    uses. Soonest first."""
+    args = QuerySchedulesArgs(**kwargs)
+    sb = get_supabase()
+    q = (
+        sb.table("medications")
+        .select(
+            "slot, name, quantity, pills_per_dose, schedule_at, patient_id, "
+            "patient:patients(name)"
+        )
+        .not_.is_("schedule_at", "null")
+        .order("slot")
+    )
+    if args.patient_id is not None:
+        q = q.eq("patient_id", args.patient_id)
+    rows = q.execute().data or []
+
+    now = datetime.now().astimezone()
+    out: list[dict] = []
+    for r in rows:
+        raw = str(r.get("schedule_at") or "").strip()
+        parts = raw.split(":")
+        try:
+            due = now.replace(
+                hour=int(parts[0]), minute=int(parts[1]), second=0, microsecond=0,
+            )
+        except (IndexError, ValueError):
+            continue  # malformed schedule_at — skip, never raise
+        if due <= now:
+            due += timedelta(days=1)
+        hours_until = (due - now).total_seconds() / 3600.0
+        if args.due_within_hours is not None and hours_until > args.due_within_hours:
+            continue
+        r["patient_name"] = (r.pop("patient", None) or {}).get("name")
+        r["next_due_iso"] = due.isoformat()
+        r["hours_until_due"] = round(hours_until, 2)
+        out.append(r)
+    out.sort(key=lambda x: x["next_due_iso"])
+    return out
 
 
 # ──────────────────────────── registry ──────────────────────────────────────
@@ -323,6 +609,41 @@ TOOLS: list[ToolDef] = [
         ),
         args_schema=ListPatientsArgs,
         fn=list_patients,
+    ),
+    ToolDef(
+        name="patient_overview",
+        description=(
+            "Everything about ONE patient in a single call: chart row, loaded "
+            "medications, last 10 adherence logs, open flags. Use FIRST for any "
+            "single-patient question ('how is Mary doing?'). Accepts patient_id "
+            "or a (partial) name; returns {ambiguous: [...]} when several match "
+            "— ask the user to pick."
+        ),
+        args_schema=PatientOverviewArgs,
+        fn=patient_overview,
+    ),
+    ToolDef(
+        name="adherence_stats",
+        description=(
+            "Per-patient adherence over a lookback window (default 7 days): "
+            "n_taken, n_missed, adherence_pct, current_missed_streak, "
+            "last_event_at, last_taken_at. Sorted worst-first; patients with "
+            "NO logs in the window appear with no_data_in_window=true — treat "
+            "a silent dispenser as a risk signal. Use for 'which patients are "
+            "at risk' and any rate/trend question — do NOT eyeball raw logs."
+        ),
+        args_schema=AdherenceStatsArgs,
+        fn=adherence_stats,
+    ),
+    ToolDef(
+        name="query_schedules",
+        description=(
+            "Upcoming scheduled doses (daily HH:MM schedule) with patient_name, "
+            "next_due_iso and hours_until_due, soonest first. Use for 'who is "
+            "due next' / 'what's coming up'; narrow with due_within_hours."
+        ),
+        args_schema=QuerySchedulesArgs,
+        fn=query_schedules,
     ),
 ]
 
