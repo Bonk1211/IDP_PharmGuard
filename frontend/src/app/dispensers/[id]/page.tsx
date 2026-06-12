@@ -15,14 +15,18 @@ import { useParams } from "next/navigation";
 import { useSWRConfig } from "swr";
 
 import {
+  activateDemo,
+  deactivateDemo,
   fetchCalibration,
   fetchDeviceStatus,
   fetchIntakeState,
   fetchSchedules,
   fetchSnapshot,
   homeEjector,
+  isDemoActive,
   isDeviceConfigured,
   manualEject,
+  notifyCaregiver,
   rotateMagazine,
   setCalibration,
   setDrawer,
@@ -223,6 +227,24 @@ export default function DispenserGuidedPage() {
   const { id } = useParams<{ id: string }>();
   const dispenserId = String(id);
   const { mutate } = useSWRConfig();
+
+  // Stage-demo simulator: `?demo=1` (happy) / `?demo=fail` (wrong pill);
+  // `?demo=0` stays off. Activated in the FIRST effect — effects run in
+  // declaration order, so the mock layer is live before any polling
+  // effect's first fetch, and the server-rendered HTML stays demo-free
+  // (no hydration mismatch). Cleanup deactivates on unmount so the mocks
+  // never leak into other pages via client-side navigation.
+  const [demoActive, setDemoActive] = useState(false);
+  useEffect(() => {
+    const d = new URLSearchParams(window.location.search).get("demo");
+    if (d && d !== "0" && !isDemoActive()) {
+      activateDemo(d === "fail" ? "fail" : "happy");
+    }
+    if (isDemoActive()) setDemoActive(true);
+    return () => {
+      deactivateDemo();
+    };
+  }, []);
 
   const { data: slots = [] } = useSlots();
   const [status, setStatus] = useState<DeviceStatus | null>(null);
@@ -650,6 +672,9 @@ export default function DispenserGuidedPage() {
       ? verifyResult.top.class_name
       : unauthorized[0]?.class_name;
     void speak(wrongPillScript(currentSlot?.name, detected));
+    void notifyCaregiver(
+      `⚠️ PharmGuard: wrong pill on tray — detected ${detected ?? "unknown"}, expected ${currentSlot?.name ?? "?"}. Pill rejected, operator alerted.`,
+    );
   }, [viewIdx, verifyResult, unauthorized, currentSlot?.name]);
 
   const cam0Url = streamUrl(0);
@@ -767,6 +792,24 @@ export default function DispenserGuidedPage() {
       setMsg("No active patient/slot to log against.");
       return;
     }
+    // Simulation honesty guard: never write fake adherence rows. Local UI
+    // state still advances so the demo flow completes naturally.
+    if (demoActive) {
+      const slot = currentSlot.slot;
+      setConfirmedSlots((prev) => {
+        const next = new Set(prev);
+        next.add(slot);
+        return next;
+      });
+      setMsg(
+        pillTaken
+          ? `Slot ${slot} confirmed (simulation — not logged).`
+          : `Slot ${slot} marked missed (simulation — not logged).`,
+      );
+      setOverrideOpen(false);
+      setOverrideNote("");
+      return;
+    }
     return withBusy(pillTaken ? "confirm" : "override", async () => {
       try {
         await createIntakeLog({
@@ -788,6 +831,11 @@ export default function DispenserGuidedPage() {
             ? `Slot ${currentSlot.slot} confirmed. Triggering next dispense.`
             : `Slot ${currentSlot.slot} marked missed${overrideNote ? " (note copied to clipboard)." : "."}`,
         );
+        if (!pillTaken) {
+          void notifyCaregiver(
+            `PharmGuard: dose marked missed for slot ${currentSlot.slot}${overrideNote ? ` — ${overrideNote}` : ""}`,
+          );
+        }
         if (overrideNote && !pillTaken && navigator.clipboard) {
           navigator.clipboard
             .writeText(`Slot ${currentSlot.slot} override: ${overrideNote}`)
@@ -813,6 +861,13 @@ export default function DispenserGuidedPage() {
     <div className="-mx-6 px-6">
       {/* Sticky header: step bar + this-pass strip */}
       <div className="sticky top-0 z-30 -mx-6 border-b border-sand-200 bg-sand-50/85 px-6 pb-2 pt-2 backdrop-blur">
+        {demoActive && (
+          <div className="mb-1.5 flex justify-center">
+            <span className="rounded-full border border-status-warning bg-status-warning-bg px-3 py-0.5 text-[11px] font-bold uppercase tracking-[0.18em] text-status-warning">
+              Simulation — no hardware, nothing logged
+            </span>
+          </div>
+        )}
         <StepBar
           stepIdx={stepIdx}
           clock={fmtClock(now)}

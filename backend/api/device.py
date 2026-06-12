@@ -542,6 +542,35 @@ async def tts(body: TtsBody):
     return Response(content=out["audio"], media_type="audio/mpeg")
 
 
+# ─────────────────── caregiver notify (Telegram proxy) ─────────────────
+
+
+class NotifyBody(BaseModel):
+    text: str = Field(min_length=1, max_length=500, description="Message to push to the caregiver chat.")
+
+
+@router.post("/notify")
+async def notify_caregiver(body: NotifyBody):
+    """Push ``text`` to the configured Telegram caregiver chat.
+
+    Hardware-independent — works in headless mode, same as /tts. Soft-fail:
+    503 with detail when Telegram is unconfigured or upstream fails, so the
+    guided flow can fire-and-forget without breaking a round.
+    """
+    from services.telegram_notifier import escape_html, send_alert
+
+    t0 = time.monotonic()
+    # Frontend texts are plain prose that may embed med names — escape so a
+    # stray < > & can't make Telegram reject (and silently drop) the alert.
+    out = await asyncio.to_thread(send_alert, escape_html(body.text))
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    if not out["ok"]:
+        log.warning("notify: failed err=%s latency_ms=%d", out["error"], latency_ms)
+        raise HTTPException(status_code=503, detail=f"Notify unavailable: {out['error']}")
+    log.info("notify: sent chars=%d latency_ms=%d", len(body.text), latency_ms)
+    return {"ok": True}
+
+
 @router.get("/snapshot")
 async def camera_snapshot(
     request: Request,

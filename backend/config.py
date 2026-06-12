@@ -119,6 +119,18 @@ class Settings(BaseSettings):
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     elevenlabs_output_format: str = "mp3_44100_128"
 
+    # ── Telegram caregiver alerts ────────────────────────────────────────
+    # Send-only bot. Both empty = feature off everywhere (notifier soft-fails,
+    # /api/device/notify returns 503, cycle/flag hooks no-op). Get a token from
+    # @BotFather; find chat_id via GET /bot<token>/getUpdates after messaging
+    # the bot once.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    # Fire on every failed (non-stub) dispense cycle.
+    telegram_notify_on_failed_cycle: bool = True
+    # Fire one batched message per flag-detector run with new warning/critical flags.
+    telegram_notify_on_flags: bool = True
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property

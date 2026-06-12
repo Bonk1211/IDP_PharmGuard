@@ -17,6 +17,11 @@
  */
 
 import { supabase } from "./supabase";
+import * as demo from "./demoDevice";
+
+// Stage-demo simulator switch (see demoDevice.ts). Re-exported so the guided
+// page can activate it from a `?demo=` query param and render the chip.
+export { activateDemo, deactivateDemo, isDemoActive } from "./demoDevice";
 
 const baseUrl = (process.env.NEXT_PUBLIC_DEVICE_URL ?? "").replace(/\/$/, "");
 const apiKey = process.env.NEXT_PUBLIC_DEVICE_API_KEY ?? "";
@@ -73,6 +78,7 @@ export type IntakeState = {
 };
 
 export function isDeviceConfigured(): boolean {
+  if (demo.isDemoActive()) return true;
   return Boolean(baseUrl && apiKey);
 }
 
@@ -84,6 +90,7 @@ function authHeaders(): HeadersInit {
 }
 
 export async function fetchDeviceStatus(): Promise<DeviceStatus | null> {
+  if (demo.isDemoActive()) return demo.demoFetchDeviceStatus();
   if (!isDeviceConfigured()) {
     console.warn(
       "[device] not configured — set NEXT_PUBLIC_DEVICE_URL + NEXT_PUBLIC_DEVICE_API_KEY in frontend/.env.local, then restart `npm run dev`.",
@@ -126,6 +133,7 @@ export async function fetchDeviceStatus(): Promise<DeviceStatus | null> {
 }
 
 export async function fetchIntakeState(): Promise<IntakeState | null> {
+  if (demo.isDemoActive()) return demo.demoFetchIntakeState();
   if (!isDeviceConfigured()) return null;
   try {
     const r = await fetch(`${baseUrl}/api/device/intake`, {
@@ -140,6 +148,7 @@ export async function fetchIntakeState(): Promise<IntakeState | null> {
 }
 
 export async function triggerDispense(): Promise<{ ok: boolean; status: number }> {
+  if (demo.isDemoActive()) return demo.demoTriggerDispense();
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/dispense_now`, {
@@ -153,6 +162,7 @@ export async function triggerDispense(): Promise<{ ok: boolean; status: number }
 }
 
 export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
+  if (demo.isDemoActive()) return { ok: true, status: 200 };
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/reset`, {
@@ -178,6 +188,9 @@ export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
  * history + ngrok logs. Acceptable for a dev/demo dashboard.
  */
 export function streamUrl(camNum: 0 | 1, opts?: { annotate?: boolean }): string | null {
+  // Demo mode: no MJPEG stream — the page falls back to its no-stream
+  // placeholder; synthetic frames come through snapshots/verify results.
+  if (demo.isDemoActive()) return null;
   if (!isDeviceConfigured()) return null;
   const params = new URLSearchParams({ key: apiKey });
   if (opts?.annotate) params.set("annotate", "1");
@@ -223,6 +236,7 @@ export type RotateResult = {
  * counterpart to manualEject — same hardware path, no ejector push.
  */
 export async function rotateMagazine(slot: number): Promise<RotateResult> {
+  if (demo.isDemoActive()) return demo.demoRotate(slot);
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/rotate`, {
@@ -245,6 +259,7 @@ export async function rotateMagazine(slot: number): Promise<RotateResult> {
 }
 
 export async function manualEject(slot: number): Promise<EjectResult> {
+  if (demo.isDemoActive()) return demo.demoManualEject(slot);
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/eject`, {
@@ -293,6 +308,7 @@ export type IntakeStartResult = {
 export async function startIntakeWatch(
   timeoutS: number = 60,
 ): Promise<IntakeStartResult> {
+  if (demo.isDemoActive()) return demo.demoStartIntake(timeoutS);
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/intake/start`, {
@@ -354,6 +370,7 @@ export async function verifyFace(patientId: number): Promise<VerifyFaceResult> {
     bbox: null,
     snapshot_b64: null,
   };
+  if (demo.isDemoActive()) return demo.demoVerifyFace(patientId);
   if (!isDeviceConfigured()) return empty;
   try {
     const r = await fetch(`${baseUrl}/api/device/verify_face`, {
@@ -393,6 +410,7 @@ export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
     detections: [],
     snapshot_b64: null,
   };
+  if (demo.isDemoActive()) return demo.demoVerifyPill(expected);
   if (!isDeviceConfigured()) return empty;
   try {
     const r = await fetch(`${baseUrl}/api/device/verify_pill`, {
@@ -420,6 +438,7 @@ export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
 }
 
 export async function setDrawer(action: DrawerAction): Promise<DrawerResult> {
+  if (demo.isDemoActive()) return demo.demoSetDrawer(action);
   if (!isDeviceConfigured()) return { ok: false, status: 0 };
   try {
     const r = await fetch(`${baseUrl}/api/device/drawer`, {
@@ -440,6 +459,7 @@ export async function setDrawer(action: DrawerAction): Promise<DrawerResult> {
 }
 
 export async function fetchSnapshot(cam: 0 | 1): Promise<string | null> {
+  if (demo.isDemoActive()) return demo.demoFetchSnapshot(cam);
   if (!isDeviceConfigured()) return null;
   try {
     const r = await fetch(`${baseUrl}/api/device/snapshot?cam=${cam}`, {
@@ -455,6 +475,7 @@ export async function fetchSnapshot(cam: 0 | 1): Promise<string | null> {
 }
 
 export async function fetchPiLogs(n: number = 200): Promise<LogRecord[]> {
+  if (demo.isDemoActive()) return demo.demoFetchPiLogs();
   if (!isDeviceConfigured()) return [];
   try {
     const r = await fetch(`${baseUrl}/api/device/logs?n=${n}`, {
@@ -495,6 +516,7 @@ export type CalibrationInfo = {
 };
 
 export async function fetchCalibration(): Promise<CalibrationInfo | null> {
+  if (demo.isDemoActive()) return null;
   if (!isDeviceConfigured()) return null;
   try {
     const r = await fetch(`${baseUrl}/api/device/calibration`, {
@@ -592,6 +614,7 @@ export type ScheduleRow = {
 };
 
 export async function fetchSchedules(): Promise<ScheduleRow[]> {
+  if (demo.isDemoActive()) return [];
   if (!isDeviceConfigured()) return [];
   try {
     const r = await fetch(`${baseUrl}/api/device/schedules`, {
@@ -651,6 +674,7 @@ let currentAudio: HTMLAudioElement | null = null;
  * handler (e.g. the Continue button) when the utterance must be guaranteed.
  */
 export async function speak(text: string, voiceId?: string): Promise<boolean> {
+  if (demo.isDemoActive()) return demo.demoSpeak(text);
   if (!isDeviceConfigured() || !text.trim()) return false;
   try {
     const r = await fetch(`${baseUrl}/api/device/tts`, {
@@ -677,6 +701,27 @@ export async function speak(text: string, voiceId?: string): Promise<boolean> {
     return true;
   } catch (err) {
     console.warn("[device] speak failed:", err);
+    return false;
+  }
+}
+
+/** Fire-and-forget caregiver push (Telegram via the Pi). Soft: returns
+ *  false on any failure — a notification must never break the flow. */
+export async function notifyCaregiver(text: string): Promise<boolean> {
+  if (demo.isDemoActive()) return true;
+  if (!isDeviceConfigured() || !text.trim()) return false;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/notify`, {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!r.ok) {
+      console.warn("[device] /notify", r.status, await safeError(r));
+    }
+    return r.ok;
+  } catch (err) {
+    console.warn("[device] notifyCaregiver failed:", err);
     return false;
   }
 }

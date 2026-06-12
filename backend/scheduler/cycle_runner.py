@@ -51,6 +51,10 @@ _BENCH_FIELDS = (
 
 _REPLAY_BATCH_LIMIT = 20
 
+# Fire-and-forget caregiver-notify tasks. Referenced here so they aren't
+# garbage-collected mid-flight (asyncio only keeps weak refs to tasks).
+_notify_tasks: set[asyncio.Task] = set()
+
 
 class CycleState:
     """Holds per-process cycle resources. Built once by HardwareLoop.start.
@@ -401,6 +405,7 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     # no longer in the control flow — it is a manual demo toggle exposed
     # at /api/device/drawer. t_drawer is pinned to t_pillid so the bench
     # CSV schema (t_drawer_ms column) stays stable (reads ~0).
+    fail_reason: str | None = None
     if state.hardware_stubbed:
         pill_taken_actual = False
         pill_conf: float | None = None
@@ -436,6 +441,11 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
                 )
                 if not pill_taken_actual:
                     terminal = state.monitor.get_state().get("result")
+                    fail_reason = (
+                        "intake not confirmed (timed out)"
+                        if terminal == "timeout"
+                        else "intake not confirmed (no cup/pill seen)"
+                    )
                     log.warning(
                         "Intake gate failed (result=%s) — pill_taken stays False",
                         terminal,
@@ -445,6 +455,9 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
                 "Pill-ID verification failed (slot=%d, conf=%s); pill rejected. "
                 "Operator must remove the rejected pill from the chute.",
                 slot, pill_conf,
+            )
+            fail_reason = (
+                f"wrong/unidentified pill rejected by vision (confidence {pill_conf})"
             )
             t_drawer = t_pillid
             pill_taken_actual = False
@@ -460,6 +473,26 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     )
     t_log = time.perf_counter()
     log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
+
+    # Caregiver push — only for real (non-stub) failures so stub-mode dev
+    # loops don't spam the chat. Fire-and-forget: send_alert soft-fails and
+    # its 10 s timeout must not stall the hardware cycle on a Telegram
+    # outage.
+    if (
+        not pill_taken_actual
+        and not state.hardware_stubbed
+        and settings.telegram_notify_on_failed_cycle
+    ):
+        from services.telegram_notifier import escape_html, send_alert
+
+        med = escape_html(task.get("medication") or f"slot {slot}")
+        notify_task = asyncio.create_task(asyncio.to_thread(
+            send_alert,
+            f"⚠️ <b>PharmGuard</b>: dose NOT confirmed for patient #{patient_id} — "
+            f"{med} (slot {slot}). Reason: {fail_reason or 'verification failed'}.",
+        ))
+        _notify_tasks.add(notify_task)
+        notify_task.add_done_callback(_notify_tasks.discard)
 
     # Phase 6: per-cycle metrics row.
     if state.bench_writer is not None:

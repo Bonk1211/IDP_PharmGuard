@@ -121,11 +121,27 @@ async def detect_and_persist_flags() -> dict[str, Any]:
     all_candidates = heuristic_candidates + llm_candidates
     by_kind: dict[str, int] = {}
     new_flags = 0
+    notify_list: list[dict[str, Any]] = []
     for cand in all_candidates:
         inserted = await asyncio.to_thread(_insert_flag, cand)
         if inserted:
             new_flags += 1
             by_kind[cand["kind"]] = by_kind.get(cand["kind"], 0) + 1
+            if cand.get("severity") in ("warning", "critical"):
+                notify_list.append(cand)
+
+    # Caregiver push — one batched message per run so a multi-flag run
+    # doesn't spam the chat. Soft-fail inside send_alert.
+    if notify_list and settings.telegram_notify_on_flags:
+        from services.telegram_notifier import escape_html, send_alert
+
+        lines = "\n".join(
+            f"• [{c['severity']}] {escape_html(c['title'])}" for c in notify_list[:5]
+        )
+        await asyncio.to_thread(
+            send_alert,
+            f"🚩 <b>PharmGuard</b>: {len(notify_list)} new clinical flag(s)\n{lines}",
+        )
 
     log.info(
         "flag_detector: done — new=%d by_kind=%s llm=%s",
