@@ -33,8 +33,10 @@ from hardware.magazine import Magazine
 from storage.queue import OfflineQueue
 from vision import (
     CameraSource,
+    Cv2Source,
     IntakeMonitor,
     PillVerifier,
+    SharedCameraView,
     open_camera,
 )
 
@@ -119,7 +121,14 @@ class CycleState:
         if not self.hardware_stubbed:
             await asyncio.to_thread(self.ejector.home)
 
-        # Open dual cameras (only when hardware is real). Same fail-loud rule.
+        # Open cameras. Three paths:
+        #   1. real hardware  -> dual Pi cameras (tray + patient-facing).
+        #   2. dev-mac webcam -> ONE cv2 webcam backs BOTH logical cameras: the
+        #      base Cv2Source is cam_a (tray/YOLO, BGR) and a non-owning RGB
+        #      view is cam_b (intake/face, MediaPipe). Mirrors the Pi's cam0+cam1
+        #      off a single Mac camera so the full pipeline + both /stream feeds
+        #      work without Pi hardware.
+        #   3. plain stub      -> no cameras; vision verifies skipped.
         if not self.hardware_stubbed:
             try:
                 self.cam_a = await asyncio.to_thread(open_camera, 0)  # tray top-down (BGR for YOLO)
@@ -132,6 +141,32 @@ class CycleState:
                     raise RuntimeError("Camera init failed and stub disallowed")
                 log.warning(
                     "STUB MODE: camera unavailable — vision verifies will be skipped"
+                )
+        elif settings.dev_camera_enabled:
+            try:
+                # One webcam, two consumers. multi_consumer=True: a producer
+                # thread owns cap.read() so the YOLO tray reader, the swallow
+                # FSM, and both /stream MJPEG feeds can all pull concurrently.
+                base = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index,
+                        output_format="bgr",   # native for YOLO + jpeg encode
+                        multi_consumer=True,
+                    )
+                )
+                self.cam_a = base                                   # cam 0: tray/YOLO (BGR)
+                self.cam_b = SharedCameraView(base, output_format="rgb")  # cam 1: face/MediaPipe (RGB)
+                log.warning(
+                    "DEV CAMERA: webcam index=%d backs BOTH cam_a (tray) and "
+                    "cam_b (intake) — same image to both. Tray YOLO will run on "
+                    "the face frame (dev only).",
+                    settings.dev_camera_index,
+                )
+            except Exception:
+                log.exception(
+                    "DEV CAMERA: failed to open webcam index=%d — intake FSM, "
+                    "tray verify, and live streams will be unavailable.",
+                    settings.dev_camera_index,
                 )
 
         self.verifier = PillVerifier(camera=self.cam_a)

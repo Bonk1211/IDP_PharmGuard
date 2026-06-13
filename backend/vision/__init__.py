@@ -5,6 +5,7 @@ from vision.camera import (
     Cv2Source,
     Picamera2Source,
     RpicamSource,
+    SharedCameraView,
     open_camera,
 )
 from vision.intake_monitor import IntakeMonitor
@@ -17,5 +18,6 @@ __all__ = [
     "Picamera2Source",
     "PillVerifier",
     "RpicamSource",
+    "SharedCameraView",
     "open_camera",
 ]

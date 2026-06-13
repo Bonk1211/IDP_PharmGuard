@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # ── new (Pi-hosted refactor) ──────────────────────────────────────────
     device_api_key: str = ""                        # frontend -> ngrok -> Pi auth header
     backend_headless: bool = False                  # 1 = skip hardware lifespan (dev-mac)
+    # Dev-mac single-webcam path: when 1, the cycle opens ONE local cv2
+    # webcam as the intake camera (cam_b) even in stub mode, so the
+    # dashboard live stream + swallow FSM work without Pi hardware. The
+    # tray camera (cam_a / YOLO) stays unavailable — a Mac has one camera.
+    dev_camera_enabled: bool = False
+    dev_camera_index: int = 0                        # macOS built-in FaceTime cam = 0
     # 1 = cycle loop stays idle until /api/device/dispense_now (or another
     # manual-trigger endpoint) fires. 0 = auto-polls medications every
     # poll_interval_s. Default ON so a freshly-started Pi doesn't drain

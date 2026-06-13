@@ -90,23 +90,68 @@ class Picamera2Source:
 
 
 class Cv2Source:
-    """Wrap an existing cv2.VideoCapture (or open one by index/url)."""
+    """Wrap an existing cv2.VideoCapture (or open one by index/url).
+
+    ``multi_consumer=True`` spawns a daemon producer thread (same model as
+    RpicamSource) that holds the sole ``cap.read()`` and caches the latest
+    BGR frame. This is required on dev-mac when ONE webcam feeds both the
+    swallow FSM (read_frame) and the dashboard MJPEG stream
+    (latest_frame_jpeg) — two threads grabbing the same VideoCapture
+    directly is not safe in OpenCV. Default False keeps the original
+    single-reader behaviour for tests / the Pi.
+    """
 
     def __init__(
         self,
         source: int | str | cv2.VideoCapture,
         output_format: str = "bgr",
+        multi_consumer: bool = False,
     ):
         self.output_format = output_format
+        self._multi = multi_consumer
         if isinstance(source, cv2.VideoCapture):
             self._cap = source
         else:
             self._cap = cv2.VideoCapture(source)
         if not self._cap.isOpened():
             raise RuntimeError(f"Cv2Source: cannot open {source!r}")
-        log.info("Cv2Source opened (%r, fmt=%s)", source, output_format)
+
+        # ── Multi-consumer fan-out (dev-mac single-camera path) ──────────
+        self._latest_frame: np.ndarray | None = None
+        self._frame_lock = threading.Lock()
+        self._stop_evt = threading.Event()
+        self._producer: threading.Thread | None = None
+        if self._multi:
+            self._producer = threading.Thread(
+                target=self._producer_loop,
+                name="cv2-producer",
+                daemon=True,
+            )
+            self._producer.start()
+        log.info(
+            "Cv2Source opened (%r, fmt=%s, multi_consumer=%s)",
+            source, output_format, multi_consumer,
+        )
+
+    def _producer_loop(self) -> None:
+        """Pull frames as fast as the device emits them; cache the latest BGR."""
+        while not self._stop_evt.is_set():
+            ok, frame = self._cap.read()
+            if ok and frame is not None:
+                with self._frame_lock:
+                    self._latest_frame = frame
+            else:
+                time.sleep(0.02)
 
     def read_frame(self) -> np.ndarray | None:
+        if self._multi:
+            with self._frame_lock:
+                if self._latest_frame is None:
+                    return None
+                frame = self._latest_frame
+                if self.output_format == "rgb":
+                    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                return frame.copy()
         ok, frame = self._cap.read()
         if not ok or frame is None:
             return None
@@ -114,11 +159,64 @@ class Cv2Source:
             return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         return frame
 
+    def latest_frame_jpeg(self, quality: int = 70) -> bytes | None:
+        """Latest frame as JPEG bytes (None until first frame).
+
+        Only meaningful with ``multi_consumer=True`` — used by
+        /api/device/stream/* so the dashboard can show the dev-mac webcam.
+        """
+        with self._frame_lock:
+            frame = self._latest_frame
+        if frame is None:
+            return None
+        # encode outside the lock — cv2.imencode is CPU-heavy
+        ok, jpeg = cv2.imencode(
+            ".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+        )
+        return jpeg.tobytes() if ok else None
+
     def close(self) -> None:
+        self._stop_evt.set()
+        if self._producer is not None and self._producer.is_alive():
+            self._producer.join(timeout=2)
         try:
             self._cap.release()
         except Exception:
             log.exception("Cv2Source close failed (continuing)")
+
+
+class SharedCameraView:
+    """Non-owning, format-converting view over a multi_consumer Cv2Source.
+
+    Lets ONE physical webcam back BOTH logical cameras on dev-mac: the base
+    Cv2Source (opened BGR, owns the capture) serves cam_a (tray/YOLO), while
+    this view serves cam_b (intake/face) as RGB for MediaPipe — without
+    opening the device a second time (which OpenCV refuses: 'device busy').
+
+    The base producer thread caches BGR; both consumers pull from that single
+    cache. ``close()`` is a no-op — whoever owns the base Cv2Source releases
+    the hardware.
+    """
+
+    def __init__(self, base: Cv2Source, output_format: str = "rgb") -> None:
+        self._base = base
+        self.output_format = output_format
+
+    def read_frame(self) -> np.ndarray | None:
+        frame = self._base.read_frame()  # base is BGR
+        if frame is None:
+            return None
+        if self.output_format == "rgb":
+            return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        return frame
+
+    def latest_frame_jpeg(self, quality: int = 70) -> bytes | None:
+        # Base encodes from its cached BGR — correct colours for both views.
+        return self._base.latest_frame_jpeg(quality)
+
+    def close(self) -> None:
+        # No-op: the base Cv2Source owns and releases the capture device.
+        pass
 
 
 class RpicamSource:
