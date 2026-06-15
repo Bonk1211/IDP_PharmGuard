@@ -24,7 +24,6 @@ import type {
   PillDetection,
   RotateResult,
   FaceTrackResult,
-  PillDetectResult,
   VerifyFaceResult,
   VerifyPillResult,
 } from "./device";
@@ -209,48 +208,6 @@ export async function demoVerifyPill(expected?: string): Promise<VerifyPillResul
       { box: true, tone: "ok" },
     ),
     latency_ms: 693,
-  };
-}
-
-// Live pill verdict sim — mirrors demoVerifyPill but without a snapshot, as
-// if read from the annotated cam-0 stream's latest YOLO pass each poll.
-export function demoFetchPillDetect(expected?: string): PillDetectResult {
-  const fail = scenario === "fail";
-  if (fail) {
-    const wrong: PillDetection = {
-      class_name: "Lomide_capsule",
-      confidence: 0.92,
-      bbox: [180, 140, 460, 360],
-    };
-    const correct: PillDetection = {
-      class_name: expected ?? "Chloramine",
-      confidence: 0.88,
-      bbox: [150, 380, 320, 520],
-    };
-    return {
-      ok: true,
-      stale: false,
-      expected: expected ?? null,
-      top: wrong,
-      match: expected ? false : null,
-      detections: [wrong, correct],
-      age_ms: 120,
-    };
-  }
-  const className = expected ?? "Lomide_capsule";
-  const top: PillDetection = {
-    class_name: className,
-    confidence: 0.93,
-    bbox: [180, 140, 460, 360],
-  };
-  return {
-    ok: true,
-    stale: false,
-    expected: expected ?? null,
-    top,
-    match: expected ? true : null,
-    detections: [top],
-    age_ms: 120,
   };
 }
 

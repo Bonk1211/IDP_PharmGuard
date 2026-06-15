@@ -450,54 +450,6 @@ async def verify_pill(body: VerifyPillBody, request: Request):
     }
 
 
-# ─────────────────── live pill verdict (stream-fed, no snapshot) ───────
-
-
-@router.get("/pill_detect")
-async def pill_detect(
-    request: Request,
-    expected: str | None = Query(default=None, description="Medication name to score against."),
-    max_age_s: float = Query(default=2.0, ge=0.2, le=10.0),
-):
-    """Live pill verdict derived from the cam-0 annotated stream's latest
-    YOLO pass — no fresh inference, no base64 screenshot.
-
-    The dashboard shows the live annotated MJPEG stream and polls this for
-    the verdict (top pill, match, all detections) so identification tracks
-    the stream in real time instead of a frozen captured frame. Returns
-    ``stale: true`` when the cam-0 ``?annotate=1`` stream isn't currently
-    feeding detections (e.g. no one is watching the tray cam).
-    """
-    cache = getattr(request.app.state, "pill_stream_detections", None)
-    expected_clean = (expected or "").strip() or None
-
-    if not cache:
-        return {
-            "ok": True, "stale": True, "expected": expected_clean,
-            "top": None, "match": None, "detections": [], "age_ms": None,
-        }
-
-    age_s = time.time() - cache["ts"]
-    stale = age_s > max_age_s
-    detections = sorted(
-        cache["detections"], key=lambda d: d["confidence"], reverse=True
-    )
-    top = detections[0] if detections else None
-    match: bool | None = None
-    if top is not None and expected_clean is not None:
-        match = _norm_pill(top["class_name"]) == _norm_pill(expected_clean)
-
-    return {
-        "ok": True,
-        "stale": stale,
-        "expected": expected_clean,
-        "top": None if stale else top,
-        "match": None if stale else match,
-        "detections": [] if stale else detections,
-        "age_ms": int(age_s * 1000),
-    }
-
-
 # ─────────────────── Layer-1 face verify (AWS CompareFaces) ────────────
 
 
@@ -971,31 +923,6 @@ async def start_intake(body: IntakeStartBody, request: Request):
 _PILL_DETECTOR_PATH = "models/pill_detector.pt"
 
 
-def _norm_pill(s: str) -> str:
-    """Case/space/underscore-insensitive name match so "Lomide capsule"
-    lines up with the YOLO class label "Lomide_capsule"."""
-    return s.lower().replace(" ", "").replace("_", "")
-
-
-def _extract_pill_detections(r0) -> list[dict]:
-    """Flatten a YOLO result into our detection dicts (class/conf/bbox)."""
-    detections: list[dict] = []
-    if r0 is not None and getattr(r0, "boxes", None) is not None:
-        names = getattr(r0, "names", {}) or {}
-        for box in r0.boxes:
-            cls_idx = int(box.cls.item()) if hasattr(box.cls, "item") else int(box.cls)
-            conf = float(box.conf.item()) if hasattr(box.conf, "item") else float(box.conf)
-            xyxy = box.xyxy[0].tolist() if hasattr(box.xyxy, "tolist") else list(box.xyxy[0])
-            detections.append(
-                {
-                    "class_name": names.get(cls_idx, str(cls_idx)),
-                    "confidence": round(conf, 4),
-                    "bbox": [round(float(v), 1) for v in xyxy],
-                }
-            )
-    return detections
-
-
 def _get_pill_detector(app):
     """Lazy-load and cache models/pill_detector.pt on app.state.
 
@@ -1048,12 +975,6 @@ async def stream_camera(
         default=False,
         description="Overlay model output. cam 0 -> YOLO pill_detector boxes, "
                     "cam 1 -> MediaPipe FaceMesh + Hands landmarks.",
-    ),
-    expected: str | None = Query(
-        default=None,
-        description="cam 0 only: medication name to score boxes against — the "
-                    "correct pill is boxed green, anything else red, so the "
-                    "live tray stream reads safe/unsafe at a glance.",
     ),
 ):
     """MJPEG live stream for `cam_num` (0=tray, 1=intake/face).
@@ -1115,52 +1036,11 @@ async def stream_camera(
         target_fps = 15
     frame_interval_s = 1.0 / target_fps
 
-    expected_norm = _norm_pill(expected) if expected else None
-
     def _annotate_yolo(frame):
-        """Cam 0: run pill_detector, draw safety-coloured boxes, encode JPEG.
-
-        Also caches the per-frame detections on app.state so the cheap
-        /pill_detect poll can serve a live verdict derived from the EXACT
-        frames drawn here — one YOLO pass feeds both the visual and the
-        JSON, no second inference and no stale screenshot.
-        """
+        """Cam 0: run pill_detector, draw boxes, encode JPEG."""
         import cv2
-
         results = pill_detector(frame, verbose=False)
-        r0 = results[0] if results else None
-        detections = _extract_pill_detections(r0)
-
-        # Publish for /pill_detect (live verdict, same frame as the stream).
-        request.app.state.pill_stream_detections = {
-            "ts": time.time(),
-            "detections": detections,
-        }
-
-        annotated = frame.copy()
-        for d in detections:
-            x1, y1, x2, y2 = (int(round(v)) for v in d["bbox"])
-            is_correct = (
-                expected_norm is not None
-                and _norm_pill(d["class_name"]) == expected_norm
-            )
-            # BGR: green=correct, red=wrong, amber=unknown (no expected).
-            color = (
-                (60, 175, 80)
-                if is_correct
-                else (235, 200, 60)
-                if expected_norm is None
-                else (60, 60, 220)
-            )
-            label = f"{d['class_name']} {d['confidence']:.2f}"
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
-            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(
-                annotated, label, (x1 + 2, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA,
-            )
-
+        annotated = results[0].plot() if results else frame
         ok, jpeg = cv2.imencode(
             ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), _STREAM_JPEG_QUALITY],
         )

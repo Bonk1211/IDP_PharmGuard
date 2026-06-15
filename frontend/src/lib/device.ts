@@ -189,18 +189,13 @@ export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
  * SECURITY NOTE: the API key is in the URL; it'll appear in browser
  * history + ngrok logs. Acceptable for a dev/demo dashboard.
  */
-export function streamUrl(
-  camNum: 0 | 1,
-  opts?: { annotate?: boolean; expected?: string | null },
-): string | null {
+export function streamUrl(camNum: 0 | 1, opts?: { annotate?: boolean }): string | null {
   // Demo mode: no MJPEG stream — the page falls back to its no-stream
   // placeholder; synthetic frames come through snapshots/verify results.
   if (demo.isDemoActive()) return null;
   if (!isDeviceConfigured()) return null;
   const params = new URLSearchParams({ key: apiKey });
   if (opts?.annotate) params.set("annotate", "1");
-  // cam 0: colour the live YOLO boxes by correctness (green=expected pill).
-  if (opts?.expected) params.set("expected", opts.expected);
   return `${baseUrl}/api/device/stream/${camNum}?${params.toString()}`;
 }
 
@@ -466,59 +461,6 @@ export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
       detections: Array.isArray(data?.detections) ? data.detections : [],
       snapshot_b64: data?.snapshot_b64 ?? null,
       latency_ms: data?.latency_ms,
-    };
-  } catch {
-    return empty;
-  }
-}
-
-export type PillDetectResult = {
-  ok: boolean;
-  stale: boolean;                 // cam-0 annotated stream not currently feeding
-  expected: string | null;
-  top: PillDetection | null;
-  match: boolean | null;
-  detections: PillDetection[];
-  age_ms: number | null;
-};
-
-/**
- * Live pill verdict read from the cam-0 annotated stream's latest YOLO pass
- * (no fresh inference, no base64 snapshot). Poll this while showing the
- * annotated MJPEG stream so identification tracks the live tray in real
- * time. Requires the cam-0 `?annotate=1` stream to be on screen.
- */
-export async function fetchPillDetect(
-  expected?: string,
-): Promise<PillDetectResult> {
-  const empty: PillDetectResult = {
-    ok: false,
-    stale: true,
-    expected: expected ?? null,
-    top: null,
-    match: null,
-    detections: [],
-    age_ms: null,
-  };
-  if (demo.isDemoActive()) return demo.demoFetchPillDetect(expected);
-  if (!isDeviceConfigured()) return empty;
-  try {
-    const q = new URLSearchParams();
-    if (expected) q.set("expected", expected);
-    const r = await fetch(`${baseUrl}/api/device/pill_detect?${q.toString()}`, {
-      headers: authHeaders(),
-      cache: "no-store",
-    });
-    if (!r.ok) return empty;
-    const data = await r.json();
-    return {
-      ok: !!data?.ok,
-      stale: !!data?.stale,
-      expected: data?.expected ?? expected ?? null,
-      top: data?.top ?? null,
-      match: data?.match ?? null,
-      detections: Array.isArray(data?.detections) ? data.detections : [],
-      age_ms: data?.age_ms ?? null,
     };
   } catch {
     return empty;
