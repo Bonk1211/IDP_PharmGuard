@@ -12,11 +12,11 @@ const DEFAULT_DISPENSER_ID =
   process.env.NEXT_PUBLIC_DEFAULT_DISPENSER_ID ?? "dispenser-001";
 
 const NAV_ITEMS = [
-  { label: "Dashboard",    href: "/" },
+  { label: "Dashboard",    href: "/dashboard" },
+  { label: "Patient List", href: "/patients" },
+  { label: "Dispenser",    href: `/dispensers/${DEFAULT_DISPENSER_ID}` },
   { label: "Assistant",    href: "/agent" },
   { label: "Inventory",    href: "/inventory" },
-  { label: "Dispenser",    href: `/dispensers/${DEFAULT_DISPENSER_ID}` },
-  { label: "Patient List", href: "/patients" },
 ];
 
 function isActiveTab(pathname: string, href: string): boolean {

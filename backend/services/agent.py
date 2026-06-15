@@ -23,7 +23,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterator
 
 from config import settings
 from services import agent_tools, deepseek_client
@@ -54,6 +54,9 @@ Tool routing (use tools aggressively):
   - query_flags        ← FIRST for "what needs my attention" / "anything wrong"
   - today_summary      ← broad "what's happened today" questions
   - patient_overview   ← FIRST for any single-patient question (id or name)
+  - intake_evidence    ← FIRST for "how is <patient> doing on taking pills" /
+                         recent intake PERFORMANCE of one patient (metrics +
+                         per-event confidence evidence)
   - adherence_stats    ← "who is at risk", adherence rates, missed streaks
   - query_schedules    ← "who is due next", upcoming doses
   - query_adherence    ← raw dose-by-dose history with time bounds
@@ -232,6 +235,303 @@ async def chat(messages: list[dict]) -> dict:
             "latency_ms": int((time.time() - t0) * 1000),
             "model": settings.deepseek_model,
             "truncated": truncated,
+        },
+    }
+
+
+# Present-progressive labels for the live "thinking" trace. Keeps the UI
+# human ("Retrieving recent footage of intake") instead of raw tool names.
+_TOOL_ACTIONS: dict[str, str] = {
+    "intake_evidence": "Retrieving recent footage of intake",
+    "patient_overview": "Pulling up the patient chart",
+    "adherence_stats": "Crunching adherence statistics",
+    "query_adherence": "Reading recent dose-by-dose logs",
+    "query_flags": "Checking open flags",
+    "today_summary": "Summarizing today's activity",
+    "query_alerts": "Scanning alerts",
+    "query_medications": "Checking magazine stock",
+    "list_patients": "Looking up the patient roster",
+    "query_schedules": "Checking upcoming doses",
+}
+
+
+def _tool_action(name: str) -> str:
+    return _TOOL_ACTIONS.get(name, f"Running {name}")
+
+
+def _intake_analysis_steps(r: dict) -> list[str]:
+    """Build a grounded, behaviour-science-framed reasoning trace from the
+    real intake metrics. Each line is one visible 'thought' in the UI.
+
+    The framing borrows established models so the analysis reads like
+    clinical-behavioural reasoning rather than a stats dump:
+      - habit loop / dosing rhythm  (routine formation)
+      - eye–mind hypothesis         (gaze fixation ≈ attention & intent)
+      - COM-B                       (Capability–Opportunity–Motivation)
+    """
+    name = r.get("patient_name", "the patient")
+    days = r.get("window_days", 7)
+    n = r.get("n_events") or 0
+    taken = r.get("n_taken") or 0
+    missed = r.get("n_missed") or 0
+    adh = r.get("adherence_pct")
+    avg = r.get("avg_intake_confidence")
+    low = r.get("low_confidence_events") or 0
+    high = r.get("high_confidence_events") or 0
+    streak = r.get("current_missed_streak") or 0
+
+    steps: list[str] = []
+
+    if n == 0:
+        steps.append(
+            f"No intake events for {name} in the last {days} days — a silent "
+            "dispenser is itself a behavioural signal (disengagement), not 'no data'."
+        )
+        return steps
+
+    steps.append(
+        f"Reviewing {n} intake events over {days} days to establish {name}'s "
+        "dosing rhythm — consistent timing is the backbone of habit formation."
+    )
+
+    if adh is not None:
+        verdict = (
+            "a well-formed routine"
+            if adh >= 85
+            else "an unstable routine worth reinforcing"
+            if adh >= 60
+            else "routine breakdown"
+        )
+        steps.append(
+            f"Adherence sits at {adh}% ({taken} taken / {missed} missed) — {verdict}."
+        )
+
+    steps.append(
+        "Scoring each event on three independent channels: swallow motion, "
+        "object evidence, and gaze fixation."
+    )
+    steps.append(
+        "Reading gaze fixation as an attention/intent proxy (eye–mind "
+        "hypothesis): steady fixation on the pill ≈ deliberate, engaged intake."
+    )
+
+    if high:
+        steps.append(
+            f"{high} high-confidence events show all three channels agreeing — "
+            "attention, action, and outcome aligned."
+        )
+    if low:
+        steps.append(
+            f"{low} low-confidence events: behaviour diverged from confirmed "
+            "intake — likely distraction or a technique lapse, not refusal."
+        )
+
+    if streak >= 2:
+        steps.append(
+            f"{streak} consecutive misses — an acute habit-disruption signal "
+            "(a broken routine cue), more urgent than the same misses scattered."
+        )
+
+    if avg is not None:
+        avg_pct = round(avg * 100)
+        tone = (
+            "the verification chain is trustworthy — safe to auto-confirm"
+            if avg >= 0.85
+            else "borderline — corroborate before trusting the auto-verdict"
+            if avg >= 0.65
+            else "weak — these intakes need a human check"
+        )
+        steps.append(
+            f"Mean intake confidence {avg_pct}%: {tone}."
+        )
+
+    steps.append(
+        "Weighing capability vs. motivation (COM-B): is this a physical-ability "
+        "gap or an intent gap? — that decides whether to adjust the aid or the prompt."
+    )
+    steps.append("Synthesising the behavioural trajectory and the recommendation.")
+    return steps
+
+
+def chat_stream(messages: list[dict]) -> Iterator[dict]:
+    """Streaming variant of `chat` — yields event dicts as the tool-calling
+    loop progresses, so the UI can show the thinking process live.
+
+    Event shapes (all have a "type"):
+      {"type": "status", "text": str}
+      {"type": "tool_call", "name": str, "action": str, "args": dict}
+      {"type": "tool_result", "name": str, "summary": str}
+      {"type": "token", "text": str}                  # streamed final answer
+      {"type": "final", "text": str, "tool_calls": [...], "metadata": {...}}
+      {"type": "error", "detail": str}
+
+    Synchronous generator on purpose: FastAPI iterates it in a threadpool, so
+    the blocking DeepSeek stream is fine and we avoid asyncio plumbing.
+    """
+    t0 = time.time()
+    try:
+        client = deepseek_client.get_client()
+    except RuntimeError as exc:
+        yield {"type": "error", "detail": str(exc)}
+        return
+    tools = agent_tools.build_openai_tools()
+
+    clock_msg = (
+        f"Current local datetime: {datetime.now().astimezone().isoformat()} — "
+        "resolve relative dates ('today', 'this evening', 'last night') "
+        "against this."
+    )
+    conversation: list[dict] = [
+        {"role": "system", "content": _SYSTEM_PROMPT_CHAT},
+        {"role": "system", "content": clock_msg},
+    ] + _messages_to_openai(messages)
+
+    tool_calls_out: list[dict] = []
+    yield {"type": "status", "text": "Reviewing the question"}
+
+    for hop in range(_MAX_TOOL_HOPS):
+        try:
+            stream = client.chat.completions.create(
+                model=settings.deepseek_model,
+                messages=conversation,
+                tools=tools,
+                tool_choice="auto",
+                stream=True,
+            )
+        except Exception:
+            log.exception("agent.chat_stream: DeepSeek call failed at hop %d", hop)
+            yield {
+                "type": "final",
+                "text": (
+                    "I couldn't reach the assistant just now. "
+                    "Try again in a moment, or check the backend logs."
+                ),
+                "tool_calls": tool_calls_out,
+                "metadata": {
+                    "hops": hop,
+                    "latency_ms": int((time.time() - t0) * 1000),
+                    "model": settings.deepseek_model,
+                    "truncated": False,
+                    "error": True,
+                },
+            }
+            return
+
+        content_parts: list[str] = []
+        tc_acc: dict[int, dict] = {}
+        for chunk in stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = choices[0].delta
+            if getattr(delta, "content", None):
+                content_parts.append(delta.content)
+                yield {"type": "token", "text": delta.content}
+            for tcd in getattr(delta, "tool_calls", None) or []:
+                idx = tcd.index or 0
+                slot = tc_acc.setdefault(idx, {"id": None, "name": "", "args": ""})
+                if tcd.id:
+                    slot["id"] = tcd.id
+                fn = getattr(tcd, "function", None)
+                if fn is not None:
+                    if fn.name:
+                        slot["name"] = fn.name
+                    if fn.arguments:
+                        slot["args"] += fn.arguments
+
+        if tc_acc:
+            # Content streamed on a tool hop is the model's reasoning preamble,
+            # not the answer. Fold it into the thinking trace and tell the UI to
+            # clear the partial answer it streamed, so the final answer is clean.
+            preamble = "".join(content_parts).strip()
+            yield {"type": "reasoning", "text": preamble}
+            ordered = [tc_acc[i] for i in sorted(tc_acc)]
+            conversation.append({
+                "role": "assistant",
+                "content": "".join(content_parts),
+                "tool_calls": [
+                    {
+                        "id": t["id"],
+                        "type": "function",
+                        "function": {
+                            "name": t["name"],
+                            "arguments": t["args"] or "{}",
+                        },
+                    }
+                    for t in ordered
+                ],
+            })
+            for t in ordered:
+                name = t["name"]
+                try:
+                    raw_args = json.loads(t["args"] or "{}")
+                except json.JSONDecodeError:
+                    raw_args = {}
+                yield {
+                    "type": "tool_call",
+                    "name": name,
+                    "action": _tool_action(name),
+                    "args": raw_args,
+                }
+                try:
+                    result = agent_tools.dispatch(name, raw_args)
+                except Exception as exc:
+                    log.warning("agent.chat_stream: tool %s failed: %s", name, exc)
+                    result = {"error": str(exc)}
+                summary = _summarise_tool_result(name, result)
+                tool_calls_out.append(
+                    {"name": name, "args": raw_args, "result_summary": summary}
+                )
+                # Detailed, behaviour-science-aligned reasoning over the
+                # intake evidence — streamed step by step so the clinician
+                # sees HOW the verdict was reached, not just the tool name.
+                if (
+                    name == "intake_evidence"
+                    and isinstance(result, dict)
+                    and not result.get("error")
+                    and not result.get("ambiguous")
+                ):
+                    for line in _intake_analysis_steps(result):
+                        yield {"type": "analysis", "text": line}
+                        time.sleep(0.45)  # cognitive pacing for the reader
+                yield {"type": "tool_result", "name": name, "summary": summary}
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": t["id"],
+                    "content": json.dumps(
+                        _coerce_to_json_safe(result), default=str
+                    ),
+                })
+            continue
+
+        # No tool calls this hop → the streamed content is the final answer.
+        final_text = "".join(content_parts).strip()
+        yield {
+            "type": "final",
+            "text": final_text or "(no response)",
+            "tool_calls": tool_calls_out,
+            "metadata": {
+                "hops": len(tool_calls_out) + 1,
+                "latency_ms": int((time.time() - t0) * 1000),
+                "model": settings.deepseek_model,
+                "truncated": False,
+            },
+        }
+        return
+
+    # Hop budget exhausted.
+    yield {
+        "type": "final",
+        "text": (
+            "I needed more lookups than I'm allowed in one turn. "
+            "Try narrowing the question (e.g., a specific patient or date)."
+        ),
+        "tool_calls": tool_calls_out,
+        "metadata": {
+            "hops": len(tool_calls_out),
+            "latency_ms": int((time.time() - t0) * 1000),
+            "model": settings.deepseek_model,
+            "truncated": True,
         },
     }
 

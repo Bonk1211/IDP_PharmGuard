@@ -77,6 +77,71 @@ export async function chatAgent(messages: ChatTurn[]): Promise<ChatResponse> {
   return (await r.json()) as ChatResponse;
 }
 
+// ── Streaming chat (thinking-process trace) ──────────────────────────────
+
+export type ChatStreamEvent =
+  | { type: "status"; text: string }
+  | { type: "reasoning"; text: string }
+  | { type: "analysis"; text: string }
+  | { type: "tool_call"; name: string; action: string; args: Record<string, unknown> }
+  | { type: "tool_result"; name: string; summary: string }
+  | { type: "token"; text: string }
+  | {
+      type: "final";
+      text: string;
+      tool_calls: ChatToolCall[];
+      metadata: ChatResponse["metadata"];
+    }
+  | { type: "error"; detail: string };
+
+// POST the conversation and parse the SSE stream, invoking `onEvent` for each
+// event as it arrives. EventSource only supports GET, so we stream the fetch
+// body and split on SSE `data:` frames ourselves.
+export async function chatAgentStream(
+  messages: ChatTurn[],
+  onEvent: (e: ChatStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!isAgentConfigured()) {
+    throw new Error(
+      "Agent not configured (set NEXT_PUBLIC_DEVICE_URL + NEXT_PUBLIC_DEVICE_API_KEY).",
+    );
+  }
+  const r = await fetch(`${baseUrl}/api/agent/chat/stream`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ messages }),
+    signal,
+  });
+  if (!r.ok || !r.body) {
+    const detail = await safeError(r);
+    throw new Error(`agent stream failed (${r.status}): ${detail}`);
+  }
+
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    // SSE frames are separated by a blank line.
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() ?? "";
+    for (const frame of frames) {
+      const line = frame.split("\n").find((l) => l.startsWith("data:"));
+      if (!line) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+      try {
+        onEvent(JSON.parse(payload) as ChatStreamEvent);
+      } catch {
+        // ignore malformed frame
+      }
+    }
+  }
+}
+
 export async function fetchLatestBrief(): Promise<AgentBrief | null> {
   if (!isAgentConfigured()) return null;
   try {

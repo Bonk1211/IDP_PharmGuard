@@ -14,12 +14,15 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.security import verify_device_api_key
 from db.base import get_supabase
-from services.agent import chat, generate_brief
+from services.agent import chat, chat_stream, generate_brief
 from services.flag_detector import detect_and_persist_flags
 
 log = logging.getLogger(__name__)
@@ -62,6 +65,42 @@ async def chat_endpoint(body: ChatRequest):
         # deepseek_client.get_client raises this when DEEPSEEK_API_KEY is unset.
         raise HTTPException(status_code=503, detail=str(exc))
     return result
+
+
+@router.post("/chat/stream")
+async def chat_stream_endpoint(body: ChatRequest):
+    """Streaming chat — emits Server-Sent Events so the UI can render the
+    assistant's thinking process (status, tool calls, then the answer) live.
+
+    Each SSE `data:` line is one JSON event from services.agent.chat_stream.
+    """
+    if not body.messages:
+        raise HTTPException(status_code=400, detail="messages cannot be empty")
+    safe_messages = [
+        m.model_dump() for m in body.messages if m.role in ("user", "assistant")
+    ]
+    if not safe_messages:
+        raise HTTPException(
+            status_code=400,
+            detail="messages must contain at least one user/assistant turn",
+        )
+
+    def _sse():
+        try:
+            for event in chat_stream(safe_messages):
+                yield f"data: {json.dumps(event, default=str)}\n\n"
+        except Exception as exc:  # never leak a half-stream without a terminator
+            log.exception("chat_stream_endpoint: stream failed")
+            yield f"data: {json.dumps({'type': 'error', 'detail': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        _sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # disable proxy buffering (ngrok/nginx)
+        },
+    )
 
 
 @router.post("/brief")

@@ -4,15 +4,29 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
-  chatAgent,
+  chatAgentStream,
   refreshBrief,
   type ChatToolCall,
   type ChatTurn,
 } from "@/lib/agent";
 import { usePatients } from "@/lib/swr";
 
+// One step in the live "thinking" trace shown while the assistant works.
+type ThinkingStep =
+  | { kind: "status"; text: string }
+  | { kind: "analysis"; text: string }
+  | {
+      kind: "tool";
+      name: string;
+      action: string;
+      running: boolean;
+      summary?: string;
+    };
+
 type Bubble = ChatTurn & {
   toolCalls?: ChatToolCall[];
+  thinking?: ThinkingStep[];
+  streaming?: boolean;
   truncated?: boolean;
   error?: boolean;
   latencyMs?: number;
@@ -30,6 +44,7 @@ const TOOL_LABELS: Record<string, string> = {
   patient_overview: "Patient overview",
   adherence_stats: "Adherence stats",
   query_schedules: "Dose schedule",
+  intake_evidence: "Intake evidence",
   generate_brief: "Shift brief",
 };
 
@@ -78,7 +93,7 @@ export default function AgentChat() {
     ];
     if (patients.length > 0) {
       chips.splice(2, 0, {
-        label: `How is ${patients[0].name} doing?`,
+        label: `How is ${patients[0].name}'s recent pill-taking?`,
         kind: "chat",
       });
     }
@@ -124,25 +139,97 @@ export default function AgentChat() {
       setDraft("");
     }
     setSending(true);
+    // Placeholder assistant bubble we mutate as stream events arrive.
+    setMessages((prev) => [
+      ...prev,
+      { role: "assistant", text: "", thinking: [], streaming: true },
+    ]);
+
+    // Mutate only the trailing (placeholder) assistant bubble.
+    const patchLast = (fn: (b: Bubble) => Bubble) =>
+      setMessages((prev) => {
+        if (prev.length === 0) return prev;
+        const copy = [...prev];
+        copy[copy.length - 1] = fn({ ...copy[copy.length - 1] });
+        return copy;
+      });
+
     try {
       const payload: ChatTurn[] = nextHistory.map(({ role, text }) => ({
         role,
         text,
       }));
-      const resp = await chatAgent(payload);
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: "assistant",
-          text: resp.text,
-          toolCalls: resp.tool_calls,
-          truncated: resp.metadata.truncated,
-          error: resp.metadata.error,
-          latencyMs: resp.metadata.latency_ms,
-        },
-      ]);
+      await chatAgentStream(payload, (e) => {
+        patchLast((b) => {
+          const thinking = [...(b.thinking ?? [])];
+          switch (e.type) {
+            case "status":
+              thinking.push({ kind: "status", text: e.text });
+              break;
+            case "reasoning":
+              // Pre-tool reasoning: log it, and clear the partial answer the
+              // tokens streamed (the real answer comes after the tools run).
+              if (e.text) thinking.push({ kind: "status", text: e.text });
+              b.text = "";
+              break;
+            case "analysis":
+              thinking.push({ kind: "analysis", text: e.text });
+              break;
+            case "tool_call":
+              thinking.push({
+                kind: "tool",
+                name: e.name,
+                action: e.action,
+                running: true,
+              });
+              break;
+            case "tool_result":
+              for (let k = thinking.length - 1; k >= 0; k--) {
+                const s = thinking[k];
+                if (s.kind === "tool" && s.name === e.name && s.running) {
+                  thinking[k] = { ...s, running: false, summary: e.summary };
+                  break;
+                }
+              }
+              break;
+            case "token":
+              b.text = (b.text ?? "") + e.text;
+              break;
+            case "final":
+              b.text = e.text || b.text;
+              b.toolCalls = e.tool_calls;
+              b.truncated = e.metadata.truncated;
+              b.error = e.metadata.error;
+              b.latencyMs = e.metadata.latency_ms;
+              b.streaming = false;
+              break;
+            case "error":
+              b.error = true;
+              b.text = b.text || "Assistant error — try again.";
+              b.streaming = false;
+              break;
+          }
+          // Any still-running tool steps finish once the turn ends.
+          if (e.type === "final" || e.type === "error") {
+            for (let k = 0; k < thinking.length; k++) {
+              const s = thinking[k];
+              if (s.kind === "tool" && s.running) {
+                thinking[k] = { ...s, running: false };
+              }
+            }
+          }
+          b.thinking = thinking;
+          return b;
+        });
+      });
       setLastFailed(null);
     } catch (e) {
+      // Drop the placeholder bubble; surface the error + Retry.
+      setMessages((prev) =>
+        prev.length && prev[prev.length - 1].role === "assistant" && prev[prev.length - 1].streaming
+          ? prev.slice(0, -1)
+          : prev,
+      );
       setErr(e instanceof Error ? e.message : "Chat failed");
       setLastFailed(trimmed);
     } finally {
@@ -268,36 +355,51 @@ export default function AgentChat() {
               }`}
             >
               {m.role === "assistant" ? (
-                <MarkdownMessage text={m.text || "(no response)"} />
+                <>
+                  {(m.thinking?.length ?? 0) > 0 && (
+                    <ThinkingTrace steps={m.thinking!} streaming={m.streaming} />
+                  )}
+                  {m.text ? (
+                    <MarkdownMessage text={m.text} />
+                  ) : m.streaming ? (
+                    (m.thinking?.length ?? 0) === 0 && (
+                      <span className="text-gray-400">Thinking…</span>
+                    )
+                  ) : (
+                    <MarkdownMessage text="(no response)" />
+                  )}
+                </>
               ) : (
                 <p className="whitespace-pre-wrap">{m.text || "(no response)"}</p>
               )}
-              {m.role === "assistant" && (m.toolCalls?.length ?? 0) > 0 && (
-                <div className="mt-2">
-                  <div className="flex flex-wrap gap-1">
-                    {m.toolCalls!.map((tc, j) => (
-                      <span
-                        key={j}
-                        className="inline-flex items-center gap-1 rounded-full bg-sand-100 px-2 py-0.5 text-[10px] font-medium text-gray-600"
-                      >
-                        🔎 {TOOL_LABELS[tc.name] ?? tc.name}
-                      </span>
-                    ))}
-                  </div>
-                  <details className="mt-1 text-[11px] text-gray-500">
-                    <summary className="cursor-pointer select-none">
-                      {m.toolCalls!.length} lookup{m.toolCalls!.length === 1 ? "" : "s"} · raw
-                    </summary>
-                    <ul className="mt-1 space-y-0.5">
+              {m.role === "assistant" &&
+                !m.thinking?.length &&
+                (m.toolCalls?.length ?? 0) > 0 && (
+                  <div className="mt-2">
+                    <div className="flex flex-wrap gap-1">
                       {m.toolCalls!.map((tc, j) => (
-                        <li key={j} className="font-mono">
-                          {tc.name}({summariseArgs(tc.args)}) → {tc.result_summary}
-                        </li>
+                        <span
+                          key={j}
+                          className="inline-flex items-center gap-1 rounded-full bg-sand-100 px-2 py-0.5 text-[10px] font-medium text-gray-600"
+                        >
+                          🔎 {TOOL_LABELS[tc.name] ?? tc.name}
+                        </span>
                       ))}
-                    </ul>
-                  </details>
-                </div>
-              )}
+                    </div>
+                    <details className="mt-1 text-[11px] text-gray-500">
+                      <summary className="cursor-pointer select-none">
+                        {m.toolCalls!.length} lookup{m.toolCalls!.length === 1 ? "" : "s"} · raw
+                      </summary>
+                      <ul className="mt-1 space-y-0.5">
+                        {m.toolCalls!.map((tc, j) => (
+                          <li key={j} className="font-mono">
+                            {tc.name}({summariseArgs(tc.args)}) → {tc.result_summary}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  </div>
+                )}
               {m.role === "assistant" && (m.truncated || m.error) && (
                 <p className="mt-1 text-[11px] text-status-warning">
                   {m.error
@@ -325,13 +427,6 @@ export default function AgentChat() {
           </div>
         ))}
 
-        {sending && (
-          <div className="flex justify-start">
-            <div className="rounded-2xl bg-sand-50 px-4 py-2.5 text-sm text-gray-500">
-              Thinking…
-            </div>
-          </div>
-        )}
       </div>
 
       {err && (
@@ -373,6 +468,66 @@ export default function AgentChat() {
           Send
         </button>
       </form>
+    </div>
+  );
+}
+
+// Live "thinking process": status lines + tool calls as they run/complete.
+function ThinkingTrace({
+  steps,
+  streaming,
+}: {
+  steps: ThinkingStep[];
+  streaming?: boolean;
+}) {
+  return (
+    <div className="mb-2 space-y-1 rounded-xl border border-sand-200 bg-white/60 px-3 py-2">
+      <p className="text-[10px] font-medium uppercase tracking-wider text-gray-400">
+        {streaming ? "Thinking…" : "Thought process"}
+      </p>
+      {steps.map((s, i) => {
+        if (s.kind === "status") {
+          return (
+            <div key={i} className="flex items-center gap-2 text-[11px] text-gray-500">
+              <span className="text-gray-300">›</span>
+              {s.text}
+            </div>
+          );
+        }
+        if (s.kind === "analysis") {
+          return (
+            <div
+              key={i}
+              className="flex items-start gap-2 text-[11px] leading-snug text-indigo-700/90"
+            >
+              <span className="mt-0.5 shrink-0 text-indigo-400" aria-hidden>
+                ✦
+              </span>
+              <span>{s.text}</span>
+            </div>
+          );
+        }
+        return (
+          <div key={i} className="flex items-center gap-2 text-[11px]">
+            <span aria-hidden>
+              {s.running ? (
+                <span className="inline-block animate-spin text-olive-500">◐</span>
+              ) : (
+                <span className="text-status-success">✓</span>
+              )}
+            </span>
+            <span className={s.running ? "text-gray-700" : "text-gray-600"}>
+              {s.action}
+              {s.running ? "…" : ""}
+            </span>
+            {s.summary && !s.running && (
+              <span className="ml-auto truncate font-mono text-[10px] text-gray-400">
+                {s.summary}
+              </span>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

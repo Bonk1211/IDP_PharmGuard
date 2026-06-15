@@ -33,8 +33,10 @@ from hardware.magazine import Magazine
 from storage.queue import OfflineQueue
 from vision import (
     CameraSource,
+    Cv2Source,
     IntakeMonitor,
     PillVerifier,
+    SharedCameraView,
     open_camera,
 )
 
@@ -50,6 +52,10 @@ _BENCH_FIELDS = (
 )
 
 _REPLAY_BATCH_LIMIT = 20
+
+# Fire-and-forget caregiver-notify tasks. Referenced here so they aren't
+# garbage-collected mid-flight (asyncio only keeps weak refs to tasks).
+_notify_tasks: set[asyncio.Task] = set()
 
 
 class CycleState:
@@ -115,7 +121,14 @@ class CycleState:
         if not self.hardware_stubbed:
             await asyncio.to_thread(self.ejector.home)
 
-        # Open dual cameras (only when hardware is real). Same fail-loud rule.
+        # Open cameras. Three paths:
+        #   1. real hardware  -> dual Pi cameras (tray + patient-facing).
+        #   2. dev-mac webcam -> ONE cv2 webcam backs BOTH logical cameras: the
+        #      base Cv2Source is cam_a (tray/YOLO, BGR) and a non-owning RGB
+        #      view is cam_b (intake/face, MediaPipe). Mirrors the Pi's cam0+cam1
+        #      off a single Mac camera so the full pipeline + both /stream feeds
+        #      work without Pi hardware.
+        #   3. plain stub      -> no cameras; vision verifies skipped.
         if not self.hardware_stubbed:
             try:
                 self.cam_a = await asyncio.to_thread(open_camera, 0)  # tray top-down (BGR for YOLO)
@@ -128,6 +141,68 @@ class CycleState:
                     raise RuntimeError("Camera init failed and stub disallowed")
                 log.warning(
                     "STUB MODE: camera unavailable — vision verifies will be skipped"
+                )
+        elif settings.dev_camera_enabled and settings.dev_camera_index_b >= 0:
+            # Two distinct webcams: index -> cam_a (tray/YOLO, BGR),
+            # index_b -> cam_b (intake/face, RGB). Mirrors the Pi's dual-cam
+            # layout with two real Mac webcams.
+            try:
+                # Each webcam gets its own multi_consumer producer thread so
+                # YOLO/FSM reads AND the dashboard MJPEG stream + snapshot
+                # (latest_frame_jpeg) can pull concurrently. Plain open_camera
+                # (single-reader) leaves latest_frame_jpeg empty -> dead stream.
+                self.cam_a = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index,
+                        output_format="bgr",     # tray/YOLO
+                        multi_consumer=True,
+                    )
+                )
+                self.cam_b = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index_b,
+                        output_format="rgb",     # intake/MediaPipe
+                        multi_consumer=True,
+                    )
+                )
+                log.warning(
+                    "DEV CAMERA (dual): cam_a=index %d (tray/YOLO), "
+                    "cam_b=index %d (intake/MediaPipe).",
+                    settings.dev_camera_index,
+                    settings.dev_camera_index_b,
+                )
+            except Exception:
+                log.exception(
+                    "DEV CAMERA (dual): failed to open webcams index=%d / %d — "
+                    "intake FSM, tray verify, and live streams will be unavailable.",
+                    settings.dev_camera_index,
+                    settings.dev_camera_index_b,
+                )
+        elif settings.dev_camera_enabled:
+            try:
+                # One webcam, two consumers. multi_consumer=True: a producer
+                # thread owns cap.read() so the YOLO tray reader, the swallow
+                # FSM, and both /stream MJPEG feeds can all pull concurrently.
+                base = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index,
+                        output_format="bgr",   # native for YOLO + jpeg encode
+                        multi_consumer=True,
+                    )
+                )
+                self.cam_a = base                                   # cam 0: tray/YOLO (BGR)
+                self.cam_b = SharedCameraView(base, output_format="rgb")  # cam 1: face/MediaPipe (RGB)
+                log.warning(
+                    "DEV CAMERA: webcam index=%d backs BOTH cam_a (tray) and "
+                    "cam_b (intake) — same image to both. Tray YOLO will run on "
+                    "the face frame (dev only).",
+                    settings.dev_camera_index,
+                )
+            except Exception:
+                log.exception(
+                    "DEV CAMERA: failed to open webcam index=%d — intake FSM, "
+                    "tray verify, and live streams will be unavailable.",
+                    settings.dev_camera_index,
                 )
 
         self.verifier = PillVerifier(camera=self.cam_a)
@@ -400,6 +475,7 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     # patient never gets a wrong-pill delivery. The drawer SG90 servo and
     # its lock logic are removed entirely. t_drawer is pinned to t_pillid
     # so the bench CSV schema (t_drawer_ms column) stays stable (reads ~0).
+    fail_reason: str | None = None
     if state.hardware_stubbed:
         pill_taken_actual = False
         pill_conf: float | None = None
@@ -435,6 +511,11 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
                 )
                 if not pill_taken_actual:
                     terminal = state.monitor.get_state().get("result")
+                    fail_reason = (
+                        "intake not confirmed (timed out)"
+                        if terminal == "timeout"
+                        else "intake not confirmed (no cup/pill seen)"
+                    )
                     log.warning(
                         "Intake gate failed (result=%s) — pill_taken stays False",
                         terminal,
@@ -444,6 +525,9 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
                 "Pill-ID verification failed (slot=%d, conf=%s); pill rejected. "
                 "Operator must remove the rejected pill from the chute.",
                 slot, pill_conf,
+            )
+            fail_reason = (
+                f"wrong/unidentified pill rejected by vision (confidence {pill_conf})"
             )
             t_drawer = t_pillid
             pill_taken_actual = False
@@ -459,6 +543,26 @@ async def run_cycle(state: CycleState, task: dict | None = None) -> None:
     )
     t_log = time.perf_counter()
     log.info("Cycle complete — pill_taken=%s", pill_taken_actual)
+
+    # Caregiver push — only for real (non-stub) failures so stub-mode dev
+    # loops don't spam the chat. Fire-and-forget: send_alert soft-fails and
+    # its 10 s timeout must not stall the hardware cycle on a Telegram
+    # outage.
+    if (
+        not pill_taken_actual
+        and not state.hardware_stubbed
+        and settings.telegram_notify_on_failed_cycle
+    ):
+        from services.telegram_notifier import escape_html, send_alert
+
+        med = escape_html(task.get("medication") or f"slot {slot}")
+        notify_task = asyncio.create_task(asyncio.to_thread(
+            send_alert,
+            f"⚠️ <b>PharmGuard</b>: dose NOT confirmed for patient #{patient_id} — "
+            f"{med} (slot {slot}). Reason: {fail_reason or 'verification failed'}.",
+        ))
+        _notify_tasks.add(notify_task)
+        notify_task.add_done_callback(_notify_tasks.discard)
 
     # Phase 6: per-cycle metrics row.
     if state.bench_writer is not None:

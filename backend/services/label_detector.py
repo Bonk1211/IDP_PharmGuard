@@ -64,6 +64,58 @@ def encode_frame_jpeg(frame: np.ndarray, quality: int = 75) -> bytes:
     return jpeg.tobytes()
 
 
+def encode_thumbnail_b64(
+    frame: np.ndarray,
+    bbox: dict | None = None,
+    max_w: int = 240,
+    quality: int = 60,
+    pad: float = 0.08,
+) -> str:
+    """Downscaled base64 JPEG proof thumbnail — cropped to the object.
+
+    ``bbox`` is a Rekognition BoundingBox (ratios 0..1: Left/Top/Width/Height)
+    relative to ``frame``. When given, the frame is cropped to just that
+    object (with a small ``pad`` margin) so the proof shows the cup/bottle/pill
+    itself, not the whole scene. When ``None`` the full frame is used.
+
+    Kept small (≤max_w wide, low quality) because these are folded into the
+    intake-state dict that the dashboard polls ~1×/s. Same RGB→BGR handling as
+    ``encode_frame_jpeg``.
+    """
+    import base64
+
+    img = frame
+    if bbox and frame.ndim >= 2:
+        h, w = frame.shape[0], frame.shape[1]
+        left = float(bbox.get("Left", 0.0))
+        top = float(bbox.get("Top", 0.0))
+        bw = float(bbox.get("Width", 0.0))
+        bh = float(bbox.get("Height", 0.0))
+        # Expand by `pad` of the box size on each side, clamped to the frame.
+        x1 = max(0, int(round((left - bw * pad) * w)))
+        y1 = max(0, int(round((top - bh * pad) * h)))
+        x2 = min(w, int(round((left + bw * (1 + pad)) * w)))
+        y2 = min(h, int(round((top + bh * (1 + pad)) * h)))
+        if x2 > x1 and y2 > y1:
+            img = frame[y1:y2, x1:x2]
+
+    if img.ndim == 3 and img.shape[1] > max_w:
+        scale = max_w / float(img.shape[1])
+        img = cv2.resize(
+            img, (max_w, max(1, int(round(img.shape[0] * scale)))),
+            interpolation=cv2.INTER_AREA,
+        )
+    bgr = (
+        cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        if img.ndim == 3 and img.shape[2] == 3
+        else img
+    )
+    ok, jpeg = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+    if not ok:
+        raise RuntimeError("thumbnail JPEG encode failed")
+    return base64.b64encode(jpeg.tobytes()).decode("ascii")
+
+
 def detect_labels(
     jpeg_bytes: bytes,
     min_confidence: float = 70.0,
@@ -72,7 +124,14 @@ def detect_labels(
     """Call Rekognition DetectLabels on a single JPEG frame.
 
     Returns:
-        ``{"labels": [{"name": str, "confidence": float}], "error": str | None}``
+        ``{"labels": [{"name": str, "confidence": float,
+                       "bbox": {"Left","Top","Width","Height"} | None}],
+           "error": str | None}``
+
+    ``bbox`` is the highest-confidence object instance's bounding box (ratios
+    0..1) for that label, or ``None`` when Rekognition reports no instances
+    (e.g. scene labels like "Indoors"). Used to crop a proof thumbnail down to
+    just the detected object.
 
     On any AWS failure (missing creds, throttling, network), returns an
     empty labels list with the error message. Caller must treat
@@ -89,11 +148,20 @@ def detect_labels(
         log.warning("DetectLabels failed: %s", exc)
         return {"labels": [], "error": str(exc)}
 
-    out = [
-        {
-            "name": lbl.get("Name"),
-            "confidence": float(lbl.get("Confidence", 0.0)),
-        }
-        for lbl in resp.get("Labels") or []
-    ]
+    out = []
+    for lbl in resp.get("Labels") or []:
+        instances = lbl.get("Instances") or []
+        bbox = None
+        if instances:
+            best = max(
+                instances, key=lambda inst: float(inst.get("Confidence", 0.0))
+            )
+            bbox = best.get("BoundingBox") or None
+        out.append(
+            {
+                "name": lbl.get("Name"),
+                "confidence": float(lbl.get("Confidence", 0.0)),
+                "bbox": bbox,
+            }
+        )
     return {"labels": out, "error": None}

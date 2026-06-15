@@ -342,6 +342,13 @@ async def verify_pill(body: VerifyPillBody, request: Request):
 
     detector = await asyncio.to_thread(_get_pill_detector, request.app)
 
+    expected = (body.expected or "").strip() or None
+
+    # Tolerate case + whitespace + underscores so "Lomide capsule" matches the
+    # YOLO class label "Lomide_capsule".
+    def _norm(s: str) -> str:
+        return s.lower().replace(" ", "").replace("_", "")
+
     def _run():
         import base64
         import cv2
@@ -372,7 +379,43 @@ async def verify_pill(body: VerifyPillBody, request: Request):
                         "bbox": [round(float(v), 1) for v in xyxy],
                     }
                 )
-        annotated = r0.plot() if r0 is not None else frame
+
+        # Custom annotation instead of r0.plot(): when we know what's expected,
+        # the correct pill is boxed GREEN ("take this") and any other pill RED
+        # ("remove this"), so a mixed tray reads at a glance. With no expected,
+        # fall back to a neutral amber box per detection.
+        ne = _norm(expected) if expected else None
+        annotated = frame.copy()
+        for d in detections:
+            x1, y1, x2, y2 = (int(round(v)) for v in d["bbox"])
+            is_correct = ne is not None and _norm(d["class_name"]) == ne
+            # BGR. green=correct, red=wrong, amber=unknown(no expected).
+            color = (
+                (60, 175, 80)
+                if is_correct
+                else (235, 200, 60)
+                if ne is None
+                else (60, 60, 220)
+            )
+            label = f"{d['class_name']} {d['confidence']:.2f}"
+            cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2)
+            (tw, th), _ = cv2.getTextSize(
+                label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+            )
+            cv2.rectangle(
+                annotated, (x1, y1 - th - 6), (x1 + tw + 4, y1), color, -1
+            )
+            cv2.putText(
+                annotated,
+                label,
+                (x1 + 2, y1 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
+
         ok, jpeg = cv2.imencode(
             ".jpg", annotated, [int(cv2.IMWRITE_JPEG_QUALITY), 85]
         )
@@ -383,14 +426,8 @@ async def verify_pill(body: VerifyPillBody, request: Request):
     detections.sort(key=lambda d: d["confidence"], reverse=True)
     top = detections[0] if detections else None
 
-    expected = (body.expected or "").strip() or None
     match: bool | None = None
     if top is not None and expected is not None:
-        # Tolerate case + whitespace + underscores so "Lomide capsule"
-        # matches the YOLO class label "Lomide_capsule".
-        def _norm(s: str) -> str:
-            return s.lower().replace(" ", "").replace("_", "")
-
         match = _norm(top["class_name"]) == _norm(expected)
 
     latency_ms = int((time.monotonic() - t0) * 1000)
@@ -551,6 +588,35 @@ async def tts(body: TtsBody):
     return Response(content=out["audio"], media_type="audio/mpeg")
 
 
+# ─────────────────── caregiver notify (Telegram proxy) ─────────────────
+
+
+class NotifyBody(BaseModel):
+    text: str = Field(min_length=1, max_length=500, description="Message to push to the caregiver chat.")
+
+
+@router.post("/notify")
+async def notify_caregiver(body: NotifyBody):
+    """Push ``text`` to the configured Telegram caregiver chat.
+
+    Hardware-independent — works in headless mode, same as /tts. Soft-fail:
+    503 with detail when Telegram is unconfigured or upstream fails, so the
+    guided flow can fire-and-forget without breaking a round.
+    """
+    from services.telegram_notifier import escape_html, send_alert
+
+    t0 = time.monotonic()
+    # Frontend texts are plain prose that may embed med names — escape so a
+    # stray < > & can't make Telegram reject (and silently drop) the alert.
+    out = await asyncio.to_thread(send_alert, escape_html(body.text))
+    latency_ms = int((time.monotonic() - t0) * 1000)
+    if not out["ok"]:
+        log.warning("notify: failed err=%s latency_ms=%d", out["error"], latency_ms)
+        raise HTTPException(status_code=503, detail=f"Notify unavailable: {out['error']}")
+    log.info("notify: sent chars=%d latency_ms=%d", len(body.text), latency_ms)
+    return {"ok": True}
+
+
 @router.get("/snapshot")
 async def camera_snapshot(
     request: Request,
@@ -684,6 +750,7 @@ async def intake_state(request: Request):
             # Layer-2 (DetectLabels) fields — empty/false in headless mode.
             "labels_seen": [],
             "labels_seen_at": {},
+            "labels_evidence": {},
             "labels_required": [],
             "labels_satisfied": False,
             "mediapipe_complete": False,

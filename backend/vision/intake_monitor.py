@@ -99,6 +99,9 @@ def _initial_state() -> dict:
         # ── Layer-2 (DetectLabels) state ───────────────────────────────
         "labels_seen": [],           # ordered unique label names as detected
         "labels_seen_at": {},        # {label_lower: epoch_seconds} — recency
+        "labels_evidence": {},       # {label_lower: jpeg_b64_thumbnail} — proof
+                                     # frame captured when a REQUIRED label was
+                                     # first seen. Only required (gate) labels.
         "labels_required": [],       # snapshot of required set for the UI
         "labels_satisfied": False,   # any seen label in the required set?
         "mediapipe_complete": False, # all 3 FSM steps done (regardless of labels)
@@ -382,7 +385,11 @@ class IntakeMonitor:
         ``missing_labels`` if MediaPipe completed without any match.
         """
         from config import settings
-        from services.label_detector import detect_labels, encode_frame_jpeg
+        from services.label_detector import (
+            detect_labels,
+            encode_frame_jpeg,
+            encode_thumbnail_b64,
+        )
 
         try:
             try:
@@ -401,6 +408,7 @@ class IntakeMonitor:
             with self._lock:
                 seen_at: dict = self._state["labels_seen_at"]
                 seen_list: list = self._state["labels_seen"]
+                evidence: dict = self._state["labels_evidence"]
                 for lbl in resp["labels"]:
                     nm = (lbl["name"] or "").strip()
                     if not nm:
@@ -409,6 +417,16 @@ class IntakeMonitor:
                     if key not in seen_at:
                         seen_list.append(nm)
                     seen_at[key] = now
+                    # Capture proof for required gate labels on first sighting,
+                    # cropped to the object's bounding box (just the cup/pill,
+                    # not the whole frame).
+                    if key in required and key not in evidence:
+                        try:
+                            evidence[key] = encode_thumbnail_b64(
+                                frame, bbox=lbl.get("bbox")
+                            )
+                        except Exception:
+                            log.exception("label thumbnail encode failed")
                 matched = required & set(seen_at.keys())
                 self._state["labels_satisfied"] = bool(matched)
                 # Hard gate: if MediaPipe FSM already completed and labels

@@ -16,14 +16,18 @@ import { useSWRConfig } from "swr";
 
 import {
   driveServoPulse,
+  activateDemo,
+  deactivateDemo,
   fetchCalibration,
   fetchDeviceStatus,
   fetchIntakeState,
   fetchSchedules,
   fetchSnapshot,
   homeEjector,
+  isDemoActive,
   isDeviceConfigured,
   manualEject,
+  notifyCaregiver,
   rotateMagazine,
   setCalibration,
   speak,
@@ -53,6 +57,10 @@ import {
   type SlotInfo,
 } from "@/lib/api";
 import { KEYS, useSlots } from "@/lib/swr";
+import {
+  compositeConfidence,
+  signalsFromLive,
+} from "@/lib/intakeConfidence";
 import ConfidenceGauge from "@/components/ConfidenceGauge";
 import FsmJourney from "@/components/FsmJourney";
 import VerdictStamp from "@/components/VerdictStamp";
@@ -102,6 +110,23 @@ function unauthorizedDetections(
   const ne = norm(expected);
   return result.detections.filter(
     (d) => d.confidence >= threshold && norm(d.class_name) !== ne,
+  );
+}
+
+// Pill classes on the tray that DO match the medication scheduled for this
+// round — i.e. the correct pill the patient should actually take. On a "mixed
+// tray" (correct pill + an extra wrong one) we surface these so the operator
+// can tell the patient which pill to pick up rather than scrapping the round.
+function authorizedDetections(
+  result: VerifyPillResult | null,
+  expected: string | null | undefined,
+  threshold = 0.5,
+): PillDetection[] {
+  if (!result || !expected) return [];
+  const norm = (s: string) => s.toLowerCase().replace(/[\s_]/g, "");
+  const ne = norm(expected);
+  return result.detections.filter(
+    (d) => d.confidence >= threshold && norm(d.class_name) === ne,
   );
 }
 
@@ -181,6 +206,18 @@ function wrongPillScript(
   return `${noticed} Let's set it aside and I'll sort the right one out for you. You're safe.`;
 }
 
+// Spoken when the tray has the correct pill AND an extra wrong one. Reassuring:
+// point out the right pill, ask to set the extra aside.
+function mixedTrayScript(
+  expected: string | null | undefined,
+  wrong?: string | null,
+): string {
+  const exp = (expected ?? "").trim() || "your medication";
+  const w = (wrong ?? "").trim();
+  const extra = w ? `the ${w}` : "the extra pill";
+  return `Your ${exp} is there on the tray — that's the one to take. Let's just set ${extra} aside first. Take your time, you're safe.`;
+}
+
 // Maps a swallow-FSM step_name (vision/intake_monitor.py) to its cached
 // static-audio slug. Known steps play from the Supabase cache via
 // speakStatic(); an unknown step falls back to speaking the backend
@@ -224,6 +261,24 @@ export default function DispenserGuidedPage() {
   const { id } = useParams<{ id: string }>();
   const dispenserId = String(id);
   const { mutate } = useSWRConfig();
+
+  // Stage-demo simulator: `?demo=1` (happy) / `?demo=fail` (wrong pill);
+  // `?demo=0` stays off. Activated in the FIRST effect — effects run in
+  // declaration order, so the mock layer is live before any polling
+  // effect's first fetch, and the server-rendered HTML stays demo-free
+  // (no hydration mismatch). Cleanup deactivates on unmount so the mocks
+  // never leak into other pages via client-side navigation.
+  const [demoActive, setDemoActive] = useState(false);
+  useEffect(() => {
+    const d = new URLSearchParams(window.location.search).get("demo");
+    if (d && d !== "0" && !isDemoActive()) {
+      activateDemo(d === "fail" ? "fail" : "happy");
+    }
+    if (isDemoActive()) setDemoActive(true);
+    return () => {
+      deactivateDemo();
+    };
+  }, []);
 
   const { data: slots = [] } = useSlots();
   const [status, setStatus] = useState<DeviceStatus | null>(null);
@@ -555,6 +610,17 @@ export default function DispenserGuidedPage() {
     [verifyResult, currentSlot?.name],
   );
 
+  // The correct pill(s) actually present on the tray for this round.
+  const authorized = useMemo(
+    () => authorizedDetections(verifyResult, currentSlot?.name),
+    [verifyResult, currentSlot?.name],
+  );
+
+  // Mixed tray: the scheduled pill IS on the tray, but so is an unauthorized
+  // one. Rather than scrapping the whole round, the operator removes the wrong
+  // pill and lets the patient take the correct one.
+  const mixedTray = unauthorized.length > 0 && authorized.length > 0;
+
   // Verdict tone per step for the StepBar — a judge scanning the bar sees
   // exactly where a round passed or went wrong. Index: 0 Identify,
   // 1 Dispense (pill verify), 2 Verify (swallow FSM), 3 Log.
@@ -648,11 +714,23 @@ export default function DispenserGuidedPage() {
     if (!isMismatch && !hasExtra) return;
     if (wrongPillSpokenRef.current) return;
     wrongPillSpokenRef.current = true;
+    const wrong = unauthorized[0]?.class_name ?? verifyResult.top.class_name;
+    if (mixedTray) {
+      // Correct pill is present alongside the extra — reassure + guide.
+      void speak(mixedTrayScript(currentSlot?.name, wrong));
+      void notifyCaregiver(
+        `⚠️ PharmGuard: extra pill on tray — ${wrong} found alongside the correct ${currentSlot?.name ?? "?"}. Operator asked to remove the extra; round continues.`,
+      );
+      return;
+    }
     const detected = isMismatch
       ? verifyResult.top.class_name
       : unauthorized[0]?.class_name;
     void speak(wrongPillScript(currentSlot?.name, detected));
-  }, [viewIdx, verifyResult, unauthorized, currentSlot?.name]);
+    void notifyCaregiver(
+      `⚠️ PharmGuard: wrong pill on tray — detected ${detected ?? "unknown"}, expected ${currentSlot?.name ?? "?"}. Pill rejected, operator alerted.`,
+    );
+  }, [viewIdx, verifyResult, unauthorized, mixedTray, currentSlot?.name]);
 
   const cam0Url = streamUrl(0);
   // Cam 1 streams with FaceMesh + Hands overlay so judges can see the
@@ -757,14 +835,38 @@ export default function DispenserGuidedPage() {
       setMsg("No active patient/slot to log against.");
       return;
     }
+    // Simulation honesty guard: never write fake adherence rows. Local UI
+    // state still advances so the demo flow completes naturally.
+    if (demoActive) {
+      const slot = currentSlot.slot;
+      setConfirmedSlots((prev) => {
+        const next = new Set(prev);
+        next.add(slot);
+        return next;
+      });
+      setMsg(
+        pillTaken
+          ? `Slot ${slot} confirmed (simulation — not logged).`
+          : `Slot ${slot} marked missed (simulation — not logged).`,
+      );
+      setOverrideOpen(false);
+      setOverrideNote("");
+      return;
+    }
     return withBusy(pillTaken ? "confirm" : "override", async () => {
       try {
+        // Composite intake confidence: blends the swallow FSM, Rekognition
+        // object evidence, and the (PoC) gaze signal — not just the raw FSM
+        // number. This is the score the no-human-in-loop verdict rests on.
+        const composite = pillTaken
+          ? compositeConfidence(signalsFromLive(intake))
+          : null;
         await createIntakeLog({
           patient_id: activePatient.id,
           slot: currentSlot.slot,
           pill_taken: pillTaken,
           dispenser_id: currentSlot.dispenser_id ?? dispenserId,
-          confidence_score: pillTaken ? intake?.confidence ?? null : null,
+          confidence_score: composite,
         });
         setConfirmedSlots((prev) => {
           const next = new Set(prev);
@@ -778,6 +880,11 @@ export default function DispenserGuidedPage() {
             ? `Slot ${currentSlot.slot} confirmed. Triggering next dispense.`
             : `Slot ${currentSlot.slot} marked missed${overrideNote ? " (note copied to clipboard)." : "."}`,
         );
+        if (!pillTaken) {
+          void notifyCaregiver(
+            `PharmGuard: dose marked missed for slot ${currentSlot.slot}${overrideNote ? ` — ${overrideNote}` : ""}`,
+          );
+        }
         if (overrideNote && !pillTaken && navigator.clipboard) {
           navigator.clipboard
             .writeText(`Slot ${currentSlot.slot} override: ${overrideNote}`)
@@ -803,6 +910,13 @@ export default function DispenserGuidedPage() {
     <div className="-mx-6 px-6">
       {/* Sticky header: step bar + this-pass strip */}
       <div className="sticky top-0 z-30 -mx-6 border-b border-sand-200 bg-sand-50/85 px-6 pb-2 pt-2 backdrop-blur">
+        {demoActive && (
+          <div className="mb-1.5 flex justify-center">
+            <span className="rounded-full border border-status-warning bg-status-warning-bg px-3 py-0.5 text-[11px] font-bold uppercase tracking-[0.18em] text-status-warning">
+              Simulation — no hardware, nothing logged
+            </span>
+          </div>
+        )}
         <StepBar
           stepIdx={stepIdx}
           clock={fmtClock(now)}
@@ -1004,6 +1118,7 @@ export default function DispenserGuidedPage() {
                   {verifyResult && unauthorized.length > 0 && (
                     <UnsafePillAlert
                       unauthorized={unauthorized}
+                      authorized={authorized}
                       expected={currentSlot?.name ?? null}
                     />
                   )}
@@ -1011,13 +1126,48 @@ export default function DispenserGuidedPage() {
                     result={verifyResult}
                     verifying={verifying}
                     expected={currentSlot?.name ?? null}
+                    authorized={authorized}
                   />
                 </div>
               )}
 
               {verifyResult && !verifying && verifyResult.top && (
                 <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
-                  {unauthorized.length > 0 ? (
+                  {mixedTray ? (
+                    <>
+                      <span className="mr-auto text-xs font-medium text-gray-700">
+                        Remove{" "}
+                        <span className="font-semibold text-status-danger">
+                          {unauthorized.map((d) => d.class_name).join(", ")}
+                        </span>{" "}
+                        from the tray, then continue with{" "}
+                        <span className="font-semibold text-status-success">
+                          {currentSlot?.name}
+                        </span>
+                        .
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          currentSlot && onEject(currentSlot.slot)
+                        }
+                        disabled={!currentSlot || busy !== null}
+                        className="inline-flex items-center gap-2 rounded-full border border-sand-300 bg-white px-4 py-2 text-xs font-semibold text-gray-700 transition-colors hover:bg-sand-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Re-eject
+                      </button>
+                      <button
+                        type="button"
+                        onClick={confirmAndVerify}
+                        className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800"
+                      >
+                        Wrong pill removed — verify intake
+                        <span className="rounded bg-white/20 px-1 font-mono text-[10px]">
+                          →
+                        </span>
+                      </button>
+                    </>
+                  ) : unauthorized.length > 0 ? (
                     <>
                       <span className="mr-auto text-xs font-medium text-status-danger">
                         Clear the tray and re-eject before proceeding.
@@ -1108,6 +1258,7 @@ export default function DispenserGuidedPage() {
                   verify={verifyResult}
                   intake={intake}
                   unauthorized={unauthorized}
+                  mixedTray={mixedTray}
                   overrideNote={overrideOpen ? overrideNote : ""}
                 />
               </div>
@@ -1982,6 +2133,7 @@ function IntakeReportCard({
   verify,
   intake,
   unauthorized,
+  mixedTray = false,
   overrideNote,
 }: {
   patient: Patient | null;
@@ -1989,6 +2141,7 @@ function IntakeReportCard({
   verify: VerifyPillResult | null;
   intake: IntakeState | null;
   unauthorized: PillDetection[];
+  mixedTray?: boolean;
   overrideNote: string;
 }) {
   const expected = slot?.name ?? null;
@@ -2012,6 +2165,17 @@ function IntakeReportCard({
     label: string;
     tone: "ok" | "warn" | "fail" | "pending";
   } = (() => {
+    // Mixed tray (correct pill + an extra): not a hard fail — the operator
+    // removes the extra and the patient takes the right pill. Outcome follows
+    // the intake FSM, with the extra noted.
+    if (mixedTray) {
+      if (fsmResult === "passed")
+        return { label: "Intake confirmed · extra removed", tone: "ok" };
+      if (fsmResult === "timeout")
+        return { label: "Intake timed out", tone: "warn" };
+      if (intake?.running) return { label: "Intake in progress", tone: "pending" };
+      return { label: "Remove extra pill", tone: "warn" };
+    }
     if (unauthorized.length > 0) return { label: "Unsafe round", tone: "fail" };
     if (pillMatch === false) return { label: "Wrong pill on tray", tone: "fail" };
     if (fsmResult === "passed" && (pillMatch === true || pillMatch === null))
@@ -2207,11 +2371,21 @@ function IntakeReportCard({
         </div>
       )}
 
-      {/* Unauthorized drug warning */}
+      {/* Unauthorized / extra drug note */}
       {unauthorized.length > 0 && (
-        <div className="mt-3 rounded-xl border border-status-danger bg-white p-3 text-xs">
-          <p className="font-semibold text-status-danger">
-            ⚠ Unauthorized medication on tray during round
+        <div
+          className={`mt-3 rounded-xl border bg-white p-3 text-xs ${
+            mixedTray ? "border-status-warning" : "border-status-danger"
+          }`}
+        >
+          <p
+            className={`font-semibold ${
+              mixedTray ? "text-status-warning" : "text-status-danger"
+            }`}
+          >
+            {mixedTray
+              ? "⚠ Extra pill flagged for removal during round"
+              : "⚠ Unauthorized medication on tray during round"}
           </p>
           <ul className="mt-1 space-y-0.5 text-gray-700">
             {unauthorized.map((d, i) => (
@@ -2273,11 +2447,14 @@ function Kpi({
 
 function UnsafePillAlert({
   unauthorized,
+  authorized,
   expected,
 }: {
   unauthorized: PillDetection[];
+  authorized: PillDetection[];
   expected: string | null;
 }) {
+  const mixed = authorized.length > 0;
   return (
     <div
       role="alert"
@@ -2292,7 +2469,7 @@ function UnsafePillAlert({
         </span>
         <div className="min-w-0 flex-1">
           <p className="text-[10px] font-medium uppercase tracking-wider text-status-danger">
-            Unauthorized medication detected
+            {mixed ? "Extra pill on the tray" : "Unauthorized medication detected"}
           </p>
           <p className="mt-0.5 text-sm font-semibold text-status-danger">
             {unauthorized.length === 1
@@ -2300,11 +2477,43 @@ function UnsafePillAlert({
               : `${unauthorized.length} pills on the tray are not on this round's schedule.`}
           </p>
           <p className="mt-1 text-xs text-gray-700">
-            {expected
+            {mixed && expected
+              ? `Remove the pill${unauthorized.length > 1 ? "s" : ""} below, then the patient can take their ${expected}.`
+              : expected
               ? `Only ${expected} should be dispensed at this slot. Clear the tray and re-eject before letting the patient take anything.`
               : "Clear the tray and re-eject the correct medication."}
           </p>
-          <ul className="mt-3 space-y-1">
+
+          {/* Take this — the correct pill that's present on a mixed tray */}
+          {authorized.length > 0 && (
+            <>
+              <p className="mt-3 text-[10px] font-medium uppercase tracking-wider text-status-success">
+                ✓ Take this — {expected}
+              </p>
+              <ul className="mt-1 space-y-1">
+                {authorized.map((d, i) => (
+                  <li
+                    key={`ok-${d.class_name}-${i}`}
+                    className="flex items-center gap-2 rounded-xl border border-status-success/40 bg-white px-3 py-1.5 text-xs"
+                  >
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-status-success" />
+                    <span className="font-semibold text-gray-900">
+                      {d.class_name}
+                    </span>
+                    <span className="ml-auto font-mono text-gray-500">
+                      {Math.round(d.confidence * 100)}%
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
+          {/* Remove this — the unauthorized pill(s) */}
+          <p className="mt-3 text-[10px] font-medium uppercase tracking-wider text-status-danger">
+            ✗ Remove this
+          </p>
+          <ul className="mt-1 space-y-1">
             {unauthorized.map((d, i) => (
               <li
                 key={`${d.class_name}-${i}`}
@@ -2403,10 +2612,12 @@ function VerifyResultCard({
   result,
   verifying,
   expected,
+  authorized = [],
 }: {
   result: VerifyPillResult | null;
   verifying: boolean;
   expected: string | null;
+  authorized?: PillDetection[];
 }) {
   if (verifying && !result) {
     return (
@@ -2423,12 +2634,23 @@ function VerifyResultCard({
 
   const top = result.top;
   const match = result.match;
+  // Mixed tray: the top (highest-confidence) pill is NOT the expected one, but
+  // the expected pill IS present too. Feature the correct pill and steer the
+  // operator to remove the extra rather than scrap the round.
+  const mixed = match === false && authorized.length > 0;
+  const feature = mixed ? authorized[0] : top;
   const tone =
     match === true
       ? {
           bg: "bg-status-success-bg",
           border: "border-status-success",
           text: "text-status-success",
+        }
+      : mixed
+      ? {
+          bg: "bg-status-warning-bg",
+          border: "border-status-warning",
+          text: "text-status-warning",
         }
       : match === false
       ? {
@@ -2448,14 +2670,20 @@ function VerifyResultCard({
           text: "text-status-warning",
         };
 
-  const confPct = top ? Math.round(top.confidence * 100) : null;
+  const confPct = feature ? Math.round(feature.confidence * 100) : null;
 
   const verdict =
     match === true
       ? {
           tone: "ok" as const,
           headline: "Correct medication",
-          sub: top ? `${top.class_name} · ${confPct}%` : undefined,
+          sub: feature ? `${feature.class_name} · ${confPct}%` : undefined,
+        }
+      : mixed
+      ? {
+          tone: "warn" as const,
+          headline: `Take ${expected} · remove extra`,
+          sub: top ? `Remove ${top.class_name} from the tray` : undefined,
         }
       : match === false
       ? {
@@ -2490,7 +2718,7 @@ function VerifyResultCard({
           )}
           {verdict && (
             <VerdictStamp
-              key={`pill-${verdict.tone}-${top?.class_name ?? "none"}`}
+              key={`pill-${verdict.tone}-${feature?.class_name ?? "none"}`}
               size="lg"
               tone={verdict.tone}
               headline={verdict.headline}
@@ -2507,16 +2735,20 @@ function VerifyResultCard({
             <p
               className={`mt-0.5 truncate font-[family-name:var(--font-display)] text-3xl ${tone.text}`}
             >
-              {top ? top.class_name : "—"}
+              {feature ? feature.class_name : "—"}
             </p>
           </div>
 
-          {top && confPct !== null && (
+          {feature && confPct !== null && (
             <ConfidenceGauge
               value={confPct}
-              label="Detection confidence"
+              label={mixed ? "Correct-pill confidence" : "Detection confidence"}
               tone={
-                match === true ? "ok" : match === false ? "fail" : "neutral"
+                match === true || mixed
+                  ? "ok"
+                  : match === false
+                  ? "fail"
+                  : "neutral"
               }
             />
           )}
@@ -2530,16 +2762,24 @@ function VerifyResultCard({
             </span>
             <span
               className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 ${
-                match === true
+                match === true || mixed
                   ? "bg-status-success-bg text-status-success"
                   : match === false
                   ? "bg-status-danger-bg text-status-danger"
                   : "bg-sand-100 text-gray-700"
               }`}
             >
-              Detected
-              <span className="font-semibold">{top?.class_name ?? "none"}</span>
+              {mixed ? "Take" : "Detected"}
+              <span className="font-semibold">
+                {feature?.class_name ?? "none"}
+              </span>
             </span>
+            {mixed && top && (
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-status-danger-bg px-2.5 py-1 text-status-danger">
+                Remove
+                <span className="font-semibold">{top.class_name}</span>
+              </span>
+            )}
           </div>
 
           <p className="mt-auto font-mono text-[10px] text-gray-400">
@@ -2763,9 +3003,13 @@ function Layer2LabelPanel({
 }) {
   const required = intake?.labels_required ?? [];
   const seenAt = intake?.labels_seen_at ?? {};
+  const evidence = intake?.labels_evidence ?? {};
   const satisfied = intake?.labels_satisfied ?? false;
   const disabled = required.length === 0;
   const nowMs = now.getTime();
+
+  // Click a proof thumbnail to enlarge the captured frame.
+  const [zoom, setZoom] = useState<{ label: string; src: string } | null>(null);
 
   // Layer disabled server-side → one quiet line so the operator can still
   // tell the confirmation rests on MediaPipe alone. The env-var setup hint
@@ -2819,6 +3063,7 @@ function Layer2LabelPanel({
           const tsMs = seenAt[label] ? seenAt[label] * 1000 : null;
           const ageS = tsMs != null ? Math.max(0, (nowMs - tsMs) / 1000) : null;
           const ok = tsMs != null;
+          const proof = evidence[label];
           return (
             <div
               key={label}
@@ -2834,6 +3079,35 @@ function Layer2LabelPanel({
               >
                 {ok ? "✓" : "·"}
               </span>
+              {/* Proof thumbnail — the frame Rekognition saw this label in.
+                  Click to enlarge. Only required gate labels carry one. */}
+              {proof ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setZoom({
+                      label,
+                      src: `data:image/jpeg;base64,${proof}`,
+                    })
+                  }
+                  className="shrink-0 overflow-hidden rounded-md border border-status-success/50 transition-transform hover:scale-105"
+                  title={`Proof: ${label} seen on camera — click to enlarge`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`data:image/jpeg;base64,${proof}`}
+                    alt={`${label} detected frame`}
+                    className="h-8 w-12 object-cover"
+                  />
+                </button>
+              ) : (
+                <span
+                  className="flex h-8 w-12 shrink-0 items-center justify-center rounded-md border border-dashed border-sand-300 text-[9px] text-gray-300"
+                  aria-hidden
+                >
+                  no frame
+                </span>
+              )}
               <span className="flex-1 capitalize text-gray-700">{label}</span>
               <span className="font-mono text-[11px] text-gray-500">
                 {ageS == null
@@ -2846,6 +3120,44 @@ function Layer2LabelPanel({
           );
         })}
       </div>
+
+      {/* Enlarged proof frame */}
+      {zoom && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Proof frame for ${zoom.label}`}
+          onClick={() => setZoom(null)}
+        >
+          <div
+            className="max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-sand-200 px-4 py-2">
+              <p className="text-xs font-semibold capitalize text-gray-900">
+                {zoom.label}{" "}
+                <span className="font-normal text-gray-500">
+                  · detected on camera
+                </span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setZoom(null)}
+                className="rounded-full px-2 py-0.5 text-xs text-gray-500 hover:bg-sand-100"
+              >
+                ✕
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={zoom.src}
+              alt={`${zoom.label} detected frame, enlarged`}
+              className="max-h-[70vh] w-full object-contain bg-black"
+            />
+          </div>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-gray-400">
         <span className="rounded-full bg-sand-100 px-2 py-0.5 font-mono">

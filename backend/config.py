@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     # ── new (Pi-hosted refactor) ──────────────────────────────────────────
     device_api_key: str = ""                        # frontend -> ngrok -> Pi auth header
     backend_headless: bool = False                  # 1 = skip hardware lifespan (dev-mac)
+    # Dev-mac single-webcam path: when 1, the cycle opens ONE local cv2
+    # webcam as the intake camera (cam_b) even in stub mode, so the
+    # dashboard live stream + swallow FSM work without Pi hardware. The
+    # tray camera (cam_a / YOLO) stays unavailable — a Mac has one camera.
+    dev_camera_enabled: bool = False
+    dev_camera_index: int = 0                        # cam_a (tray/YOLO). macOS built-in FaceTime cam = 0
+    # Second physical webcam for cam_b (intake/face/MediaPipe). -1 = share the
+    # single dev_camera_index cam for BOTH logical cameras (legacy behavior).
+    # Set >=0 (e.g. 1) to open a distinct webcam so tray and intake are separate.
+    dev_camera_index_b: int = -1
     # 1 = cycle loop stays idle until /api/device/dispense_now (or another
     # manual-trigger endpoint) fires. 0 = auto-polls medications every
     # poll_interval_s. Default ON so a freshly-started Pi doesn't drain
@@ -118,6 +128,18 @@ class Settings(BaseSettings):
     # Low-latency multilingual model so non-English patient names speak well.
     elevenlabs_model_id: str = "eleven_turbo_v2_5"
     elevenlabs_output_format: str = "mp3_44100_128"
+
+    # ── Telegram caregiver alerts ────────────────────────────────────────
+    # Send-only bot. Both empty = feature off everywhere (notifier soft-fails,
+    # /api/device/notify returns 503, cycle/flag hooks no-op). Get a token from
+    # @BotFather; find chat_id via GET /bot<token>/getUpdates after messaging
+    # the bot once.
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+    # Fire on every failed (non-stub) dispense cycle.
+    telegram_notify_on_failed_cycle: bool = True
+    # Fire one batched message per flag-detector run with new warning/critical flags.
+    telegram_notify_on_flags: bool = True
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
