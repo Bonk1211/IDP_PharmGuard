@@ -85,6 +85,49 @@ Constraints:
 """
 
 
+_SYSTEM_PROMPT_INTAKE_FORENSIC = """\
+You are a behavioural-science analyst writing a SINGLE-EVENT intake honesty
+assessment for the on-duty nurse and pharmacist at the PharmGuard ward. The
+question you answer is narrow and clinical: from the captured signals of ONE
+medication round, is the patient's intake consistent with a GENUINE swallow,
+or are there signs of a FEIGNED / concealed (e.g. palmed, cheeked, mimed)
+intake?
+
+You reason within cognitive science, not as a polygraph. Frame your reasoning
+on these established ideas, and name them where relevant:
+- Procedural vs. declarative memory: a fluent hand-to-mouth motor sequence can
+  be performed (mimed) WITHOUT a real pill. Motor fluency alone is NOT proof of
+  intake — it must be corroborated by independent OBJECT evidence (a pill /
+  cup / bottle label seen during the swallow window).
+- Multi-channel corroboration: genuine intake aligns three INDEPENDENT
+  channels — motor sequence (MediaPipe FSM), object evidence (vision labels),
+  and the tongue/mouth honesty check. Deception shows as a DISSOCIATION between
+  channels: the motor sequence completes but object evidence is absent.
+- Cognitive load & latency: deception and hesitation raise response latency and
+  produce erratic inter-step timing. Smooth, well-paced timing is low-load and
+  consistent with honest, habitual action; long stalls or a reset on the
+  tongue check (pill still visible in the mouth) raise concern.
+- Base rates: most patients are honest. Do NOT over-call deception. A single
+  missing channel in an otherwise clean sequence is "inconclusive", not "lying".
+
+Hard rules:
+- Use ONLY the signals in the payload. NEVER invent timings, labels, or counts.
+- This is decision SUPPORT, not a verdict of guilt. Always hedge: say "consistent
+  with" / "raises concern for", never "the patient lied".
+- Output Markdown ONLY, in this exact shape:
+  `## Intake honesty assessment`
+  One **bold** one-line verdict echoing `deception_risk` (Low / Moderate / High).
+  `### Channel corroboration` — 2-4 bullets: motor sequence, object evidence,
+     tongue/honesty check, timing — each saying what was observed and what it
+     implies cognitively.
+  `### Reasoning` — 2-3 bullets naming the cognitive principle that drives the
+     verdict (e.g. channel dissociation, procedural-without-object).
+  `### Recommended action for staff` — 1-2 bullets (e.g. "visual mouth check
+     before leaving", "re-offer dose", "no action — corroborated").
+- Under ~180 words. Bullets, not paragraphs.
+"""
+
+
 # ──────────────────────────── chat (tool-calling loop) ──────────────────────
 
 def _messages_to_openai(messages: list[dict]) -> list[dict]:
@@ -625,5 +668,165 @@ async def generate_brief(kind: str = "shift_handover") -> dict:
             "n_alerts": len(alerts),
             "n_low_stock": len(low_stock),
             "n_open_flags": len(open_flags),
+        },
+    }
+
+
+# ──────────────────── intake honesty (single-event forensic) ─────────────────
+
+def _intake_deception_signals(snap: dict) -> dict:
+    """Reduce one intake snapshot to grounded honesty signals + a base-rate
+    risk band. Deterministic — the LLM narrates these, it does not invent them.
+
+    The core deception cue is CHANNEL DISSOCIATION: the MediaPipe motor sequence
+    completes (a hand-to-mouth gesture was performed) but no medication OBJECT
+    label (pill/cup/bottle) was corroborated during the swallow window — a mimed,
+    'procedural-without-object' intake. The inverse — motor + object + clean
+    timing — is consistent with a genuine swallow.
+    """
+    result = snap.get("result")
+    motor_complete = bool(snap.get("mediapipe_complete"))
+    labels_seen = [str(x) for x in (snap.get("labels_seen") or [])]
+    labels_required = [str(x) for x in (snap.get("labels_required") or [])]
+    object_evidence = bool(snap.get("labels_satisfied"))
+    confidence = float(snap.get("confidence") or 0.0)
+    hold = float(snap.get("hold_progress") or 0.0)
+
+    started = snap.get("started_at")
+    ended = snap.get("ended_at")
+    duration_s = (
+        round(float(ended) - float(started), 1)
+        if started is not None and ended is not None
+        else None
+    )
+
+    # Per-step latencies (gaps between consecutive passed_at) read cognitive
+    # load: smooth pacing = low load (habitual/honest); long stalls = hesitation.
+    history = snap.get("history") or []
+    step_gaps_s: list[float] = []
+    prev = started
+    for h in history:
+        pa = h.get("passed_at")
+        if pa is not None and prev is not None:
+            step_gaps_s.append(round(float(pa) - float(prev), 1))
+        prev = pa if pa is not None else prev
+    max_gap_s = max(step_gaps_s) if step_gaps_s else None
+
+    # Risk banding — conservative base rate (assume honesty).
+    if motor_complete and not object_evidence:
+        # Gesture present, object absent → the canonical feigned-intake pattern.
+        risk = "high"
+    elif result == "passed" and object_evidence and confidence >= 0.65:
+        risk = "low"
+    elif result == "timeout" or (not motor_complete and not object_evidence):
+        # Sequence never completed — can't corroborate either way.
+        risk = "moderate"
+    else:
+        risk = "moderate"
+
+    # A long inter-step stall nudges a low/none band up one (hesitation).
+    if risk == "low" and max_gap_s is not None and max_gap_s >= 8.0:
+        risk = "moderate"
+
+    return {
+        "result": result,
+        "motor_sequence_complete": motor_complete,
+        "object_evidence_seen": object_evidence,
+        "labels_seen": labels_seen,
+        "labels_required": labels_required,
+        "swallow_confidence": round(confidence, 3),
+        "hold_progress": round(hold, 3),
+        "duration_s": duration_s,
+        "step_count": len(history),
+        "step_gaps_s": step_gaps_s,
+        "max_inter_step_gap_s": max_gap_s,
+        "deception_risk": risk,
+    }
+
+
+async def analyze_intake_honesty(snapshot: dict) -> dict:
+    """Single-shot cognitive-science honesty assessment for ONE intake round.
+
+    `snapshot` is the dashboard's IntakeState (plus optional patient/slot/medication
+    context). Returns {"content_markdown", "deception_risk", "verdict", "signals",
+    "metadata"}. Fails-soft to a deterministic narrative if the LLM is unavailable.
+    """
+    t0 = time.time()
+    signals = _intake_deception_signals(snapshot)
+    risk = signals["deception_risk"]
+
+    context = {
+        "patient_name": snapshot.get("patient_name"),
+        "medication": snapshot.get("medication") or snapshot.get("slot_name"),
+        "slot": snapshot.get("slot"),
+    }
+    payload = {"context": context, "signals": signals}
+
+    user_prompt = (
+        "Captured signals for ONE intake round (DO NOT add or invent anything "
+        "outside this payload). The `deception_risk` band is already computed "
+        "from the rules — echo it, do not override it:\n\n"
+        f"```json\n{json.dumps(payload, default=str, indent=2)}\n```"
+    )
+
+    verdict_line = {
+        "low": "Consistent with a genuine swallow — channels corroborate.",
+        "moderate": "Inconclusive — at least one verification channel is missing.",
+        "high": "Raises concern for feigned intake — motor gesture without object evidence.",
+    }[risk]
+
+    content_md: str
+    used_llm = False
+    try:
+        client = deepseek_client.get_client()
+        resp = await asyncio.to_thread(
+            client.chat.completions.create,
+            model=settings.deepseek_model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT_INTAKE_FORENSIC},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        content_md = (resp.choices[0].message.content or "").strip()
+        used_llm = bool(content_md)
+    except Exception:
+        log.exception("agent.analyze_intake_honesty: DeepSeek call failed")
+        content_md = ""
+
+    if not content_md:
+        # Deterministic fallback so the nurse still gets a grounded report.
+        seen = ", ".join(signals["labels_seen"]) or "none"
+        content_md = (
+            "## Intake honesty assessment\n\n"
+            f"**{verdict_line}**\n\n"
+            "### Channel corroboration\n"
+            f"- Motor sequence: {'completed' if signals['motor_sequence_complete'] else 'not completed'} "
+            f"(swallow confidence {round(signals['swallow_confidence'] * 100)}%).\n"
+            f"- Object evidence: {'present' if signals['object_evidence_seen'] else 'absent'} "
+            f"(labels seen: {seen}).\n"
+            f"- Timing: {signals['duration_s'] if signals['duration_s'] is not None else '—'}s total"
+            f"{f', longest inter-step stall {signals['max_inter_step_gap_s']}s' if signals['max_inter_step_gap_s'] is not None else ''}.\n\n"
+            "### Reasoning\n"
+            "- Verdict follows multi-channel corroboration: a completed motor "
+            "sequence without object evidence is a procedural-without-object "
+            "(mimed) pattern; full corroboration is consistent with honest intake.\n\n"
+            "### Recommended action for staff\n"
+            + (
+                "- Do a direct visual mouth check before the patient leaves.\n"
+                if risk != "low"
+                else "- No action — intake corroborated across channels.\n"
+            )
+            + "\n_(LLM narrator unavailable — deterministic fallback.)_"
+        )
+
+    return {
+        "content_markdown": content_md,
+        "deception_risk": risk,
+        "verdict": verdict_line,
+        "signals": signals,
+        "metadata": {
+            "model": settings.deepseek_model if used_llm else "deterministic-fallback",
+            "latency_ms": int((time.time() - t0) * 1000),
+            "used_llm": used_llm,
         },
     }

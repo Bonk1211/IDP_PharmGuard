@@ -177,6 +177,131 @@ export async function refreshBrief(
   return (await r.json()) as AgentBrief;
 }
 
+// ──────────────────── intake honesty (single-event forensic) ────────────────
+
+export type DeceptionRisk = "low" | "moderate" | "high";
+
+/** Subset of the dashboard IntakeState the honesty analysis reads, plus
+ *  optional patient/medication context. Structural to avoid coupling to
+ *  device.ts. */
+export type IntakeAnalysisSnapshot = {
+  result?: "passed" | "timeout" | "missing_labels" | null;
+  confidence?: number;
+  hold_progress?: number;
+  mediapipe_complete?: boolean;
+  labels_seen?: string[];
+  labels_required?: string[];
+  labels_satisfied?: boolean;
+  history?: { step_index: number; step_name: string; passed_at: number }[];
+  started_at?: number | null;
+  ended_at?: number | null;
+  patient_name?: string | null;
+  medication?: string | null;
+  slot?: number | null;
+};
+
+export type IntakeAnalysis = {
+  content_markdown: string;
+  deception_risk: DeceptionRisk;
+  verdict: string;
+  signals: Record<string, unknown>;
+  metadata: { model: string; latency_ms: number; used_llm: boolean };
+};
+
+const VERDICT_LINE: Record<DeceptionRisk, string> = {
+  low: "Consistent with a genuine swallow — channels corroborate.",
+  moderate: "Inconclusive — at least one verification channel is missing.",
+  high: "Raises concern for feigned intake — motor gesture without object evidence.",
+};
+
+/** Client-side mirror of the backend `_intake_deception_signals` banding, so the
+ *  demo / offline path produces the same grounded report without the Pi. */
+function localIntakeAnalysis(snap: IntakeAnalysisSnapshot): IntakeAnalysis {
+  const motor = Boolean(snap.mediapipe_complete);
+  const objectEvidence = Boolean(snap.labels_satisfied);
+  const confidence = snap.confidence ?? 0;
+  const labelsSeen = snap.labels_seen ?? [];
+
+  const started = snap.started_at ?? null;
+  const ended = snap.ended_at ?? null;
+  const durationS =
+    started !== null && ended !== null ? Math.round((ended - started) * 10) / 10 : null;
+
+  const gaps: number[] = [];
+  let prev = started;
+  for (const h of snap.history ?? []) {
+    if (h.passed_at != null && prev != null) {
+      gaps.push(Math.round((h.passed_at - prev) * 10) / 10);
+    }
+    prev = h.passed_at ?? prev;
+  }
+  const maxGap = gaps.length ? Math.max(...gaps) : null;
+
+  let risk: DeceptionRisk;
+  if (motor && !objectEvidence) risk = "high";
+  else if (snap.result === "passed" && objectEvidence && confidence >= 0.65) risk = "low";
+  else if (snap.result === "timeout" || (!motor && !objectEvidence)) risk = "moderate";
+  else risk = "moderate";
+  if (risk === "low" && maxGap !== null && maxGap >= 8) risk = "moderate";
+
+  const seen = labelsSeen.join(", ") || "none";
+  const content_markdown =
+    "## Intake honesty assessment\n\n" +
+    `**${VERDICT_LINE[risk]}**\n\n` +
+    "### Channel corroboration\n" +
+    `- Motor sequence: ${motor ? "completed" : "not completed"} ` +
+    `(swallow confidence ${Math.round(confidence * 100)}%).\n` +
+    `- Object evidence: ${objectEvidence ? "present" : "absent"} (labels seen: ${seen}).\n` +
+    `- Timing: ${durationS ?? "—"}s total` +
+    `${maxGap !== null ? `, longest inter-step stall ${maxGap}s` : ""}.\n\n` +
+    "### Reasoning\n" +
+    "- Multi-channel corroboration: a completed motor sequence without object " +
+    "evidence is a procedural-without-object (mimed) pattern; full corroboration " +
+    "is consistent with honest intake.\n\n" +
+    "### Recommended action for staff\n" +
+    (risk !== "low"
+      ? "- Do a direct visual mouth check before the patient leaves.\n"
+      : "- No action — intake corroborated across channels.\n");
+
+  return {
+    content_markdown,
+    deception_risk: risk,
+    verdict: VERDICT_LINE[risk],
+    signals: {
+      result: snap.result ?? null,
+      motor_sequence_complete: motor,
+      object_evidence_seen: objectEvidence,
+      labels_seen: labelsSeen,
+      swallow_confidence: Math.round(confidence * 1000) / 1000,
+      duration_s: durationS,
+      max_inter_step_gap_s: maxGap,
+      deception_risk: risk,
+    },
+    metadata: { model: "deterministic-local", latency_ms: 0, used_llm: false },
+  };
+}
+
+/** Cognitive-science honesty assessment for ONE intake round. Posts the snapshot
+ *  to the Pi's LLM endpoint; falls back to a local deterministic report when the
+ *  agent isn't configured (demo) or the call fails. */
+export async function analyzeIntake(
+  snapshot: IntakeAnalysisSnapshot,
+): Promise<IntakeAnalysis> {
+  if (!isAgentConfigured()) return localIntakeAnalysis(snapshot);
+  try {
+    const r = await fetch(`${baseUrl}/api/agent/intake-analysis`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify(snapshot),
+    });
+    if (!r.ok) throw new Error(await safeError(r));
+    return (await r.json()) as IntakeAnalysis;
+  } catch (err) {
+    console.warn("[agent] intake-analysis fell back to local:", err);
+    return localIntakeAnalysis(snapshot);
+  }
+}
+
 async function safeError(r: Response): Promise<string> {
   try {
     const j = await r.json();

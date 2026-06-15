@@ -22,7 +22,12 @@ from pydantic import BaseModel, Field
 
 from core.security import verify_device_api_key
 from db.base import get_supabase
-from services.agent import chat, chat_stream, generate_brief
+from services.agent import (
+    analyze_intake_honesty,
+    chat,
+    chat_stream,
+    generate_brief,
+)
 from services.flag_detector import detect_and_persist_flags
 
 log = logging.getLogger(__name__)
@@ -134,6 +139,51 @@ async def brief_endpoint(kind: str = Query(default="on_demand")):
         # Still return the generated brief even if persistence failed.
         row = payload
     return row
+
+
+class IntakeAnalysisRequest(BaseModel):
+    """One intake round's captured signals, forwarded from the dashboard.
+
+    Mirrors the dashboard IntakeState (subset) plus optional patient/medication
+    context. Extra keys are ignored — only the honesty signals are read.
+    """
+    model_config = {"extra": "allow"}
+
+    result: str | None = None
+    confidence: float | None = None
+    hold_progress: float | None = None
+    mediapipe_complete: bool | None = None
+    labels_seen: list[str] = Field(default_factory=list)
+    labels_required: list[str] = Field(default_factory=list)
+    labels_satisfied: bool | None = None
+    history: list[dict] = Field(default_factory=list)
+    started_at: float | None = None
+    ended_at: float | None = None
+    patient_name: str | None = None
+    medication: str | None = None
+    slot: int | None = None
+
+
+@router.post("/intake-analysis")
+async def intake_analysis_endpoint(body: IntakeAnalysisRequest):
+    """Single-event cognitive-science honesty assessment for ONE intake round.
+
+    Reads only from the posted snapshot (no DB). Returns a markdown report plus
+    a `deception_risk` band the dashboard renders at the logging step.
+    """
+    snapshot = body.model_dump()
+    try:
+        result = await asyncio.wait_for(
+            analyze_intake_honesty(snapshot), timeout=60.0
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="analysis took too long (>60 s)")
+    except RuntimeError as exc:
+        # deepseek_client.get_client raises this when DEEPSEEK_API_KEY is unset —
+        # but analyze_intake_honesty catches it internally and falls back, so this
+        # is defensive only.
+        raise HTTPException(status_code=503, detail=str(exc))
+    return result
 
 
 @router.post("/flags/detect")
