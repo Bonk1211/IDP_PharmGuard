@@ -23,6 +23,8 @@ import type {
   LogRecord,
   PillDetection,
   RotateResult,
+  FaceTrackResult,
+  PillDetectResult,
   VerifyFaceResult,
   VerifyPillResult,
 } from "./device";
@@ -210,7 +212,76 @@ export async function demoVerifyPill(expected?: string): Promise<VerifyPillResul
   };
 }
 
+// Live pill verdict sim — mirrors demoVerifyPill but without a snapshot, as
+// if read from the annotated cam-0 stream's latest YOLO pass each poll.
+export function demoFetchPillDetect(expected?: string): PillDetectResult {
+  const fail = scenario === "fail";
+  if (fail) {
+    const wrong: PillDetection = {
+      class_name: "Lomide_capsule",
+      confidence: 0.92,
+      bbox: [180, 140, 460, 360],
+    };
+    const correct: PillDetection = {
+      class_name: expected ?? "Chloramine",
+      confidence: 0.88,
+      bbox: [150, 380, 320, 520],
+    };
+    return {
+      ok: true,
+      stale: false,
+      expected: expected ?? null,
+      top: wrong,
+      match: expected ? false : null,
+      detections: [wrong, correct],
+      age_ms: 120,
+    };
+  }
+  const className = expected ?? "Lomide_capsule";
+  const top: PillDetection = {
+    class_name: className,
+    confidence: 0.93,
+    bbox: [180, 140, 460, 360],
+  };
+  return {
+    ok: true,
+    stale: false,
+    expected: expected ?? null,
+    top,
+    match: expected ? true : null,
+    detections: [top],
+    age_ms: 120,
+  };
+}
+
+// Auto-verify face tracking sim. First ~1.2s the patient is "stepping in"
+// (face seen, not centred); after that the face holds centred so the guided
+// page's dwell timer counts up and fires demoVerifyFace hands-free.
+let faceTrackStartedAt: number | null = null;
+
+export function demoFetchFaceTrack(): FaceTrackResult {
+  if (faceTrackStartedAt === null) faceTrackStartedAt = Date.now();
+  const elapsed = (Date.now() - faceTrackStartedAt) / 1000;
+  if (elapsed < 1.2) {
+    return {
+      ok: true,
+      face: true,
+      centered: false,
+      hint: "closer",
+      bbox: { Left: 0.2, Top: 0.18, Width: 0.22, Height: 0.32 },
+    };
+  }
+  return {
+    ok: true,
+    face: true,
+    centered: true,
+    hint: "hold",
+    bbox: { Left: 0.32, Top: 0.2, Width: 0.36, Height: 0.5 },
+  };
+}
+
 export async function demoVerifyFace(patientId: number): Promise<VerifyFaceResult> {
+  faceTrackStartedAt = null; // reset dwell for any re-verify
   await sleep(900);
   // Face verify succeeds in BOTH scenarios — the fail act is about the pill.
   return {

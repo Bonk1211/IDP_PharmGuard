@@ -37,8 +37,11 @@ import {
   testEjector,
   triggerDispense,
   verifyFace,
+  fetchFaceTrack,
+  fetchPillDetect,
   verifyPill,
   type CalibrationInfo,
+  type FaceTrackResult,
   type PulseResult,
   type StaticTtsSlug,
   type DeviceStatus,
@@ -676,11 +679,55 @@ export default function DispenserGuidedPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [intakeSuccessOpen]);
 
-  // While the Verify card is on screen, keep re-running the pill
-  // detector so the tray-status strip reflects whether the pill is
-  // still on the tray (taken vs. forgotten). Skipped if no expected
-  // medication is known yet, if a verify call is already in flight,
-  // or if hardware isn't configured.
+  // Dispense step (1): live pill verdict read off the cam-0 annotated
+  // stream's latest YOLO pass (fetchPillDetect — no snapshot, no second
+  // inference) so identification tracks the live tray in real time instead
+  // of a frozen captured frame. The annotated cam-0 tile shown on this step
+  // is what feeds the detection cache this poll reads.
+  useEffect(() => {
+    if (viewIdx !== 1) return;
+    if (!configured) return;
+    const expected = currentSlot?.name ?? undefined;
+    let alive = true;
+    let inFlight = false;
+    async function tick() {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const d = await fetchPillDetect(expected);
+        if (!alive) return;
+        // Stale = the annotated cam-0 stream isn't feeding yet; keep the last
+        // good verdict on screen rather than flashing "no pill".
+        if (d.stale && !d.top) return;
+        // Map the live detect result into the VerifyPillResult shape the
+        // card / strip / unauthorized memos already consume.
+        setVerifyResult({
+          ok: d.ok,
+          status: 200,
+          expected: d.expected,
+          top: d.top,
+          match: d.match,
+          detections: d.detections,
+          snapshot_b64: null,
+          latency_ms: d.age_ms ?? undefined,
+        });
+        setVerifying(false);
+      } finally {
+        inFlight = false;
+      }
+    }
+    tick();
+    const id = setInterval(tick, 800);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [viewIdx, configured, currentSlot?.name]);
+
+  // Verify step (2): the cam-0 stream isn't on screen here (cam 1 is), so
+  // the live detection cache goes stale. Fall back to a periodic one-shot
+  // verifyPill so the tray-status strip still reflects whether the pill is
+  // still sitting on the tray (taken vs. forgotten).
   useEffect(() => {
     if (viewIdx !== 2) return;
     if (!configured) return;
@@ -733,7 +780,13 @@ export default function DispenserGuidedPage() {
     );
   }, [viewIdx, verifyResult, unauthorized, mixedTray, currentSlot?.name]);
 
-  const cam0Url = streamUrl(0);
+  // Cam 0 streams with live YOLO pill_detector boxes, coloured by the
+  // expected medication (green = correct, red = wrong) so the tray reads
+  // safe/unsafe in real time — no frozen screenshot.
+  const cam0Url = streamUrl(0, {
+    annotate: true,
+    expected: currentSlot?.name ?? undefined,
+  });
   // Cam 1 streams with FaceMesh + Hands overlay so judges can see the
   // MediaPipe FSM tracking the patient in real time.
   const cam1Url = streamUrl(1, { annotate: true });
@@ -781,26 +834,11 @@ export default function DispenserGuidedPage() {
       const expected = activeSlots.find((s) => s.slot === slot)?.name ?? undefined;
       void speak(dispensedScript(expected));
       wrongPillSpokenRef.current = false;
+      // Verdict now comes from the live cam-0 detect poll (see the
+      // fetchPillDetect effect) reading the annotated stream in real time —
+      // no one-shot snapshot. Show the spinner until the first live reading.
       setVerifyResult(null);
       setVerifying(true);
-      setTimeout(() => {
-        verifyPill(expected)
-          .then((vr) => {
-            setVerifyResult(vr);
-            if (vr.ok && vr.top) {
-              setMsg(
-                vr.match === true
-                  ? `Verified: ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}% confidence).`
-                  : vr.match === false
-                  ? `Mismatch: detected ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}%), expected ${expected}.`
-                  : `Detected: ${vr.top.class_name} (${Math.round(vr.top.confidence * 100)}%).`,
-              );
-            } else {
-              setMsg(`Verification failed: ${vr.error ?? "no detection"}.`);
-            }
-          })
-          .finally(() => setVerifying(false));
-      }, 600);
     } else {
       setMsg(`Eject failed: ${r.error ?? r.status}`);
     }
@@ -1508,6 +1546,75 @@ function FaceVerifySection({
   const canVerify =
     !!patient && hasReference && configured && !verifying && !verified;
 
+  // ── Hands-free auto-verify ──────────────────────────────────────────
+  // Poll the cheap on-device face tracker (Haar cascade, no AWS) while the
+  // patient is being framed. Once a centred face is held for AUTO_DWELL_MS,
+  // fire onVerify() (the real Rekognition compare) automatically — the
+  // operator never has to tap "Verify face". Manual button stays as a
+  // fallback / retry path.
+  const AUTO_DWELL_MS = 5000;
+  const gateActive =
+    !!patient && hasReference && configured && !verifying && !verified && !result;
+  const [track, setTrack] = useState<FaceTrackResult | null>(null);
+  const [dwell, setDwell] = useState(0); // 0..1 centred-hold progress
+  const centeredSinceRef = useRef<number | null>(null);
+  const firedRef = useRef(false);
+  const onVerifyRef = useRef(onVerify);
+  onVerifyRef.current = onVerify;
+
+  useEffect(() => {
+    if (!gateActive) {
+      centeredSinceRef.current = null;
+      firedRef.current = false;
+      setTrack(null);
+      setDwell(0);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const t = await fetchFaceTrack(1);
+      if (cancelled) return;
+      setTrack(t);
+      if (t.centered) {
+        if (centeredSinceRef.current === null)
+          centeredSinceRef.current = Date.now();
+        const held = Date.now() - centeredSinceRef.current;
+        const p = Math.min(1, held / AUTO_DWELL_MS);
+        setDwell(p);
+        if (p >= 1 && !firedRef.current) {
+          firedRef.current = true;
+          onVerifyRef.current();
+        }
+      } else {
+        centeredSinceRef.current = null;
+        setDwell(0);
+      }
+    };
+    void tick();
+    const id = setInterval(tick, 250);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [gateActive]);
+
+  const dwellSecsLeft = Math.max(0, Math.ceil((1 - dwell) * (AUTO_DWELL_MS / 1000)));
+  const HINT_TEXT: Record<NonNullable<FaceTrackResult["hint"]>, string> = {
+    hold: "Hold still…",
+    closer: "Move a little closer",
+    left: "Move left",
+    right: "Move right",
+    up: "Move up",
+    down: "Move down",
+  };
+  let autoCaption: string;
+  if (!gateActive) autoCaption = "";
+  else if (!track || !track.face) autoCaption = "Step into the frame";
+  else if (track.centered)
+    autoCaption =
+      dwell >= 1 ? "Verifying…" : `Hold still… ${dwellSecsLeft}s`;
+  else autoCaption = track.hint ? HINT_TEXT[track.hint] : "Centre your face";
+
   return (
     <div className="rounded-2xl border border-sand-200 bg-white p-4">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -1626,12 +1733,70 @@ function FaceVerifySection({
                 )}
               </>
             ) : cam1Url ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={cam1Url}
-                alt="Cam 1 live"
-                className="h-full w-full object-cover"
-              />
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={cam1Url}
+                  alt="Cam 1 live"
+                  className="h-full w-full object-cover"
+                />
+                {/* Hands-free auto-verify overlay: live face box, centre
+                    target, and a dwell ring that fills as the patient holds
+                    still. Verify fires automatically when the ring completes. */}
+                {gateActive && (
+                  <>
+                    {track?.bbox && (
+                      <div
+                        className={`pointer-events-none absolute rounded-md border-2 transition-colors ${
+                          track.centered
+                            ? "border-status-success"
+                            : "border-white/70"
+                        }`}
+                        style={{
+                          left: `${track.bbox.Left * 100}%`,
+                          top: `${track.bbox.Top * 100}%`,
+                          width: `${track.bbox.Width * 100}%`,
+                          height: `${track.bbox.Height * 100}%`,
+                        }}
+                      />
+                    )}
+                    {/* centre target zone */}
+                    <div
+                      className={`pointer-events-none absolute left-1/2 top-1/2 h-[44%] w-[36%] -translate-x-1/2 -translate-y-1/2 rounded-2xl border-2 border-dashed transition-colors ${
+                        track?.centered ? "border-status-success/80" : "border-white/40"
+                      }`}
+                    />
+                    {/* dwell ring */}
+                    <div className="pointer-events-none absolute left-1/2 top-3 -translate-x-1/2">
+                      <div className="relative h-12 w-12">
+                        <svg viewBox="0 0 36 36" className="h-12 w-12 -rotate-90">
+                          <circle
+                            cx="18" cy="18" r="16" fill="none"
+                            stroke="rgba(255,255,255,0.25)" strokeWidth="3"
+                          />
+                          <circle
+                            cx="18" cy="18" r="16" fill="none"
+                            stroke="currentColor" strokeWidth="3" strokeLinecap="round"
+                            className={track?.centered ? "text-status-success" : "text-white/60"}
+                            strokeDasharray={`${dwell * 100.5} 100.5`}
+                          />
+                        </svg>
+                        <span className="absolute inset-0 flex items-center justify-center text-[11px] font-bold text-white">
+                          {dwell >= 1 ? "✓" : dwellSecsLeft}
+                        </span>
+                      </div>
+                    </div>
+                    {/* caption pill */}
+                    <span
+                      className={`pointer-events-none absolute bottom-2 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-full px-3 py-1 text-[11px] font-semibold text-white ${
+                        track?.centered ? "bg-status-success/90" : "bg-black/70"
+                      }`}
+                    >
+                      {autoCaption}
+                    </span>
+                  </>
+                )}
+              </>
             ) : (
               <div className="flex h-full items-center justify-center px-4 text-center text-[11px] text-gray-400">
                 Cam 1 unavailable — check device config.
@@ -1721,10 +1886,14 @@ function FaceVerifySection({
             disabled={!canVerify}
             className="inline-flex items-center gap-2 rounded-full border border-olive-300 bg-olive-700 px-5 py-2 text-xs font-semibold text-white transition-colors hover:bg-olive-800 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {verifying ? "Verifying…" : "Verify face"}
+            {verifying
+              ? "Verifying…"
+              : gateActive
+              ? "Verify now"
+              : "Verify face"}
             {!verifying && (
               <span className="rounded bg-white/20 px-1 font-mono text-[10px]">
-                AWS
+                {gateActive ? "AUTO" : "AWS"}
               </span>
             )}
           </button>
@@ -2628,7 +2797,7 @@ function VerifyResultCard({
       <div className="flex items-center gap-3 rounded-2xl border border-sand-200 bg-white p-4">
         <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-olive-500" />
         <p className="text-xs text-gray-700">
-          Running pill identifier on the tray frame…
+          Watching the tray cam for the pill…
         </p>
       </div>
     );
@@ -2705,32 +2874,36 @@ function VerifyResultCard({
 
   return (
     <div className={`rounded-2xl border ${tone.border} ${tone.bg} p-4`}>
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-[3fr_2fr]">
-        {/* Annotated tray snapshot — the evidence, with the verdict on top */}
-        <div className="relative min-h-44 overflow-hidden rounded-xl border border-sand-200 bg-black">
-          {result.snapshot_b64 ? (
-            /* eslint-disable-next-line @next/next/no-img-element */
-            <img
-              src={`data:image/jpeg;base64,${result.snapshot_b64}`}
-              alt="Annotated tray snapshot"
-              className="h-full w-full object-contain"
-            />
-          ) : (
-            <div className="flex h-40 w-full items-center justify-center text-xs text-gray-400">
-              No snapshot
-            </div>
-          )}
-          {verdict && (
-            <VerdictStamp
-              key={`pill-${verdict.tone}-${feature?.class_name ?? "none"}`}
-              size="lg"
-              tone={verdict.tone}
-              headline={verdict.headline}
-              sub={verdict.sub}
-            />
-          )}
+      {/* Verdict reads off the LIVE annotated tray stream shown in the cam
+          tile above (real-time YOLO boxes, green=correct / red=wrong) — this
+          card is the verdict + evidence breakdown, not a frozen screenshot. */}
+      {verdict && (
+        <div
+          className={`mb-3 flex items-start gap-2 rounded-xl border ${tone.border} bg-white/60 px-3 py-2`}
+        >
+          <span
+            className={`mt-0.5 inline-flex h-5 items-center gap-1 rounded-full px-2 text-[10px] font-bold uppercase tracking-wide ${
+              verdict.tone === "ok"
+                ? "bg-status-success-bg text-status-success"
+                : verdict.tone === "fail"
+                ? "bg-status-danger-bg text-status-danger"
+                : "bg-status-warning-bg text-status-warning"
+            }`}
+          >
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+            Live
+          </span>
+          <div>
+            <p className={`text-sm font-semibold ${tone.text}`}>
+              {verdict.headline}
+            </p>
+            {verdict.sub && (
+              <p className="text-xs text-gray-600">{verdict.sub}</p>
+            )}
+          </div>
         </div>
-
+      )}
+      <div className="grid grid-cols-1 gap-4">
         <div className="flex flex-col gap-3">
           <div>
             <p className="text-[10px] font-medium uppercase tracking-wider text-gray-500">

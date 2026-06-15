@@ -189,13 +189,18 @@ export async function resetDevice(): Promise<{ ok: boolean; status: number }> {
  * SECURITY NOTE: the API key is in the URL; it'll appear in browser
  * history + ngrok logs. Acceptable for a dev/demo dashboard.
  */
-export function streamUrl(camNum: 0 | 1, opts?: { annotate?: boolean }): string | null {
+export function streamUrl(
+  camNum: 0 | 1,
+  opts?: { annotate?: boolean; expected?: string | null },
+): string | null {
   // Demo mode: no MJPEG stream — the page falls back to its no-stream
   // placeholder; synthetic frames come through snapshots/verify results.
   if (demo.isDemoActive()) return null;
   if (!isDeviceConfigured()) return null;
   const params = new URLSearchParams({ key: apiKey });
   if (opts?.annotate) params.set("annotate", "1");
+  // cam 0: colour the live YOLO boxes by correctness (green=expected pill).
+  if (opts?.expected) params.set("expected", opts.expected);
   return `${baseUrl}/api/device/stream/${camNum}?${params.toString()}`;
 }
 
@@ -345,6 +350,43 @@ export type VerifyFaceResult = {
   latency_ms?: number;
 };
 
+export type FaceTrackResult = {
+  ok: boolean;
+  face: boolean;                  // a face was detected this frame
+  centered: boolean;             // detected face is framed in the centre zone
+  hint?: "hold" | "closer" | "left" | "right" | "up" | "down";
+  bbox?: FaceBoundingBox | null; // normalized largest-face box
+};
+
+/**
+ * Cheap on-device face-position probe (Haar cascade, no AWS). Polled while
+ * the patient is being framed; the caller times how long `centered` stays
+ * true and then auto-fires verifyFace(). Returns a no-face result without
+ * the network when device is unconfigured / in demo mode.
+ */
+export async function fetchFaceTrack(cam: 0 | 1 = 1): Promise<FaceTrackResult> {
+  const none: FaceTrackResult = { ok: false, face: false, centered: false };
+  if (demo.isDemoActive()) return demo.demoFetchFaceTrack();
+  if (!isDeviceConfigured()) return none;
+  try {
+    const r = await fetch(`${baseUrl}/api/device/face_track?cam=${cam}`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return none;
+    const d = await r.json();
+    return {
+      ok: !!d.ok,
+      face: !!d.face,
+      centered: !!d.centered,
+      hint: d.hint ?? undefined,
+      bbox: d.bbox ?? null,
+    };
+  } catch {
+    return none;
+  }
+}
+
 /**
  * Compare the patient's reference photo (patients.face_reference_url) against
  * a live cam_b frame via AWS Rekognition. Returns an empty result without
@@ -424,6 +466,59 @@ export async function verifyPill(expected?: string): Promise<VerifyPillResult> {
       detections: Array.isArray(data?.detections) ? data.detections : [],
       snapshot_b64: data?.snapshot_b64 ?? null,
       latency_ms: data?.latency_ms,
+    };
+  } catch {
+    return empty;
+  }
+}
+
+export type PillDetectResult = {
+  ok: boolean;
+  stale: boolean;                 // cam-0 annotated stream not currently feeding
+  expected: string | null;
+  top: PillDetection | null;
+  match: boolean | null;
+  detections: PillDetection[];
+  age_ms: number | null;
+};
+
+/**
+ * Live pill verdict read from the cam-0 annotated stream's latest YOLO pass
+ * (no fresh inference, no base64 snapshot). Poll this while showing the
+ * annotated MJPEG stream so identification tracks the live tray in real
+ * time. Requires the cam-0 `?annotate=1` stream to be on screen.
+ */
+export async function fetchPillDetect(
+  expected?: string,
+): Promise<PillDetectResult> {
+  const empty: PillDetectResult = {
+    ok: false,
+    stale: true,
+    expected: expected ?? null,
+    top: null,
+    match: null,
+    detections: [],
+    age_ms: null,
+  };
+  if (demo.isDemoActive()) return demo.demoFetchPillDetect(expected);
+  if (!isDeviceConfigured()) return empty;
+  try {
+    const q = new URLSearchParams();
+    if (expected) q.set("expected", expected);
+    const r = await fetch(`${baseUrl}/api/device/pill_detect?${q.toString()}`, {
+      headers: authHeaders(),
+      cache: "no-store",
+    });
+    if (!r.ok) return empty;
+    const data = await r.json();
+    return {
+      ok: !!data?.ok,
+      stale: !!data?.stale,
+      expected: data?.expected ?? expected ?? null,
+      top: data?.top ?? null,
+      match: data?.match ?? null,
+      detections: Array.isArray(data?.detections) ? data.detections : [],
+      age_ms: data?.age_ms ?? null,
     };
   } catch {
     return empty;
