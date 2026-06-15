@@ -238,6 +238,61 @@ const INTAKE_STEP_SLUG: Record<string, StaticTtsSlug> = {
   DONE: "intake-done",
 };
 
+// Real-time intake coaching/anti-faking. While the swallow FSM is running we
+// watch for CHANNEL DISSOCIATION — the motor sequence completes (hand-to-mouth
+// gesture performed) but NO medication object (pill/cup/bottle) is confirmed on
+// camera. That is the canonical feigned-intake pattern (a mimed,
+// procedural-without-object swallow). When detected we (a) warn the operator on
+// screen and (b) speak an ElevenLabs line coaching the patient to take the dose
+// properly, so a faked round is caught live instead of only at the log step.
+type LiveCoach = {
+  key: string;
+  severity: "warn" | "nudge";
+  headline: string;
+  line: string; // spoken to the patient (ElevenLabs)
+  ui: string; // operator-facing explanation
+};
+
+function computeLiveCoach(intake: IntakeState | null): LiveCoach | null {
+  if (!intake?.running || intake.result !== null) return null;
+  const motorDone = Boolean(intake.mediapipe_complete);
+  const objectSeen = Boolean(intake.labels_satisfied);
+  const needsObject = (intake.labels_required ?? []).length > 0;
+  const lastStep =
+    intake.total_steps > 0 && (intake.step_index ?? 0) >= intake.total_steps - 1;
+
+  // Strong signal: gesture complete, no pill/cup object → likely feigned.
+  if (motorDone && needsObject && !objectSeen) {
+    return {
+      key: "feign",
+      severity: "warn",
+      headline: "Possible feigned intake",
+      line:
+        "I can see the hand-to-mouth motion, but I can't confirm the pill " +
+        "actually went in. Please place the pill on your tongue and show it " +
+        "to the camera, then swallow it with a sip of water so I can verify " +
+        "you've taken your medication.",
+      ui:
+        "Motor gesture completed but no pill/cup confirmed on camera — the " +
+        "swallow can't be verified (channel dissociation). Coaching the " +
+        "patient to take the dose properly.",
+    };
+  }
+  // Softer nudge: at the final step still waiting on object evidence.
+  if (lastStep && needsObject && !objectSeen) {
+    return {
+      key: "nudge",
+      severity: "nudge",
+      headline: "Show the pill to verify",
+      line:
+        "Almost there. Hold the pill up to the camera and take it with a sip " +
+        "of water so I can confirm your dose.",
+      ui: "Waiting on visual confirmation of the pill/cup before intake can pass.",
+    };
+  }
+  return null;
+}
+
 type SlotState = "ready" | "ejected" | "low" | "empty" | "locked";
 
 function deriveSlotState(slot: SlotInfo, ejectedSlot: number | null): SlotState {
@@ -317,6 +372,8 @@ export default function DispenserGuidedPage() {
   const [analysis, setAnalysis] = useState<IntakeAnalysis | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
   const analysisRoundRef = useRef<number | null>(null);
+  // Real-time anti-faking coach shown/spoken while the swallow FSM runs.
+  const [liveCoach, setLiveCoach] = useState<LiveCoach | null>(null);
   const [verifyResult, setVerifyResult] = useState<VerifyPillResult | null>(null);
   const [verifying, setVerifying] = useState<boolean>(false);
   // Layer-1 face verify (step 0 gate). faceVerified must be true before
@@ -408,6 +465,35 @@ export default function DispenserGuidedPage() {
       void speak(intake.instruction || "Follow along with me, you're doing great.");
     }
   }, [intake?.running, intake?.step_index, intake?.step_name, intake?.instruction]);
+
+  // Real-time anti-faking coach. Recomputed from the live FSM each poll; stable
+  // identity while the same coaching persists (keyed by `key`).
+  const liveCoachNow = useMemo(
+    () => computeLiveCoach(intake),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      intake?.running,
+      intake?.result,
+      intake?.mediapipe_complete,
+      intake?.labels_satisfied,
+      intake?.step_index,
+      intake?.total_steps,
+    ],
+  );
+
+  // Drive the banner + ElevenLabs voice off the live coach. Speak once when a
+  // coaching state activates, then re-prompt every ~9 s while it persists, so a
+  // faking simulator is continuously warned and guided to take the dose.
+  useEffect(() => {
+    setLiveCoach(liveCoachNow);
+    if (!liveCoachNow) return;
+    void speak(liveCoachNow.line);
+    const id = window.setInterval(() => {
+      void speak(liveCoachNow.line);
+    }, 9000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveCoachNow?.key]);
 
   // Show the "medication taken" modal once per round, the moment the swallow
   // FSM passes. Re-arm the latch when a fresh watch starts (running with no
@@ -1290,6 +1376,7 @@ export default function DispenserGuidedPage() {
                 eyebrow="Verify"
                 title="AI is watching the patient take the pill."
               />
+              <LiveCoachBanner coach={liveCoach} />
               <div className="mb-4">
                 <FsmJourney intake={intake} />
               </div>
@@ -2327,6 +2414,53 @@ function IntakeSuccessModal({
             Go to logging →
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────── LiveCoachBanner ────────────────────────────────────
+// Real-time anti-faking banner during the Verify step. Mirrors the voice line
+// that's being spoken (ElevenLabs) and explicitly flags a suspected feigned
+// intake to the operator/simulator.
+
+function LiveCoachBanner({ coach }: { coach: LiveCoach | null }) {
+  if (!coach) return null;
+  const warn = coach.severity === "warn";
+  const tone = warn
+    ? {
+        border: "border-status-danger",
+        bg: "bg-status-danger-bg",
+        text: "text-status-danger",
+        icon: "⚠",
+      }
+    : {
+        border: "border-status-warning",
+        bg: "bg-status-warning-bg",
+        text: "text-status-warning",
+        icon: "!",
+      };
+  return (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className={`mb-4 flex items-start gap-3 rounded-2xl border ${tone.border} ${tone.bg} p-4`}
+    >
+      <span
+        className={`mt-0.5 flex h-7 w-7 shrink-0 animate-pulse items-center justify-center rounded-full bg-white text-base font-bold ${tone.text}`}
+        aria-hidden
+      >
+        {tone.icon}
+      </span>
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className={`text-sm font-semibold ${tone.text}`}>{coach.headline}</p>
+          <span className="inline-flex items-center gap-1 rounded-full bg-white/70 px-2 py-0.5 text-[10px] font-medium text-gray-600">
+            🔊 coaching the patient now
+          </span>
+        </div>
+        <p className="mt-1 text-xs text-gray-700">{coach.ui}</p>
+        <p className="mt-1.5 text-xs italic text-gray-500">“{coach.line}”</p>
       </div>
     </div>
   );

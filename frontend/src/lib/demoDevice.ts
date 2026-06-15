@@ -378,6 +378,10 @@ export function demoFetchIntakeState(): IntakeState {
         : {},
     labels_required: ["bottle", "cup", "mug", "drink", "drinking", "pill"],
     labels_satisfied: !fail && elapsedS > 9,
+    // Motor sequence counts as complete once the final FSM step is reached. In
+    // the "fail" (faking) scenario this is true while labels stay unsatisfied —
+    // the channel-dissociation pattern that drives the live anti-faking coach.
+    mediapipe_complete: stepIdx >= STEPS.length - 1,
     labels_inflight: Math.floor(elapsedS) % 2 === 0,
     labels_last_call_at: startedAt + Math.floor(elapsedS),
   };
