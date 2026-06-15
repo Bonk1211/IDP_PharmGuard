@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  fetchPatients, fetchLogs, createPatient,
+  fetchPatients, fetchLogs, createPatient, deletePatient,
   type Patient, type CreatePatientInput,
 } from "@/lib/api";
 
@@ -54,6 +54,7 @@ export default function PatientsPage() {
   const [allergyInput, setAllergyInput] = useState("");
   const [contraInput, setContraInput] = useState("");
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   async function loadPatients() {
     const [allPatients, allLogs] = await Promise.all([
@@ -81,6 +82,31 @@ export default function PatientsPage() {
   useEffect(() => {
     loadPatients().catch(() => setLoading(false));
   }, []);
+
+  async function handleDelete(id: number, name: string) {
+    if (
+      !window.confirm(
+        `Delete ${name}? This removes the patient and cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    setDeletingId(id);
+    // Optimistic removal; rollback by reloading on failure.
+    setPatients((prev) => prev.filter((p) => p.id !== id));
+    try {
+      await deletePatient(id);
+    } catch (e) {
+      alert(
+        `Could not delete ${name}: ${
+          e instanceof Error ? e.message : "unknown error"
+        }`,
+      );
+      await loadPatients();
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -222,12 +248,24 @@ export default function PatientsPage() {
                     </span>
                   </td>
                   <td className="px-3 py-4">
-                    <button className="rounded-lg p-1 text-gray-300 transition-colors hover:bg-sand-100 hover:text-gray-500">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <circle cx="12" cy="12" r="1" />
-                        <circle cx="12" cy="5" r="1" />
-                        <circle cx="12" cy="19" r="1" />
-                      </svg>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(patient.id, patient.name)}
+                      disabled={deletingId === patient.id}
+                      aria-label={`Delete ${patient.name}`}
+                      title={`Delete ${patient.name}`}
+                      className="rounded-lg p-1.5 text-gray-300 transition-colors hover:bg-status-danger-bg hover:text-status-danger disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      {deletingId === patient.id ? (
+                        <span className="inline-block animate-spin text-[13px]">◐</span>
+                      ) : (
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M3 6h18" />
+                          <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+                          <path d="M10 11v6M14 11v6" />
+                        </svg>
+                      )}
                     </button>
                   </td>
                 </tr>

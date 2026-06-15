@@ -102,6 +102,11 @@ export async function updatePatient(id: number, patch: PatientPatch): Promise<Pa
   return data;
 }
 
+export async function deletePatient(id: number): Promise<void> {
+  const { error } = await supabase.from("patients").delete().eq("id", id);
+  if (error) throw error;
+}
+
 /**
  * Upload a reference photo for the patient face-verify (Layer-1) gate.
  *

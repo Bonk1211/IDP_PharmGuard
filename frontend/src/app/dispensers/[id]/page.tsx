@@ -62,6 +62,7 @@ import {
   signalsFromLive,
 } from "@/lib/intakeConfidence";
 import ConfidenceGauge from "@/components/ConfidenceGauge";
+import IntakeReasoningStream from "@/components/IntakeReasoningStream";
 import FsmJourney from "@/components/FsmJourney";
 import VerdictStamp from "@/components/VerdictStamp";
 
@@ -978,52 +979,54 @@ export default function DispenserGuidedPage() {
                     : "Confirm patient identity at the cabinet."
                 }
               />
-              <div className="mb-3 flex flex-wrap items-center gap-2 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
-                <label
-                  htmlFor="patient-picker"
-                  className="text-[10px] font-medium uppercase tracking-wider text-gray-400"
-                >
-                  Patient
-                </label>
-                <select
-                  id="patient-picker"
-                  value={selectedPatientId ?? ""}
-                  onChange={(e) =>
-                    setSelectedPatientId(
-                      e.target.value === "" ? null : Number(e.target.value),
-                    )
-                  }
-                  className="rounded-full border border-sand-200 bg-sand-50 px-3 py-1.5 text-xs font-medium text-gray-800"
-                >
-                  <option value="">Auto · next due</option>
-                  {selectablePatients.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-                {selectedPatientId != null && (
-                  <button
-                    type="button"
-                    onClick={() => setSelectedPatientId(null)}
-                    className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-sand-50"
-                  >
-                    Reset to auto
-                  </button>
-                )}
-                <span className="ml-auto text-[10px] text-gray-400">
-                  {selectedPatientId != null
-                    ? "Manual override"
-                    : "Auto-selecting the next-due patient"}
-                </span>
-              </div>
-              <PatientBanner
-                patient={activePatient}
-                status={status}
-                nextRound={nextRound}
-                clock={fmtClock(now)}
-              />
-              <div className="mt-4">
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-[5fr_7fr] lg:items-start">
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-sand-200 bg-white px-4 py-2.5">
+                    <label
+                      htmlFor="patient-picker"
+                      className="text-[10px] font-medium uppercase tracking-wider text-gray-400"
+                    >
+                      Patient
+                    </label>
+                    <select
+                      id="patient-picker"
+                      value={selectedPatientId ?? ""}
+                      onChange={(e) =>
+                        setSelectedPatientId(
+                          e.target.value === "" ? null : Number(e.target.value),
+                        )
+                      }
+                      className="rounded-full border border-sand-200 bg-sand-50 px-3 py-1.5 text-xs font-medium text-gray-800"
+                    >
+                      <option value="">Auto · next due</option>
+                      {selectablePatients.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedPatientId != null && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedPatientId(null)}
+                        className="rounded-full border border-sand-200 bg-white px-3 py-1.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-sand-50"
+                      >
+                        Reset to auto
+                      </button>
+                    )}
+                    <span className="ml-auto text-[10px] text-gray-400">
+                      {selectedPatientId != null
+                        ? "Manual override"
+                        : "Auto-selecting the next-due patient"}
+                    </span>
+                  </div>
+                  <PatientBanner
+                    patient={activePatient}
+                    status={status}
+                    nextRound={nextRound}
+                    clock={fmtClock(now)}
+                  />
+                </div>
                 <FaceVerifySection
                   patient={activePatient}
                   cam1Url={cam1Src}
@@ -1097,7 +1100,7 @@ export default function DispenserGuidedPage() {
                 onEject={onEject}
               />
 
-              <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[7fr_3fr]">
+              <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-[3fr_2fr] xl:items-start">
                 <SlotGrid
                   slots={activeSlots}
                   ejectedSlot={ejectedSlot}
@@ -1105,34 +1108,34 @@ export default function DispenserGuidedPage() {
                   configured={configured}
                   onEject={onEject}
                 />
-                <CameraTile
-                  label="Cam 0 · Tray"
-                  url={cam0Src}
-                  clock={fmtClock(now)}
-                  footer={cam0Footer}
-                />
-              </div>
-
-              {(verifying || verifyResult) && (
-                <div className="mt-4 space-y-3">
-                  {verifyResult && unauthorized.length > 0 && (
-                    <UnsafePillAlert
-                      unauthorized={unauthorized}
-                      authorized={authorized}
-                      expected={currentSlot?.name ?? null}
-                    />
-                  )}
-                  <VerifyResultCard
-                    result={verifyResult}
-                    verifying={verifying}
-                    expected={currentSlot?.name ?? null}
-                    authorized={authorized}
+                <div className="space-y-4">
+                  <CameraTile
+                    label="Cam 0 · Tray"
+                    url={cam0Src}
+                    clock={fmtClock(now)}
+                    footer={cam0Footer}
                   />
-                </div>
-              )}
 
-              {verifyResult && !verifying && verifyResult.top && (
-                <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                  {(verifying || verifyResult) && (
+                    <div className="space-y-3">
+                      {verifyResult && unauthorized.length > 0 && (
+                        <UnsafePillAlert
+                          unauthorized={unauthorized}
+                          authorized={authorized}
+                          expected={currentSlot?.name ?? null}
+                        />
+                      )}
+                      <VerifyResultCard
+                        result={verifyResult}
+                        verifying={verifying}
+                        expected={currentSlot?.name ?? null}
+                        authorized={authorized}
+                      />
+                    </div>
+                  )}
+
+                  {verifyResult && !verifying && verifyResult.top && (
+                    <div className="flex flex-wrap items-center justify-end gap-2">
                   {mixedTray ? (
                     <>
                       <span className="mr-auto text-xs font-medium text-gray-700">
@@ -1205,8 +1208,10 @@ export default function DispenserGuidedPage() {
                       </span>
                     </button>
                   )}
+                    </div>
+                  )}
                 </div>
-              )}
+              </div>
             </>
           )}
           {viewIdx === 2 && (
@@ -1224,7 +1229,7 @@ export default function DispenserGuidedPage() {
                 result={verifyResult}
                 expected={currentSlot?.name ?? null}
               />
-              <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-[3fr_4fr]">
+              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2 xl:grid-cols-3 xl:items-start">
                 <div className="space-y-4">
                   <AIIntakeCheck intake={intake} patient={activePatient} />
                   <Layer2LabelPanel intake={intake} now={now} />
@@ -1235,6 +1240,7 @@ export default function DispenserGuidedPage() {
                   clock={fmtClock(now)}
                   footer={cam1Footer}
                 />
+                <IntakeReasoningStream intake={intake} />
               </div>
             </>
           )}
@@ -1251,7 +1257,7 @@ export default function DispenserGuidedPage() {
                 }
               />
               <ConfirmHeader patient={activePatient} slot={currentSlot} />
-              <div className="mt-4">
+              <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-[7fr_5fr] lg:items-start">
                 <IntakeReportCard
                   patient={activePatient}
                   slot={currentSlot}
@@ -1261,8 +1267,6 @@ export default function DispenserGuidedPage() {
                   mixedTray={mixedTray}
                   overrideNote={overrideOpen ? overrideNote : ""}
                 />
-              </div>
-              <div className="mt-4">
                 <ActionBar
                   intake={intake}
                   currentSlot={currentSlot}
