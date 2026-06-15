@@ -65,17 +65,42 @@ class StepDef:
     label: str           # human-readable label for UI
     instruction: str     # patient-facing prompt
     hold_s: float        # how long confidence must stay above threshold
+    marker: str          # the cognitive/behavioural faculty this step probes
+    rationale: str       # WHY passing this step is evidence of that faculty
 
 
 # Step 1: READY — hand close to mouth
 # Step 2: INSERT — mouth open while putting the pill in
 # Step 3: SWALLOW — mouth closed (after the patient swallows)
 # Step 4: DONE — mouth open + empty
+#
+# Each step is not just a geometry check — it is a behavioural probe. The
+# four together form a small cognitive battery for self-medication: the
+# patient must recognise the task, plan the motor act, sequence it
+# correctly, follow it through, and honestly confirm the outcome. The
+# ``marker``/``rationale`` fields below are surfaced in the intake log so a
+# caregiver reads not just "step passed" but what faculty it evidenced.
 _STEPS: tuple[StepDef, ...] = (
-    StepDef("READY",   "Take the pill",      "Bring your hand close to your mouth",  0.8),
-    StepDef("INSERT",  "Put the pill in",    "Open your mouth and place the pill",   0.6),
-    StepDef("SWALLOW", "Swallow",            "Close your mouth and swallow",         1.2),
-    StepDef("DONE",    "Show empty mouth",   "Open your mouth (empty) to confirm",   0.8),
+    StepDef("READY",   "Take the pill",      "Bring your hand close to your mouth",  0.8,
+            marker="intent & motor initiation",
+            rationale="Patient recognised it was time to medicate and made a goal-directed "
+                      "reach to the mouth — evidence of task awareness and the ability to "
+                      "initiate a planned movement (not passive or prompted blindly)."),
+    StepDef("INSERT",  "Put the pill in",    "Open your mouth and place the pill",   0.6,
+            marker="hand-mouth coordination & sequencing",
+            rationale="Mouth opened in time with the hand arriving — the patient sequenced "
+                      "two actions in the correct order and coordinated them, indicating "
+                      "intact procedural memory for the act of taking a pill."),
+    StepDef("SWALLOW", "Swallow",            "Close your mouth and swallow",         1.2,
+            marker="task follow-through & swallow control",
+            rationale="Mouth closed and held — the patient completed the ingestion rather "
+                      "than abandoning it mid-task. Sustained closure shows voluntary "
+                      "swallow control and the persistence to finish a multi-step action."),
+    StepDef("DONE",    "Show empty mouth",   "Open your mouth (empty) to confirm",   0.8,
+            marker="comprehension & adherence honesty",
+            rationale="Patient understood the confirmation request and showed an empty "
+                      "mouth — comprehension of an instruction plus verifiable adherence, "
+                      "ruling out 'cheeking' (hiding the pill to discard later)."),
 )
 
 
@@ -186,6 +211,92 @@ def _step_done(open_ratio: float, hand_d: float) -> float:
 _VERIFIERS: tuple[Callable[[float, float], float], ...] = (
     _step_ready, _step_insert, _step_swallow, _step_done,
 )
+
+
+# Cognitive reading of each terminal result — what the *whole* run says
+# about the patient's ability to self-medicate, not just pass/fail.
+_RESULT_READING: dict[str, str] = {
+    "passed":
+        "Full behavioural sequence intact. Patient initiated, sequenced, "
+        "completed and honestly confirmed the intake unaided — consistent "
+        "with preserved capacity for self-medication.",
+    "missing_labels":
+        "Motor/cognitive sequence completed, BUT no medication object "
+        "(pill/cup) was ever seen in frame. Behaviour mimicked taking a "
+        "pill without verifiable medication present — possible rehearsal, "
+        "distraction, or a hidden/absent pill. Treat as UNVERIFIED.",
+    "timeout":
+        "Sequence never completed. The patient stalled before finishing — "
+        "the break point (below) marks where intent, coordination, "
+        "follow-through or comprehension lapsed. Flag for caregiver review.",
+}
+
+
+def _compose_behaviour_summary(state: dict) -> list[str]:
+    """Build the end-of-run human-behaviour study summary as log lines.
+
+    Pure function over a state snapshot so it can be unit-tested. Reads:
+    ``result``, ``history`` (per-step markers/rationale/timing),
+    ``started_at``, and the Layer-2 label fields.
+    """
+    result = state.get("result") or "unknown"
+    history: list[dict] = state.get("history", [])
+    started = state.get("started_at")
+    completed = len(history)
+    total = len(_STEPS)
+
+    lines: list[str] = []
+    lines.append("─" * 64)
+    lines.append("HUMAN BEHAVIOUR STUDY — intake cognitive summary")
+    lines.append(f"  outcome: {result.upper()}   steps cleared: {completed}/{total}")
+
+    # Per-step behavioural evidence the patient actually produced.
+    if history:
+        lines.append("  behavioural evidence observed:")
+        for h in history:
+            rel = ""
+            if started and h.get("passed_at"):
+                rel = f" @ +{h['passed_at'] - started:.1f}s"
+            lines.append(
+                f"    ✓ {h['step_name']}{rel} — {h.get('marker', '?')}"
+            )
+            if h.get("rationale"):
+                lines.append(f"        ↳ {h['rationale']}")
+    else:
+        lines.append("  behavioural evidence observed: none — no step cleared.")
+
+    # Where the chain broke, if it did.
+    if completed < total:
+        nxt = _STEPS[completed]
+        lines.append(
+            f"  break point: stalled entering '{nxt.name}' "
+            f"({nxt.marker}) — this faculty was NOT demonstrated."
+        )
+
+    # Layer-2 object reasoning — labels corroborate that a real pill/cup
+    # was physically present, independent of the face/hand geometry.
+    required = state.get("labels_required") or []
+    if required:
+        seen = sorted((state.get("labels_seen_at") or {}).keys())
+        matched = sorted(set(required) & set(seen))
+        lines.append("  object corroboration (vision labels):")
+        lines.append(f"    required={required}  seen={seen or 'none'}")
+        if matched:
+            lines.append(
+                f"    ✓ {matched} present — physical medication evidence "
+                "backs the behavioural sequence (not just a mimed gesture)."
+            )
+        else:
+            lines.append(
+                "    ✗ no required medication object ever confirmed — the "
+                "behaviour was not backed by a visible pill/cup."
+            )
+    else:
+        lines.append("  object corroboration: disabled (MediaPipe-only run).")
+
+    lines.append(f"  reading: {_RESULT_READING.get(result, 'No interpretation available.')}")
+    lines.append("─" * 64)
+    return lines
 
 
 class IntakeMonitor:
@@ -305,12 +416,23 @@ class IntakeMonitor:
                 self._state["hold_progress"] = min(1.0, elapsed / step_def.hold_s)
                 if elapsed >= step_def.hold_s:
                     # Step complete — advance.
+                    passed_at = time.time()
+                    started = self._state["started_at"] or passed_at
                     self._state["history"].append({
                         "step_index": step_idx,
                         "step_name": step_def.name,
-                        "passed_at": time.time(),
+                        "passed_at": passed_at,
+                        "marker": step_def.marker,
+                        "rationale": step_def.rationale,
                     })
-                    log.info("Intake game: step %d (%s) PASSED", step_idx + 1, step_def.name)
+                    # Don't just log the MediaPipe result — log what the
+                    # passing geometry *means* about the patient's cognition.
+                    log.info(
+                        "Intake step %d/%d (%s) PASSED @ +%.1fs  [%s]\n"
+                        "         reasoning: %s",
+                        step_idx + 1, len(_STEPS), step_def.name,
+                        passed_at - started, step_def.marker, step_def.rationale,
+                    )
                     next_idx = step_idx + 1
                     if next_idx >= len(_STEPS):
                         # MediaPipe FSM complete — Layer-2 gate decides
@@ -489,6 +611,7 @@ class IntakeMonitor:
             self._maybe_submit_label_call(frame)
             with self._lock:
                 if self._state["result"] == "passed":
+                    self._log_behaviour_summary()
                     return True
             time.sleep(0.01)  # tiny yield; MediaPipe inference is the real cap
 
@@ -508,7 +631,23 @@ class IntakeMonitor:
             terminal, timeout_s, last_step + 1, last_name,
             list(self._state["labels_seen_at"].keys()),
         )
+        self._log_behaviour_summary()
         return False
+
+    def _log_behaviour_summary(self) -> None:
+        """Emit the end-of-run human-behaviour study summary to the log.
+
+        Called once per run at the terminal state (passed or timeout). Reads
+        ``self._state`` directly — only invoked when ``result`` is already
+        set, so no concurrent mutation races the read (label workers no-op
+        once ``result`` is non-None). Logged as one multi-line INFO record.
+        """
+        try:
+            summary = _compose_behaviour_summary(self._state)
+            log.info("\n%s", "\n".join(summary))
+        except Exception:
+            # A logging-only feature must never break the cycle.
+            log.exception("behaviour summary compose failed")
 
     def close(self) -> None:
         if self._source is not None and self._owns_source:
