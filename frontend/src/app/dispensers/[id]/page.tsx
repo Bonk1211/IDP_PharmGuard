@@ -776,7 +776,8 @@ export default function DispenserGuidedPage() {
       setMsg(`Slot ${slot} ejected (${r.latency_ms} ms). Verifying…`);
       // Kick off pill verification in the background so the eject
       // handler returns immediately. YOLO inference takes ~150-200 ms
-      // on the Pi; give the pill a moment to settle on the tray first.
+      // on the Pi; wait 5 s after the eject so the pill has fully
+      // dropped and settled on the tray before we capture the snapshot.
       // Look up within the ACTIVE patient's slots — slot numbers repeat
       // across patients (UNIQUE(patient_id, slot)), so a bare slot match
       // against all rows can pick another patient's medication.
@@ -802,7 +803,7 @@ export default function DispenserGuidedPage() {
             }
           })
           .finally(() => setVerifying(false));
-      }, 600);
+      }, 5000);
     } else {
       setMsg(`Eject failed: ${r.error ?? r.status}`);
     }
