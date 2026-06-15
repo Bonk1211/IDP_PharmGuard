@@ -142,6 +142,42 @@ class CycleState:
                 log.warning(
                     "STUB MODE: camera unavailable — vision verifies will be skipped"
                 )
+        elif settings.dev_camera_enabled and settings.dev_camera_index_b >= 0:
+            # Two distinct webcams: index -> cam_a (tray/YOLO, BGR),
+            # index_b -> cam_b (intake/face, RGB). Mirrors the Pi's dual-cam
+            # layout with two real Mac webcams.
+            try:
+                # Each webcam gets its own multi_consumer producer thread so
+                # YOLO/FSM reads AND the dashboard MJPEG stream + snapshot
+                # (latest_frame_jpeg) can pull concurrently. Plain open_camera
+                # (single-reader) leaves latest_frame_jpeg empty -> dead stream.
+                self.cam_a = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index,
+                        output_format="bgr",     # tray/YOLO
+                        multi_consumer=True,
+                    )
+                )
+                self.cam_b = await asyncio.to_thread(
+                    lambda: Cv2Source(
+                        settings.dev_camera_index_b,
+                        output_format="rgb",     # intake/MediaPipe
+                        multi_consumer=True,
+                    )
+                )
+                log.warning(
+                    "DEV CAMERA (dual): cam_a=index %d (tray/YOLO), "
+                    "cam_b=index %d (intake/MediaPipe).",
+                    settings.dev_camera_index,
+                    settings.dev_camera_index_b,
+                )
+            except Exception:
+                log.exception(
+                    "DEV CAMERA (dual): failed to open webcams index=%d / %d — "
+                    "intake FSM, tray verify, and live streams will be unavailable.",
+                    settings.dev_camera_index,
+                    settings.dev_camera_index_b,
+                )
         elif settings.dev_camera_enabled:
             try:
                 # One webcam, two consumers. multi_consumer=True: a producer

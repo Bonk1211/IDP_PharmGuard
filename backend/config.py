@@ -60,7 +60,11 @@ class Settings(BaseSettings):
     # dashboard live stream + swallow FSM work without Pi hardware. The
     # tray camera (cam_a / YOLO) stays unavailable — a Mac has one camera.
     dev_camera_enabled: bool = False
-    dev_camera_index: int = 0                        # macOS built-in FaceTime cam = 0
+    dev_camera_index: int = 0                        # cam_a (tray/YOLO). macOS built-in FaceTime cam = 0
+    # Second physical webcam for cam_b (intake/face/MediaPipe). -1 = share the
+    # single dev_camera_index cam for BOTH logical cameras (legacy behavior).
+    # Set >=0 (e.g. 1) to open a distinct webcam so tray and intake are separate.
+    dev_camera_index_b: int = -1
     # 1 = cycle loop stays idle until /api/device/dispense_now (or another
     # manual-trigger endpoint) fires. 0 = auto-polls medications every
     # poll_interval_s. Default ON so a freshly-started Pi doesn't drain

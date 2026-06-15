@@ -159,10 +159,45 @@ export async function demoManualEject(slot: number): Promise<EjectResult> {
 export async function demoVerifyPill(expected?: string): Promise<VerifyPillResult> {
   await sleep(700);
   const fail = scenario === "fail";
-  const className = fail ? "Panadol_tablet" : expected ?? "Lomide_capsule";
+
+  if (fail) {
+    // Mixed tray: the correct pill IS present, but an unauthorized one was
+    // dispensed alongside it. top = the wrong pill (highest confidence), with
+    // the correct pill also in detections so the UI can say "take this / remove
+    // this" instead of scrapping the round.
+    const wrong: PillDetection = {
+      class_name: "Lomide_capsule",
+      confidence: 0.92,
+      bbox: [180, 140, 460, 360],
+    };
+    const correct: PillDetection = {
+      class_name: expected ?? "Chloramine",
+      confidence: 0.88,
+      bbox: [150, 380, 320, 520],
+    };
+    return {
+      ok: true,
+      status: 200,
+      expected: expected ?? null,
+      top: wrong,
+      match: expected ? false : null,
+      detections: [wrong, correct],
+      snapshot_b64: synthFrame(
+        [
+          "TRAY CAM",
+          `take: ${correct.class_name}`,
+          `remove: ${wrong.class_name}`,
+        ],
+        { box: true, tone: "fail" },
+      ),
+      latency_ms: 693,
+    };
+  }
+
+  const className = expected ?? "Lomide_capsule";
   const top: PillDetection = {
     class_name: className,
-    confidence: fail ? 0.91 : 0.93,
+    confidence: 0.93,
     bbox: [180, 140, 460, 360],
   };
   return {
@@ -170,11 +205,11 @@ export async function demoVerifyPill(expected?: string): Promise<VerifyPillResul
     status: 200,
     expected: expected ?? null,
     top,
-    match: expected ? !fail : null,
+    match: expected ? true : null,
     detections: [top],
     snapshot_b64: synthFrame(
       ["TRAY CAM", `detected: ${className}`, expected ? `expected: ${expected}` : ""],
-      { box: true, tone: fail ? "fail" : "ok" },
+      { box: true, tone: "ok" },
     ),
     latency_ms: 693,
   };
