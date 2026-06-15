@@ -316,6 +316,9 @@ export function demoFetchIntakeState(): IntakeState {
       updated_at: now / 1000,
       labels_seen: fail ? [] : ["cup"],
       labels_seen_at: fail ? {} : { cup: startedAt + 9 },
+      labels_evidence: fail
+        ? {}
+        : { cup: synthFrame(["PATIENT CAM", "cup detected"], { box: true, tone: "ok" }) },
       labels_required: ["bottle", "cup", "mug", "drink", "drinking", "pill"],
       labels_satisfied: !fail,
       mediapipe_complete: true,
@@ -346,6 +349,10 @@ export function demoFetchIntakeState(): IntakeState {
     updated_at: now / 1000,
     labels_seen: !fail && elapsedS > 9 ? ["cup"] : [],
     labels_seen_at: !fail && elapsedS > 9 ? { cup: startedAt + 9 } : {},
+    labels_evidence:
+      !fail && elapsedS > 9
+        ? { cup: synthFrame(["PATIENT CAM", "cup detected"], { box: true, tone: "ok" }) }
+        : {},
     labels_required: ["bottle", "cup", "mug", "drink", "drinking", "pill"],
     labels_satisfied: !fail && elapsedS > 9,
     labels_inflight: Math.floor(elapsedS) % 2 === 0,

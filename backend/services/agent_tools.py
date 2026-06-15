@@ -481,6 +481,130 @@ def patient_overview(**kwargs: Any) -> dict:
     }
 
 
+# ──────────────────────────── tool: intake_evidence ─────────────────────────
+
+class IntakeEvidenceArgs(BaseModel):
+    model_config = {"extra": "forbid"}
+    patient_id: int | None = Field(default=None, description="Numeric id, if known.")
+    name: str | None = Field(
+        default=None, description="Full or partial patient name (case-insensitive)."
+    )
+    days: int = Field(
+        default=7, ge=1, le=90,
+        description="Look-back window in days (default 7).",
+    )
+
+
+def intake_evidence(**kwargs: Any) -> dict:
+    """Analysis pipeline over a patient's RECENT intake evidence.
+
+    Resolves the patient, pulls their adherence logs in the look-back window,
+    and rolls them into performance metrics the assistant can quote:
+    taken/missed counts, adherence %, average intake-confidence (the composite
+    swallow + object + gaze score stored per event), low-confidence count,
+    current missed streak, and a per-event evidence list. This is the tool to
+    use for "how is <patient> doing on taking their pills lately".
+    """
+    args = IntakeEvidenceArgs(**kwargs)
+    if args.patient_id is None and not (args.name or "").strip():
+        raise ValueError("provide patient_id or name")
+    sb = get_supabase()
+
+    pq = sb.table("patients").select("id, name, condition, status")
+    if args.patient_id is not None:
+        pq = pq.eq("id", args.patient_id)
+    else:
+        needle = _ilike_escape(args.name)
+        if not needle:
+            return {"error": "no patient matched"}
+        pq = pq.ilike("name", f"%{needle}%")
+    candidates = pq.execute().data or []
+    if not candidates:
+        return {"error": "no patient matched"}
+    if len(candidates) > 1:
+        return {
+            "ambiguous": [
+                {"id": c["id"], "name": c["name"]} for c in candidates[:8]
+            ],
+            "ambiguous_count": len(candidates),
+        }
+    patient = candidates[0]
+    pid = patient["id"]
+
+    since = datetime.now(timezone.utc) - timedelta(days=args.days)
+    since_iso = since.isoformat()
+    logs = (
+        sb.table("adherence_logs")
+        .select("id, slot, pill_taken, timestamp, confidence_score")
+        .eq("patient_id", pid)
+        .gte("timestamp", since_iso)
+        .order("timestamp", desc=True)
+        .limit(200)
+        .execute()
+        .data
+        or []
+    )
+
+    # slot -> medication name
+    meds = (
+        sb.table("medications")
+        .select("slot, name")
+        .eq("patient_id", pid)
+        .execute()
+        .data
+        or []
+    )
+    slot_name = {m["slot"]: m.get("name") for m in meds}
+
+    n_total = len(logs)
+    taken = [r for r in logs if r.get("pill_taken")]
+    missed = [r for r in logs if not r.get("pill_taken")]
+    confs = [
+        float(r["confidence_score"])
+        for r in taken
+        if r.get("confidence_score") is not None
+    ]
+    avg_conf = round(sum(confs) / len(confs), 4) if confs else None
+    low_conf = sum(1 for c in confs if c < 0.65)
+    high_conf = sum(1 for c in confs if c >= 0.85)
+
+    # current missed streak: logs are newest-first.
+    streak = 0
+    for r in logs:
+        if r.get("pill_taken"):
+            break
+        streak += 1
+
+    events = [
+        {
+            "timestamp": r.get("timestamp"),
+            "slot": r.get("slot"),
+            "medication": slot_name.get(r.get("slot")),
+            "pill_taken": r.get("pill_taken"),
+            "intake_confidence": r.get("confidence_score"),
+        }
+        for r in logs[:20]
+    ]
+
+    return {
+        "patient_name": patient["name"],
+        "patient_id": pid,
+        "condition": patient.get("condition"),
+        "window_days": args.days,
+        "n_events": n_total,
+        "n_taken": len(taken),
+        "n_missed": len(missed),
+        "adherence_pct": round(100.0 * len(taken) / n_total, 1) if n_total else None,
+        "avg_intake_confidence": avg_conf,
+        "low_confidence_events": low_conf,
+        "high_confidence_events": high_conf,
+        "current_missed_streak": streak,
+        "last_event_at": logs[0]["timestamp"] if logs else None,
+        "last_taken_at": taken[0]["timestamp"] if taken else None,
+        "events": events,
+    }
+
+
 # ──────────────────────────── tool: query_schedules ─────────────────────────
 
 class QuerySchedulesArgs(BaseModel):
@@ -644,6 +768,20 @@ TOOLS: list[ToolDef] = [
         ),
         args_schema=QuerySchedulesArgs,
         fn=query_schedules,
+    ),
+    ToolDef(
+        name="intake_evidence",
+        description=(
+            "Analysis pipeline over ONE patient's recent intake evidence "
+            "(accepts patient_id or name + days window). Returns taken/missed "
+            "counts, adherence_pct, avg_intake_confidence (composite swallow + "
+            "object + gaze score), low/high-confidence event counts, current "
+            "missed streak, and a per-event evidence list. Use FIRST for "
+            "'how is <patient> doing on taking their pills' / recent intake "
+            "performance questions."
+        ),
+        args_schema=IntakeEvidenceArgs,
+        fn=intake_evidence,
     ),
 ]
 

@@ -741,6 +741,7 @@ async def intake_state(request: Request):
             # Layer-2 (DetectLabels) fields — empty/false in headless mode.
             "labels_seen": [],
             "labels_seen_at": {},
+            "labels_evidence": {},
             "labels_required": [],
             "labels_satisfied": False,
             "mediapipe_complete": False,

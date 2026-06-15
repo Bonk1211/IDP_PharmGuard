@@ -10,6 +10,13 @@ import {
 } from "@/lib/api";
 import { isDeviceConfigured, triggerDispense } from "@/lib/device";
 import { useSlotDnd } from "@/lib/useSlotDnd";
+import {
+  compositeConfidence,
+  signalsFromRecord,
+} from "@/lib/intakeConfidence";
+import ConfidenceTrendChart, {
+  type TrendPoint,
+} from "@/components/ConfidenceTrendChart";
 
 function statusStyle(s: string) {
   switch (s) {
@@ -179,6 +186,22 @@ export default function PatientDetailPage() {
   const totalLogs = logs.length;
   const takenLogs = logs.filter((l) => l.pill_taken).length;
   const adherence = totalLogs > 0 ? Math.round((takenLogs / totalLogs) * 100) : 100;
+
+  // Composite intake confidence per record → trend chart (oldest → newest).
+  const confOf = (l: IntakeRecord) =>
+    l.confidence_score ?? compositeConfidence(signalsFromRecord(l));
+  const takenConf = logs.filter((l) => l.pill_taken);
+  const avgConfidence =
+    takenConf.length > 0
+      ? Math.round(
+          (takenConf.reduce((acc, l) => acc + confOf(l), 0) / takenConf.length) *
+            100,
+        )
+      : null;
+  const confidenceTrend: TrendPoint[] = [...logs]
+    .slice(0, 20)
+    .reverse()
+    .map((l) => ({ t: l.timestamp, value: confOf(l), taken: l.pill_taken }));
 
   // Build 10-slot display
   const displaySlots: (SlotInfo | null)[] = Array.from({ length: 10 }, (_, i) =>
@@ -552,7 +575,25 @@ export default function PatientDetailPage() {
                 <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
               </svg>
               <h2 className="text-base font-semibold text-gray-900">Intake History</h2>
+              {avgConfidence != null && (
+                <span className="ml-auto text-xs text-gray-400">
+                  avg confidence{" "}
+                  <span className="font-semibold text-olive-700">
+                    {avgConfidence}%
+                  </span>
+                </span>
+              )}
             </div>
+
+            {/* Intake confidence trend */}
+            {confidenceTrend.length > 0 && (
+              <div className="mb-4 rounded-xl border border-sand-200 bg-sand-50/40 p-3">
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-gray-400">
+                  Intake confidence over time
+                </p>
+                <ConfidenceTrendChart points={confidenceTrend} />
+              </div>
+            )}
 
             {logs.length === 0 ? (
               <p className="py-8 text-center text-sm text-gray-400">No records yet</p>

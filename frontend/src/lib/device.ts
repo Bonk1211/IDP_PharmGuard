@@ -70,6 +70,9 @@ export type IntakeState = {
   // Empty arrays / false flags when label layer is disabled server-side.
   labels_seen: string[];                  // ordered unique label names
   labels_seen_at: Record<string, number>; // {label_lower: epoch_seconds}
+  // {label_lower: base64 JPEG thumbnail} — proof frame captured when a
+  // REQUIRED gate label was first seen. Only required labels carry one.
+  labels_evidence?: Record<string, string>;
   labels_required: string[];              // snapshot of required set (lower)
   labels_satisfied: boolean;              // any seen ∈ required?
   mediapipe_complete: boolean;            // all 3 FSM steps done

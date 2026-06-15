@@ -56,6 +56,10 @@ import {
   type SlotInfo,
 } from "@/lib/api";
 import { KEYS, useSlots } from "@/lib/swr";
+import {
+  compositeConfidence,
+  signalsFromLive,
+} from "@/lib/intakeConfidence";
 import ConfidenceGauge from "@/components/ConfidenceGauge";
 import FsmJourney from "@/components/FsmJourney";
 import VerdictStamp from "@/components/VerdictStamp";
@@ -861,12 +865,18 @@ export default function DispenserGuidedPage() {
     }
     return withBusy(pillTaken ? "confirm" : "override", async () => {
       try {
+        // Composite intake confidence: blends the swallow FSM, Rekognition
+        // object evidence, and the (PoC) gaze signal — not just the raw FSM
+        // number. This is the score the no-human-in-loop verdict rests on.
+        const composite = pillTaken
+          ? compositeConfidence(signalsFromLive(intake))
+          : null;
         await createIntakeLog({
           patient_id: activePatient.id,
           slot: currentSlot.slot,
           pill_taken: pillTaken,
           dispenser_id: currentSlot.dispenser_id ?? dispenserId,
-          confidence_score: pillTaken ? intake?.confidence ?? null : null,
+          confidence_score: composite,
         });
         setConfirmedSlots((prev) => {
           const next = new Set(prev);
@@ -3036,9 +3046,13 @@ function Layer2LabelPanel({
 }) {
   const required = intake?.labels_required ?? [];
   const seenAt = intake?.labels_seen_at ?? {};
+  const evidence = intake?.labels_evidence ?? {};
   const satisfied = intake?.labels_satisfied ?? false;
   const disabled = required.length === 0;
   const nowMs = now.getTime();
+
+  // Click a proof thumbnail to enlarge the captured frame.
+  const [zoom, setZoom] = useState<{ label: string; src: string } | null>(null);
 
   // Layer disabled server-side → one quiet line so the operator can still
   // tell the confirmation rests on MediaPipe alone. The env-var setup hint
@@ -3092,6 +3106,7 @@ function Layer2LabelPanel({
           const tsMs = seenAt[label] ? seenAt[label] * 1000 : null;
           const ageS = tsMs != null ? Math.max(0, (nowMs - tsMs) / 1000) : null;
           const ok = tsMs != null;
+          const proof = evidence[label];
           return (
             <div
               key={label}
@@ -3107,6 +3122,35 @@ function Layer2LabelPanel({
               >
                 {ok ? "✓" : "·"}
               </span>
+              {/* Proof thumbnail — the frame Rekognition saw this label in.
+                  Click to enlarge. Only required gate labels carry one. */}
+              {proof ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setZoom({
+                      label,
+                      src: `data:image/jpeg;base64,${proof}`,
+                    })
+                  }
+                  className="shrink-0 overflow-hidden rounded-md border border-status-success/50 transition-transform hover:scale-105"
+                  title={`Proof: ${label} seen on camera — click to enlarge`}
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={`data:image/jpeg;base64,${proof}`}
+                    alt={`${label} detected frame`}
+                    className="h-8 w-12 object-cover"
+                  />
+                </button>
+              ) : (
+                <span
+                  className="flex h-8 w-12 shrink-0 items-center justify-center rounded-md border border-dashed border-sand-300 text-[9px] text-gray-300"
+                  aria-hidden
+                >
+                  no frame
+                </span>
+              )}
               <span className="flex-1 capitalize text-gray-700">{label}</span>
               <span className="font-mono text-[11px] text-gray-500">
                 {ageS == null
@@ -3119,6 +3163,44 @@ function Layer2LabelPanel({
           );
         })}
       </div>
+
+      {/* Enlarged proof frame */}
+      {zoom && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Proof frame for ${zoom.label}`}
+          onClick={() => setZoom(null)}
+        >
+          <div
+            className="max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-sand-200 px-4 py-2">
+              <p className="text-xs font-semibold capitalize text-gray-900">
+                {zoom.label}{" "}
+                <span className="font-normal text-gray-500">
+                  · detected on camera
+                </span>
+              </p>
+              <button
+                type="button"
+                onClick={() => setZoom(null)}
+                className="rounded-full px-2 py-0.5 text-xs text-gray-500 hover:bg-sand-100"
+              >
+                ✕
+              </button>
+            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={zoom.src}
+              alt={`${zoom.label} detected frame, enlarged`}
+              className="max-h-[70vh] w-full object-contain bg-black"
+            />
+          </div>
+        </div>
+      )}
 
       <div className="mt-3 flex flex-wrap gap-2 text-[10px] text-gray-400">
         <span className="rounded-full bg-sand-100 px-2 py-0.5 font-mono">
