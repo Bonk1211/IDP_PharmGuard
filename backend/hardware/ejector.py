@@ -89,6 +89,13 @@ US_MIN, US_MAX = 1000.0, 2000.0
 MOVE_S_MIN, MOVE_S_MAX = 0.1, 30.0
 PAUSE_S_MIN, PAUSE_S_MAX = 0.0, 10.0
 
+# Number of full revolutions the forward (eject) stroke drives per
+# dispense. move_s is calibrated to ~one revolution at full drive, so a
+# dispense of N turns just holds the forward pulse for N * move_s (and the
+# return-home stroke for N * rev_move_s, so the pusher still re-seats at
+# home and is never left extended to foul the next magazine rotation).
+DISPENSE_TURNS = 2
+
 # Read once at import — flips fail-loud vs. degraded stub behavior.
 STUB_ALLOWED: bool = os.environ.get("PHARMGUARD_STUB", "0") == "1"
 
@@ -222,8 +229,12 @@ class Ejector:
         self.pwm.ChangeDutyCycle(_us_to_duty(pulse_us))
         time.sleep(hold_s)
 
-    def _return_home_locked(self) -> None:
+    def _return_home_locked(self, turns: int = 1) -> None:
         """Drive the reverse stroke that brings the pusher back to home.
+
+        ``turns`` is how many full revolutions to unwind — it must match the
+        number of forward revolutions just driven, so a multi-turn dispense
+        re-seats fully instead of being left extended.
 
         Lock-free internal — the caller MUST already hold ACTUATOR_LOCK.
         Ends with PWM at 0 (no pulses -> servo fully stops, no creep) and a
@@ -231,7 +242,7 @@ class Ejector:
         is still coasting back.
         """
         try:
-            self._drive(self.cal.rev_us, self.cal.rev_move_s)
+            self._drive(self.cal.rev_us, self.cal.rev_move_s * turns)
             self._drive(self.cal.stop_us, self.cal.pause_s)
         finally:
             self.pwm.ChangeDutyCycle(0)
@@ -250,20 +261,23 @@ class Ejector:
             return
 
         log.info(
-            "Ejecting pill (MG996R fwd %.1fs @ %.0fus, then home rev %.1fs @ %.0fus)",
-            self.cal.move_s, self.cal.fwd_us, self.cal.rev_move_s, self.cal.rev_us,
+            "Ejecting pill (MG996R fwd %d x %.1fs @ %.0fus, then home rev %d x %.1fs @ %.0fus)",
+            DISPENSE_TURNS, self.cal.move_s, self.cal.fwd_us,
+            DISPENSE_TURNS, self.cal.rev_move_s, self.cal.rev_us,
         )
         with ACTUATOR_LOCK:
             try:
-                # Forward stroke — extend the pusher to eject the pill.
-                self._drive(self.cal.fwd_us, self.cal.move_s)
+                # Forward stroke — DISPENSE_TURNS full revolutions to extend
+                # the pusher and eject the pill.
+                self._drive(self.cal.fwd_us, self.cal.move_s * DISPENSE_TURNS)
                 self._drive(self.cal.stop_us, self.cal.pause_s)
             finally:
                 # Return-home stroke ALWAYS runs — even if the forward stroke
                 # raised partway — so the pusher returns to its initial
                 # position after every dispense and can never be left
-                # extended to jam the next magazine rotation.
-                self._return_home_locked()
+                # extended to jam the next magazine rotation. Unwinds the same
+                # DISPENSE_TURNS revolutions just driven forward.
+                self._return_home_locked(turns=DISPENSE_TURNS)
 
     def home(self) -> None:
         """Run just the return-home (reverse) stroke.

@@ -3602,7 +3602,7 @@ function AdvancedSheet({
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col justify-end">
+    <div className="fixed inset-0 z-50 flex justify-end">
       {/* Backdrop */}
       <button
         type="button"
@@ -3610,12 +3610,12 @@ function AdvancedSheet({
         onClick={onClose}
         className="absolute inset-0 bg-black/30"
       />
-      {/* Sheet */}
+      {/* Side drawer */}
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Advanced controls"
-        className="animate-sheet-up relative max-h-[80vh] overflow-y-auto rounded-t-3xl bg-white shadow-2xl"
+        className="animate-sheet-right relative ml-auto h-full w-full max-w-md overflow-y-auto rounded-l-3xl bg-white shadow-2xl"
       >
         <div className="sticky top-0 z-10 flex items-center justify-between border-b border-sand-200 bg-white/95 px-6 py-3 backdrop-blur">
           <div>

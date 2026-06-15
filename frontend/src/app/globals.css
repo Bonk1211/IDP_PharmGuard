@@ -144,6 +144,15 @@ body {
   animation: sheet-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* Side drawer slide (Advanced controls sidebar) */
+@keyframes sheet-right {
+  from { transform: translateX(100%); }
+  to   { transform: translateX(0); }
+}
+.animate-sheet-right {
+  animation: sheet-right 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* Verdict stamp pop-in */
 @keyframes verdict-pop {
   0%   { opacity: 0; transform: scale(1.25); }
