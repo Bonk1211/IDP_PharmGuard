@@ -1,8 +1,10 @@
+
 <div align="center">
 
 # 💊 PharmGuard
 <img width="360" height="480" alt="E16DE87F-FC44-498E-A36D-2E00AC1B43E0_4_5005_c" src="https://github.com/user-attachments/assets/3ea4fad3-f739-44a2-aa7e-a2c045ee3dd5" />
 <img width="360" height="480" alt="7C39FD51-146B-4A77-A730-12D9C5C4218D_4_5005_c" src="https://github.com/user-attachments/assets/d39579cd-91ae-4163-8ebe-3c13a8f2f2a8" />
+<img width="1980" height="1162" alt="Screenshot 2026-06-18 at 6 46 01 PM" src="https://github.com/user-attachments/assets/a5456c5e-0f14-45c2-abd2-4b27e4356533" />
 
 **A smart pill dispenser that doesn't just dispense — it verifies the right patient took the right pill, and actually swallowed it.**
 
@@ -288,6 +290,10 @@ Full pin map and wiring photos in [`HARDWARE_WIRING.md`](HARDWARE_WIRING.md); pr
 Run `make benchmark` (opens `ml/notebooks/benchmark_market_comparison.ipynb`) for the full feature matrix, 3-year TCO, market projections, CV accuracy, and workforce-savings model — all sourced from cited CSVs in `ml/notebooks/data/`.
 
 On the compliance side, the design targets **IEC 62304 Class B** (medical device software life-cycle), the **FDA Class II / 510(k)** pathway for automated dispensing systems, and **HIPAA / PDPA / GDPR** PHI handling — Supabase row-level security plus BAA-eligible Rekognition keep the data path defensible.
+<img width="1980" height="1162" alt="Screenshot 2026-06-18 at 6 47 03 PM" src="https://github.com/user-attachments/assets/4ed4d43d-bfe7-4a14-864e-34d0e860780a" />
+<img width="1980" height="1162" alt="Screenshot 2026-06-18 at 6 47 01 PM" src="https://github.com/user-attachments/assets/e2606569-2778-40f0-899b-2c1f8d3aed01" />
+<img width="1980" height="1162" alt="Screenshot 2026-06-18 at 6 46 57 PM" src="https://github.com/user-attachments/assets/cae14cf0-4e35-4ce1-9787-86c493e94bb0" />
+<img width="1980" height="1162" alt="Screenshot 2026-06-18 at 6 46 19 PM" src="https://github.com/user-attachments/assets/30b1e155-627b-4c51-8ab7-8e616ccfeaf1" />
 
 ## Resources
 
